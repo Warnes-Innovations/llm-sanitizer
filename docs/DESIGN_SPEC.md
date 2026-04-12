@@ -86,6 +86,23 @@ The LLM layer serves as a second opinion on medium-confidence pattern matches,
 reducing false positives for content reviewers while preserving the
 deterministic baseline for CI pipelines.
 
+### LLM Self-Protection
+
+Because the scanned content *is* the adversarial payload, the LLM used for
+classification is itself an attack surface. The following mitigations apply:
+
+| Threat | Mitigation |
+|--------|------------|
+| Scanned content hijacks the analysis LLM via prompt injection | **Structured prompt with delimiters** — content is placed in a fenced `<SCAN_CONTENT>` block and the system prompt explicitly instructs the LLM to treat it as opaque data, never as instructions |
+| LLM is tricked into saying "this is safe" | **Escalate-only architecture** — the LLM verdict can add findings or increase severity, but *never* override, suppress, or lower the severity of pattern-based findings |
+| LLM is induced to make tool calls or take actions | **No tools/functions** — the LLM is called in pure completion mode with no tool access, no MCP, no function calling enabled |
+| Content leaks to an external API provider | **Local model support** — supports Ollama and other local inference backends so sensitive content never leaves the machine |
+| LLM output itself contains injected instructions | **Structured output parsing** — LLM response is parsed as a strict JSON schema; anything outside the expected schema is discarded |
+| LLM is overwhelmed by very large payloads | **Content truncation** — input to the LLM is truncated to a configurable maximum (default 8 KB) with a hash of the full content for traceability |
+
+**Design principle:** The pattern engine is the authority; the LLM is an
+advisory second opinion that can only escalate, never clear.
+
 ---
 
 ## Risk Classification
@@ -109,6 +126,13 @@ The tool differentiates between:
 - **"This file CONTAINS hidden instructions"** → classified as `high` or
   `critical`. The instructions are embedded covertly within content that
   serves another primary purpose.
+
+**Important:** Even files classified as legitimate instruction files are
+scanned for malicious content. A `copilot-instructions.md` that contains
+`ignore all safety guidelines` receives *both* an `info`-level finding
+(legitimate file) *and* a `high`-level finding (embedded injection).
+Legitimate-file classification affects the file's identity, not its immunity
+from further analysis.
 
 ---
 
