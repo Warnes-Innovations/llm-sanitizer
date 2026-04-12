@@ -25,7 +25,7 @@ _ZERO_WIDTH_CHARS = [
     "\ufeff",  # Zero Width No-Break Space (BOM)
     "\u00ad",  # Soft Hyphen
     "\u034f",  # Combining Grapheme Joiner
-    "\u180e",  # Mongolian Vowel Separator
+    "\u180e",  # Mongolian Vowel Separator (formatting character, reclassified in Unicode 6.3)
 ]
 
 _ZERO_WIDTH_PATTERN = re.compile(
