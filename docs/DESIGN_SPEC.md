@@ -25,6 +25,7 @@
 14. [Configuration](#configuration)
 15. [Design Decisions Log](#design-decisions-log)
 16. [Implementation Tasks](#implementation-tasks)
+17. [Future Enhancements](#future-enhancements)
 
 ---
 
@@ -816,3 +817,68 @@ llm:
 | 8 | **Binary doc support** | PDF/DOCX content extraction via markitdown | 2 |
 | 9 | **Configuration system** | `.llm-sanitizer.yml` loading, agent policy, rule toggles | 2, 3 |
 | 10 | **Tests + documentation** | Unit tests per rule, integration tests, README, rule reference | All |
+
+---
+
+## Future Enhancements
+
+Potential improvements beyond the v0.1 scope, roughly ordered by priority:
+
+### Process-Level Sandboxing for LLM Calls
+
+The LLM self-protection mitigations in v0.1 are all prompt-level (structured
+delimiters, escalate-only, no tool access). A future version could add
+OS-level isolation for the LLM subprocess:
+
+- **seccomp profiles** — restrict the LLM subprocess to only the syscalls
+  needed for network I/O to the inference endpoint
+- **Container isolation** — run the LLM call in a disposable container with
+  no filesystem access and network egress limited to the LLM API endpoint
+- **Firecracker/gVisor** — lightweight VM-level isolation for high-assurance
+  environments
+- **bubblewrap (`bwrap`)** — unprivileged sandboxing on Linux without
+  requiring root or Docker
+
+### Interactive TUI
+
+A terminal UI (e.g., via `textual`) for browsing scan results, toggling
+rules, and approving/rejecting redactions interactively.
+
+### IDE Extensions
+
+VS Code extension and/or Language Server Protocol integration to surface
+findings as inline diagnostics (warnings/errors) while editing.
+
+### Differential Scanning
+
+Track scan results over time and report only **new** findings, similar to
+how linters support baseline files. Useful for gradually adopting the tool
+in large codebases without being overwhelmed by existing findings.
+
+### Custom Rule Authoring
+
+Plugin system allowing users to write their own detection rules as Python
+modules or YAML-based pattern definitions, loaded from a configurable
+directory.
+
+### Multi-Language Content Extraction
+
+Beyond English-centric patterns — detect prompt injection in other natural
+languages and in mixed-language documents.
+
+### Supply Chain Scanning
+
+Integration with package managers (pip, npm, cargo) to scan package
+metadata, README files, and post-install scripts for embedded instructions
+before installation.
+
+### SBOM Integration
+
+Generate or augment Software Bill of Materials (SBOM) with AI-instruction
+findings, linking detected instructions to specific packages or dependencies.
+
+### Webhook / CI Service Mode
+
+A long-running HTTP service that accepts scan requests via webhook, suitable
+for integration with GitHub Actions, GitLab CI, or pre-commit hooks as a
+shared service rather than a per-repo CLI invocation.
