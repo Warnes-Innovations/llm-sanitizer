@@ -1,0 +1,82 @@
+[project]
+name = "llm-sanitizer"
+version = "0.1.0"
+description = "CLI + MCP server for detecting, classifying, and redacting embedded LLM agent instructions in documents, source code, and web pages."
+readme = {file = "README.md", content-type = "text/markdown"}
+authors = [{name = "Gregory R. Warnes", email = "greg@warnes-innovations.com"}]
+license = {text = "AGPL-3.0-or-later"}
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+keywords = [
+	"agent",
+	"llm",
+	"mcp",
+	"model-context-protocol",
+	"prompt-injection",
+	"sanitizer",
+	"scanner",
+	"security",
+]
+classifiers = [
+	"Development Status :: 3 - Alpha",
+	"Environment :: Console",
+	"Intended Audience :: Developers",
+	"Intended Audience :: Information Technology",
+	"License :: OSI Approved :: GNU Affero General Public License v3 or later (AGPLv3+)",
+	"Operating System :: OS Independent",
+	"Programming Language :: Python :: 3",
+	"Programming Language :: Python :: 3.11",
+	"Programming Language :: Python :: 3.12",
+	"Topic :: Security",
+	"Topic :: Software Development",
+	"Topic :: Software Development :: Libraries :: Python Modules",
+	"Typing :: Typed",
+]
+dependencies = [
+	"mcp>=1.0",
+	"httpx>=0.27",
+	"pydantic>=2.0",
+]
+
+[project.optional-dependencies]
+binary = ["markitdown>=0.1"]
+
+[project.urls]
+Homepage = "https://github.com/Warnes-Innovations/llm-sanitizer"
+Repository = "https://github.com/Warnes-Innovations/llm-sanitizer"
+Issues = "https://github.com/Warnes-Innovations/llm-sanitizer/issues"
+Changelog = "https://github.com/Warnes-Innovations/llm-sanitizer/blob/main/CHANGELOG.md"
+
+[project.scripts]
+llm-sanitizer = "llm_sanitizer.server:main"
+llm-sanitize = "llm_sanitizer.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+exclude = [
+	"src/llm_sanitizer/.mypy_cache/**",
+	"src/llm_sanitizer/__pycache__/**",
+]
+
+[tool.hatch.build.targets.sdist]
+include = [
+	"/CHANGELOG.md",
+	"/LICENSE",
+	"/README.md",
+	"/docs",
+	"/pyproject.toml",
+	"/src",
+	"/tests",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/llm_sanitizer"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+strict = true
