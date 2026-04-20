@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import json
+import shutil
+from pathlib import Path
+
 from mcp.server.fastmcp import FastMCP
 
 mcp = FastMCP(
@@ -28,7 +32,11 @@ def scan_text(content: str, sensitivity: str = "medium") -> str:
     Returns:
         JSON string with findings report.
     """
-    raise NotImplementedError("scan_text not yet implemented")
+    from llm_sanitizer.formatters.json_format import format_json
+    from llm_sanitizer.scanner import Scanner
+
+    result = Scanner().scan(content, source="<inline>", sensitivity=sensitivity)
+    return format_json(result)
 
 
 @mcp.tool()
@@ -44,7 +52,17 @@ def scan_file(path: str, sensitivity: str = "medium") -> str:
     Returns:
         JSON string with findings report.
     """
-    raise NotImplementedError("scan_file not yet implemented")
+    from llm_sanitizer.formatters.json_format import format_json
+    from llm_sanitizer.readers import read_file
+    from llm_sanitizer.scanner import Scanner
+
+    try:
+        content = read_file(path)
+    except (OSError, ImportError, RuntimeError) as exc:
+        return json.dumps({"status": "error", "message": str(exc)})
+
+    result = Scanner().scan(content, source=path, sensitivity=sensitivity)
+    return format_json(result)
 
 
 @mcp.tool()
@@ -58,7 +76,17 @@ def scan_url(url: str, sensitivity: str = "medium") -> str:
     Returns:
         JSON string with findings report.
     """
-    raise NotImplementedError("scan_url not yet implemented")
+    from llm_sanitizer.formatters.json_format import format_json
+    from llm_sanitizer.readers.url_reader import read_url
+    from llm_sanitizer.scanner import Scanner
+
+    try:
+        content = read_url(url)
+    except RuntimeError as exc:
+        return json.dumps({"status": "error", "message": str(exc)})
+
+    result = Scanner().scan(content, source=url, sensitivity=sensitivity)
+    return format_json(result)
 
 
 @mcp.tool()
@@ -73,7 +101,15 @@ def scan_dir(path: str, glob: str = "**/*", sensitivity: str = "medium") -> str:
     Returns:
         JSON string with aggregated findings report.
     """
-    raise NotImplementedError("scan_dir not yet implemented")
+    from llm_sanitizer.formatters.json_format import format_json
+    from llm_sanitizer.scanner import Scanner
+
+    try:
+        result = Scanner().scan_dir(path, glob_pattern=glob, sensitivity=sensitivity)
+    except (OSError, RuntimeError) as exc:
+        return json.dumps({"status": "error", "message": str(exc)})
+
+    return format_json(result)
 
 
 # --- Redact tools ---
@@ -91,7 +127,14 @@ def redact(content: str, mode: str = "strip") -> str:
     Returns:
         Cleaned text content.
     """
-    raise NotImplementedError("redact not yet implemented")
+    from llm_sanitizer import redactor as _redactor
+    from llm_sanitizer.scanner import Scanner
+
+    try:
+        result = Scanner().scan(content, source="<inline>")
+        return _redactor.redact(content, result, mode=mode)
+    except ValueError as exc:
+        return json.dumps({"status": "error", "message": str(exc)})
 
 
 @mcp.tool()
@@ -106,7 +149,23 @@ def redact_file(path: str, output_path: str, mode: str = "strip") -> str:
     Returns:
         JSON string with status and output path.
     """
-    raise NotImplementedError("redact_file not yet implemented")
+    from llm_sanitizer import redactor as _redactor
+    from llm_sanitizer.readers import read_file
+    from llm_sanitizer.scanner import Scanner
+
+    try:
+        content = read_file(path)
+        result = Scanner().scan(content, source=path)
+        clean = _redactor.redact(content, result, mode=mode)
+        Path(output_path).write_text(clean, encoding="utf-8")
+        return json.dumps({
+            "status": "ok",
+            "source": path,
+            "output_path": output_path,
+            "findings_redacted": result.summary.total_findings,
+        })
+    except (OSError, ImportError, RuntimeError, ValueError) as exc:
+        return json.dumps({"status": "error", "message": str(exc)})
 
 
 @mcp.tool()
@@ -121,7 +180,23 @@ def redact_url(url: str, output_path: str, mode: str = "strip") -> str:
     Returns:
         JSON string with status and output path.
     """
-    raise NotImplementedError("redact_url not yet implemented")
+    from llm_sanitizer import redactor as _redactor
+    from llm_sanitizer.readers.url_reader import read_url as _read_url
+    from llm_sanitizer.scanner import Scanner
+
+    try:
+        content = _read_url(url)
+        result = Scanner().scan(content, source=url)
+        clean = _redactor.redact(content, result, mode=mode)
+        Path(output_path).write_text(clean, encoding="utf-8")
+        return json.dumps({
+            "status": "ok",
+            "source": url,
+            "output_path": output_path,
+            "findings_redacted": result.summary.total_findings,
+        })
+    except (RuntimeError, OSError, ValueError) as exc:
+        return json.dumps({"status": "error", "message": str(exc)})
 
 
 @mcp.tool()
@@ -142,7 +217,49 @@ def redact_dir(
     Returns:
         JSON string with status and list of files written.
     """
-    raise NotImplementedError("redact_dir not yet implemented")
+    import fnmatch
+
+    from llm_sanitizer import redactor as _redactor
+    from llm_sanitizer.scanner import Scanner
+
+    src_path = Path(path)
+    dst_path = Path(output_dir)
+
+    try:
+        dst_path.mkdir(parents=True, exist_ok=True)
+        scanner = Scanner()
+        files_written: list[str] = []
+
+        files = [p for p in src_path.rglob("*") if p.is_file()]
+        if glob != "**/*":
+            files = [p for p in files if fnmatch.fnmatch(p.name, glob.lstrip("**/"))]
+
+        for file_path in sorted(files):
+            rel = file_path.relative_to(src_path)
+            out_path = dst_path / rel
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                content = file_path.read_text(encoding="utf-8", errors="replace")
+                scan_result = scanner.scan(content, source=str(file_path))
+                if scan_result.findings:
+                    out_path.write_text(
+                        _redactor.redact(content, scan_result, mode=mode),
+                        encoding="utf-8",
+                    )
+                else:
+                    shutil.copy2(file_path, out_path)
+                files_written.append(str(out_path))
+            except OSError:
+                continue
+
+        return json.dumps({
+            "status": "ok",
+            "source": path,
+            "output_dir": output_dir,
+            "files_written": files_written,
+        })
+    except (OSError, ValueError) as exc:
+        return json.dumps({"status": "error", "message": str(exc)})
 
 
 # --- Utility tools ---
@@ -158,7 +275,22 @@ def list_rules(category: str | None = None) -> str:
     Returns:
         JSON string with rule details.
     """
-    raise NotImplementedError("list_rules not yet implemented")
+    from llm_sanitizer.rules import get_all_rules
+
+    rules = get_all_rules()
+    if category:
+        rules = [r for r in rules if r.category == category]
+
+    return json.dumps([
+        {
+            "id": r.rule_id,
+            "name": r.rule_name,
+            "category": r.category,
+            "default_risk": r.default_risk.name,
+            "description": r.description,
+        }
+        for r in rules
+    ], indent=2)
 
 
 # --- Entry point ---
@@ -171,3 +303,4 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
