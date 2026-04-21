@@ -97,6 +97,7 @@ class BaseRule(ABC):
         col: int,
         end_col: int,
         matched: str,
+        matched_raw: str = "",
         before: list[str],
         line_text: str,
         after: list[str],
@@ -116,6 +117,7 @@ class BaseRule(ABC):
                 end_column=end_col,
             ),
             matched=matched,
+            matched_raw=matched_raw,
             context=FindingContext(before=before, line=line_text, after=after),
             explanation=explanation,
         )

@@ -61,6 +61,7 @@ class HiddenContentRule(BaseRule):
                             col=m.start() + 1,
                             end_col=m.end() + 1,
                             matched=m.group(0)[:200],
+                            matched_raw=m.group(0),
                             before=before,
                             line_text=line_text,
                             after=after,

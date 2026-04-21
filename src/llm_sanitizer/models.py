@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 
 class RiskLevel(IntEnum):
@@ -55,8 +55,16 @@ class Finding(BaseModel):
     risk: RiskLevel
     location: Location
     matched: str
+    matched_raw: str = ""
     context: FindingContext
     explanation: str
+
+    @model_validator(mode="after")
+    def _default_matched_raw(self) -> "Finding":
+        """Ensure matched_raw always holds the full untruncated match text."""
+        if not self.matched_raw:
+            self.matched_raw = self.matched
+        return self
 
     def model_dump_json_friendly(self) -> dict[str, Any]:
         """Return a JSON-serialisable dict with risk as string."""

@@ -82,6 +82,7 @@ class SystemPromptRule(BaseRule):
                         col=col,
                         end_col=col + len(m.group(0)),
                         matched=m.group(0).strip()[:200],
+                        matched_raw=m.group(0).strip(),
                         before=before,
                         line_text=line_text,
                         after=after,

@@ -10,7 +10,7 @@ from llm_sanitizer.models import Finding, ScanResult
 
 def _strip_finding(content: str, finding: Finding) -> str:
     """Remove the matched text from content."""
-    return content.replace(finding.matched, "", 1)
+    return content.replace(finding.matched_raw, "", 1)
 
 
 def _comment_finding(content: str, finding: Finding) -> str:
@@ -18,13 +18,13 @@ def _comment_finding(content: str, finding: Finding) -> str:
     marker = (
         f"[REDACTED: LLM instruction removed ({finding.rule}, {finding.risk.name})]"
     )
-    return content.replace(finding.matched, marker, 1)
+    return content.replace(finding.matched_raw, marker, 1)
 
 
 def _highlight_finding(content: str, finding: Finding) -> str:
     """Wrap the matched text in visible warning markers."""
     marker = f"\u26a0\ufe0f[LLM-INSTRUCTION: {finding.matched}]\u26a0\ufe0f"
-    return content.replace(finding.matched, marker, 1)
+    return content.replace(finding.matched_raw, marker, 1)
 
 
 def redact(
@@ -50,7 +50,7 @@ def redact(
     # Since we're doing simple string replacement, order matters only when the same
     # matched text appears multiple times — replace one at a time.
     for finding in result.findings:
-        if finding.matched and finding.matched in redacted:
+        if finding.matched_raw and finding.matched_raw in redacted:
             if mode == "strip":
                 redacted = _strip_finding(redacted, finding)
             elif mode == "comment":

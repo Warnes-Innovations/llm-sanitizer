@@ -86,6 +86,7 @@ class Base64EncodedRule(BaseRule):
                             col=m.start() + 1,
                             end_col=m.end() + 1,
                             matched=candidate[:80] + ("..." if len(candidate) > 80 else ""),
+                            matched_raw=candidate,
                             before=before,
                             line_text=line_text,
                             after=after,
