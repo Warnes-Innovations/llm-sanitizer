@@ -1,0 +1,20 @@
+{
+  "format_version": 1,
+  "last_updated": "2026-04-20T21:28:37.448622",
+  "sessions": [
+    {
+      "file": "session_20260420_211325.json",
+      "title": "Publish llm-sanitizer v0.1.0 to PyPI",
+      "status": "active",
+      "pending": 6,
+      "in_progress": 1,
+      "deferred": 0,
+      "blocked": 0,
+      "actionable": 7,
+      "open": 7,
+      "created": "2026-04-20",
+      "parent_session_file": null,
+      "active_child_session": null
+    }
+  ]
+}
