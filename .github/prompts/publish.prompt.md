@@ -78,23 +78,42 @@ uv build --wheel --out-dir dist/
 - **STOP and ask for confirmation before running `git commit`**
 - After confirmation, commit
 
-## Step 7: Tag the Release
+## Step 7: Merge devel → main
+
+> **Rule**: releases must be cut from `main`. Development happens on `devel`;
+> merge it to `main` before tagging so the tag lands on `main`.
+
+- Confirm the current branch is `devel` and the working tree is clean
+- **STOP and ask for confirmation before merging**
+- After confirmation:
+  ```bash
+  git checkout main
+  git merge --ff-only devel
+  ```
+- If `--ff-only` fails (histories have diverged), stop and report the conflict — do not force-merge
+- After a successful merge, confirm `main` and `devel` point to the same commit:
+  ```bash
+  git log --oneline -1 main && git log --oneline -1 devel
+  ```
+
+## Step 8: Tag the Release
 
 - Propose the tag name: `vX.Y.Z`
 - **STOP and ask for confirmation before creating the tag**
-- After confirmation: `git tag -a vX.Y.Z -m "Release X.Y.Z"`
+- After confirmation (while on `main`): `git tag -a vX.Y.Z -m "Release X.Y.Z"`
 
-## Step 8: Push Commits and Tag
+## Step 9: Push Commits and Tag
 
-- Summarize: branch `devel`, tag `vX.Y.Z` will be pushed to `origin`
+- Summarize: branch `main`, tag `vX.Y.Z`, and branch `devel` will be pushed to `origin`
 - **STOP and ask for confirmation before running `git push`**
 - After confirmation:
   ```bash
-  git push origin devel
+  git push origin main
   git push origin vX.Y.Z
+  git push origin devel
   ```
 
-## Step 9: Create GitHub Release
+## Step 10: Create GitHub Release
 
 - Create a GitHub release from tag `vX.Y.Z`:
   ```bash
@@ -105,7 +124,7 @@ uv build --wheel --out-dir dist/
   (or use the GitHub web UI from the new tag)
 - **STOP and ask for confirmation before creating the release**
 
-## Step 10: Publish to PyPI
+## Step 11: Publish to PyPI
 
 - Summarize: package `llm-sanitizer X.Y.Z` will be uploaded to PyPI
 - **STOP and ask for confirmation before uploading**
@@ -116,7 +135,7 @@ uv build --wheel --out-dir dist/
   (requires `UV_PUBLISH_TOKEN` env var set to your PyPI API token,
   or pass `--token <token>` explicitly)
 
-## Step 11: Verify the Release
+## Step 12: Verify the Release
 
 After publishing, verify end to end:
 

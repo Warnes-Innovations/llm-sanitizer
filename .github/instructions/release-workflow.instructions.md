@@ -21,6 +21,7 @@ name: "llm-sanitizer Release Workflow"
 
 - Working directory: `/Users/warnes/src/llm-sanitizer`
 - Default branch: `devel` (not `main`)
+- **Releases must be cut from `main`**: merge `devel` → `main` (fast-forward) before tagging and pushing.
 - Build backend: `hatchling` (via `uv build`)
 - Entry points: `llm-sanitizer` (MCP server) and `llm-sanitize` (CLI)
 - Two distributions: base package + optional `[binary]` extra for `markitdown`

@@ -1,17 +1,31 @@
 {
   "format_version": 1,
-  "last_updated": "2026-04-20T21:28:37.448622",
+  "last_updated": "2026-04-20T21:38:58.480153",
   "sessions": [
     {
       "file": "session_20260420_211325.json",
       "title": "Publish llm-sanitizer v0.1.0 to PyPI",
       "status": "active",
-      "pending": 6,
+      "pending": 2,
       "in_progress": 1,
       "deferred": 0,
       "blocked": 0,
-      "actionable": 7,
-      "open": 7,
+      "actionable": 3,
+      "open": 3,
+      "created": "2026-04-20",
+      "parent_session_file": null,
+      "active_child_session": null
+    },
+    {
+      "file": "session_20260420_213858.json",
+      "title": "Trusted Publisher PyPI OIDC publish",
+      "status": "active",
+      "pending": 2,
+      "in_progress": 0,
+      "deferred": 0,
+      "blocked": 0,
+      "actionable": 2,
+      "open": 2,
       "created": "2026-04-20",
       "parent_session_file": null,
       "active_child_session": null

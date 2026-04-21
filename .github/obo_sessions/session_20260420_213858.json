@@ -1,0 +1,53 @@
+{
+  "session_file": "session_20260420_213858.json",
+  "created": "2026-04-20T21:38:58.479417",
+  "title": "Trusted Publisher PyPI OIDC publish",
+  "description": "Track the first trusted publisher PyPI OIDC workflow run for llm-sanitizer.",
+  "status": "active",
+  "parent_session_file": null,
+  "parent_item_id": null,
+  "child_session_files": [],
+  "active_child_session": null,
+  "items": [
+    {
+      "id": "tp-1",
+      "title": "Wait for GitHub Actions publish.yml to run",
+      "description": "Monitor https://github.com/Warnes-Innovations/llm-sanitizer/actions for the publish.yml workflow triggered by the v0.1.0 release. Confirm it completes successfully and PyPI project is created.",
+      "urgency": 5,
+      "importance": 5,
+      "effort": 2,
+      "dependencies": 0,
+      "status": "pending",
+      "category": "General",
+      "resolution": null,
+      "skip_reason": null,
+      "blocker": null,
+      "blocked_at": null,
+      "approval_status": "unreviewed",
+      "approval_mode": null,
+      "approved_at": null,
+      "approval_note": null,
+      "priority_score": 14
+    },
+    {
+      "id": "tp-2",
+      "title": "Verify PyPI project creation and release",
+      "description": "Visit https://pypi.org/project/llm-sanitizer/ and confirm v0.1.0 is published and visible. Optionally pip install and run llm-sanitize --help.",
+      "urgency": 5,
+      "importance": 5,
+      "effort": 2,
+      "dependencies": 1,
+      "status": "pending",
+      "category": "General",
+      "resolution": null,
+      "skip_reason": null,
+      "blocker": null,
+      "blocked_at": null,
+      "approval_status": "unreviewed",
+      "approval_mode": null,
+      "approved_at": null,
+      "approval_note": null,
+      "priority_score": 15
+    }
+  ]
+}

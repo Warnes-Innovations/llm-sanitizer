@@ -121,7 +121,7 @@ policy:
 
 ## Documentation
 
-- [Design Specification](docs/DESIGN_SPEC.md)
+- [Design Specification](https://github.com/Warnes-Innovations/llm-sanitizer/blob/main/docs/DESIGN_SPEC.md)
 
 ## License
 
