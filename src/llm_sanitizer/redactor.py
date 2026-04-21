@@ -66,10 +66,37 @@ def redact_content(
     mode: str = "strip",
     source: str = "<inline>",
     sensitivity: str = "medium",
+    max_passes: int = 3,
 ) -> tuple[str, ScanResult]:
-    """Convenience: scan *content* and return (redacted_text, scan_result)."""
-    from llm_sanitizer.scanner import scan_text
+    """Scan *content*, redact findings, then re-scan until stable or *max_passes* reached.
 
-    result = scan_text(content, source=source, sensitivity=sensitivity)
-    return redact(content, result, mode=mode), result
+    Iterating is necessary for layered attacks such as zero-width-interleaved
+    instructions: the first pass strips invisible characters, exposing plain
+    instruction text that the second pass then neutralises.
+
+    Returns a tuple of (redacted_text, combined_result) where combined_result
+    contains all findings from every pass so callers have a complete picture of
+    what was detected and removed.
+    """
+    from llm_sanitizer.scanner import _build_summary, scan_text
+
+    all_findings: list[Finding] = []
+    first_result = scan_text(content, source=source, sensitivity=sensitivity)
+    all_findings.extend(first_result.findings)
+    current = redact(content, first_result, mode=mode)
+
+    for _ in range(max_passes - 1):
+        if current == content:
+            break
+        content = current
+        next_result = scan_text(current, source=source, sensitivity=sensitivity)
+        if not next_result.findings:
+            break
+        all_findings.extend(next_result.findings)
+        current = redact(current, next_result, mode=mode)
+
+    combined = first_result.model_copy(
+        update={"findings": all_findings, "summary": _build_summary(all_findings)}
+    )
+    return current, combined
 
