@@ -5,6 +5,10 @@
 
 from __future__ import annotations
 
+import fnmatch
+import os
+from pathlib import Path
+
 from llm_sanitizer.config import SanitizerConfig, load_config
 from llm_sanitizer.models import (
     DirScanResult,
@@ -21,6 +25,32 @@ _SENSITIVITY_RISK_MAP: dict[str, RiskLevel] = {
     "medium": RiskLevel.medium, # medium → medium and above
     "high": RiskLevel.info,     # high → all including info/low
 }
+
+# Directories excluded from directory scans — VCS metadata and dependency
+# caches are not source content. ".git" in particular can hold gigabytes of
+# binary packed objects; scanning them means read_text(errors="replace")
+# force-decodes arbitrary binary data as UTF-8, and statistically some byte
+# sequences will decode to valid-looking high-codepoint Unicode — triggering
+# character-pattern rules (homoglyph, zero_width) with no security meaning.
+_EXCLUDED_DIR_NAMES = frozenset([
+    ".git", ".svn", ".hg", "__pycache__", "node_modules", ".venv", "venv",
+])
+
+
+def iter_scannable_files(root: Path, glob_pattern: str = "**/*") -> list[Path]:
+    """Recursively collect files under root for directory scan/redact
+    operations, pruning excluded directories (see _EXCLUDED_DIR_NAMES) during
+    the walk itself — not just filtering afterward, since .git can be large
+    enough that even walking into it before discarding results is wasteful."""
+    files: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIR_NAMES]
+        for name in filenames:
+            files.append(Path(dirpath) / name)
+
+    if glob_pattern != "**/*":
+        files = [p for p in files if fnmatch.fnmatch(p.name, glob_pattern.lstrip("**/"))]
+    return files
 
 
 def _build_summary(findings: list[Finding]) -> SummaryStats:
@@ -121,16 +151,10 @@ class Scanner:
         sensitivity: str = "medium",
     ) -> DirScanResult:
         """Recursively scan a directory and return aggregated results."""
-        import fnmatch
-        from pathlib import Path
-
         root = Path(path)
         results: list[ScanResult] = []
 
-        # Collect all matching files
-        files = [p for p in root.rglob("*") if p.is_file()]
-        if glob_pattern != "**/*":
-            files = [p for p in files if fnmatch.fnmatch(p.name, glob_pattern.lstrip("**/"))]
+        files = iter_scannable_files(root, glob_pattern)
 
         for file_path in sorted(files):
             try:

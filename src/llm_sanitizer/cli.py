@@ -192,9 +192,8 @@ def _redact_dir(
     glob_pattern: str,
     affected_only: bool,
 ) -> None:
-    import fnmatch
     from llm_sanitizer.redactor import redact
-    from llm_sanitizer.scanner import Scanner
+    from llm_sanitizer.scanner import Scanner, iter_scannable_files
 
     assert isinstance(scanner, Scanner)
     src_path = Path(src)
@@ -202,9 +201,7 @@ def _redact_dir(
     dst_path.mkdir(parents=True, exist_ok=True)
     files_written: list[str] = []
 
-    files = [p for p in src_path.rglob("*") if p.is_file()]
-    if glob_pattern != "**/*":
-        files = [p for p in files if fnmatch.fnmatch(p.name, glob_pattern.lstrip("**/"))]
+    files = iter_scannable_files(src_path, glob_pattern)
 
     for file_path in sorted(files):
         rel = file_path.relative_to(src_path)

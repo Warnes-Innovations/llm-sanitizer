@@ -217,10 +217,8 @@ def redact_dir(
     Returns:
         JSON string with status and list of files written.
     """
-    import fnmatch
-
     from llm_sanitizer import redactor as _redactor
-    from llm_sanitizer.scanner import Scanner
+    from llm_sanitizer.scanner import Scanner, iter_scannable_files
 
     src_path = Path(path)
     dst_path = Path(output_dir)
@@ -230,9 +228,7 @@ def redact_dir(
         scanner = Scanner()
         files_written: list[str] = []
 
-        files = [p for p in src_path.rglob("*") if p.is_file()]
-        if glob != "**/*":
-            files = [p for p in files if fnmatch.fnmatch(p.name, glob.lstrip("**/"))]
+        files = iter_scannable_files(src_path, glob)
 
         for file_path in sorted(files):
             rel = file_path.relative_to(src_path)

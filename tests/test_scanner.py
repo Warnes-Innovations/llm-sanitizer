@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from llm_sanitizer.models import RiskLevel, ScanResult
-from llm_sanitizer.scanner import Scanner, scan_text
+from llm_sanitizer.scanner import Scanner, iter_scannable_files, scan_text
 
 FIXTURES_DIR = Path(__file__).parent / "fixtures"
 
@@ -147,6 +147,63 @@ class TestScannerDirScan:
         scanner = Scanner()
         result = scanner.scan_dir(str(tmp_path))
         assert result.source == str(tmp_path)
+
+    def test_scan_dir_excludes_git_directory(self, tmp_path: Path) -> None:
+        (tmp_path / "clean.md").write_text("Normal content.")
+        git_dir = tmp_path / ".git" / "objects" / "ab"
+        git_dir.mkdir(parents=True)
+        # Simulate a binary packed object — not valid text, would previously
+        # get force-decoded via read_text(errors="replace") if not excluded.
+        (git_dir / "cdef0123456789").write_bytes(bytes(range(256)) * 4)
+        scanner = Scanner()
+        result = scanner.scan_dir(str(tmp_path))
+        assert result.files_scanned == 1
+        assert result.results[0].source == str(tmp_path / "clean.md")
+
+    def test_scan_dir_excludes_nested_dependency_dirs(self, tmp_path: Path) -> None:
+        (tmp_path / "clean.md").write_text("Normal content.")
+        for excluded in ("node_modules", "__pycache__", ".venv"):
+            d = tmp_path / excluded / "sub"
+            d.mkdir(parents=True)
+            (d / "file.txt").write_text("should not be scanned")
+        scanner = Scanner()
+        result = scanner.scan_dir(str(tmp_path))
+        assert result.files_scanned == 1
+
+
+class TestIterScannableFiles:
+    def test_finds_files_at_multiple_depths(self, tmp_path: Path) -> None:
+        (tmp_path / "top.md").write_text("x")
+        nested = tmp_path / "sub" / "deeper"
+        nested.mkdir(parents=True)
+        (nested / "bottom.md").write_text("x")
+        files = iter_scannable_files(tmp_path)
+        names = {f.name for f in files}
+        assert names == {"top.md", "bottom.md"}
+
+    def test_excludes_git_at_any_depth(self, tmp_path: Path) -> None:
+        (tmp_path / "clean.md").write_text("x")
+        deep_git = tmp_path / "sub" / ".git" / "objects"
+        deep_git.mkdir(parents=True)
+        (deep_git / "packfile").write_bytes(b"\x00\x01\x02binary garbage")
+        files = iter_scannable_files(tmp_path)
+        assert [f.name for f in files] == ["clean.md"]
+
+    def test_glob_pattern_exact_filename_match(self, tmp_path: Path) -> None:
+        # NOTE: glob_pattern.lstrip("**/") strips the leading *, *, / characters
+        # individually (not the literal "**/" prefix), so any leading-wildcard
+        # pattern like "**/*.md" collapses to ".md" and only matches a file
+        # named exactly ".md" — this is a known pre-existing limitation (see
+        # docs/agent-ops/layers/layer-1-supply-chain.md's "--glob is currently
+        # buggy" note), unchanged by this refactor. This test documents the
+        # actual current behavior rather than the intended one.
+        (tmp_path / "a.md").write_text("x")
+        (tmp_path / "b.py").write_text("x")
+        files = iter_scannable_files(tmp_path, glob_pattern="a.md")
+        assert [f.name for f in files] == ["a.md"]
+
+    def test_empty_directory_returns_no_files(self, tmp_path: Path) -> None:
+        assert iter_scannable_files(tmp_path) == []
 
 
 class TestScannerFixtures:
