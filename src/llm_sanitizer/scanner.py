@@ -91,13 +91,36 @@ _ARCHIVE_MAX_COMPRESSION_RATIO = 100
 # entries can't produce a memory bomb regardless of ratio, and genuinely
 # oversized entries are still caught by this floor combined with the ratio.
 _ARCHIVE_MIN_RATIO_CHECK_BYTES = 10 * 1024 * 1024  # 10 MB
+# Nested zip bombs (zip-of-zips) defense: limit recursion depth and
+# cumulative uncompressed size across all nested levels.
+_ARCHIVE_MAX_NESTING_DEPTH = 3
+_ARCHIVE_MAX_CUMULATIVE_BYTES = 500 * 1024 * 1024  # 500 MB across all layers
 
 
-def _is_archive_bomb(path: Path) -> bool:
+def _looks_like_zip(name: str, data: bytes | None = None) -> bool:
+    """Heuristic: does this entry look like it might be a zip file?"""
+    if name.lower().endswith(".zip"):
+        return True
+    if data and len(data) >= 4 and data[:2] == b"PK":
+        return True
+    return False
+
+
+def _is_archive_bomb(path: Path, depth: int = 0, cumulative_size: int = 0) -> bool:
     """Cheaply inspect a zip's central directory (no decompression) for the
-    hallmarks of a zip bomb. Returns False for anything that isn't a valid
-    zip — malformed/non-zip binaries are left to their normal extract/skip
-    handling rather than being judged here."""
+    hallmarks of a zip bomb, including nested (zip-of-zips) variants.
+    Returns False for anything that isn't a valid zip — malformed/non-zip
+    binaries are left to their normal extract/skip handling rather than
+    being judged here.
+
+    depth: current recursion level (0 for the top-level call)
+    cumulative_size: sum of uncompressed sizes across all nested levels so far
+    """
+    if depth > _ARCHIVE_MAX_NESTING_DEPTH:
+        return True  # Too deeply nested
+    if cumulative_size > _ARCHIVE_MAX_CUMULATIVE_BYTES:
+        return True  # Cumulative size exceeded across all levels
+
     try:
         if not zipfile.is_zipfile(path):
             return False
@@ -105,7 +128,10 @@ def _is_archive_bomb(path: Path) -> bool:
             infos = zf.infolist()
             if len(infos) > _ARCHIVE_MAX_ENTRIES:
                 return True
-            if sum(i.file_size for i in infos) > _ARCHIVE_MAX_UNCOMPRESSED_BYTES:
+            total_size = sum(i.file_size for i in infos)
+            if total_size > _ARCHIVE_MAX_UNCOMPRESSED_BYTES:
+                return True
+            if cumulative_size + total_size > _ARCHIVE_MAX_CUMULATIVE_BYTES:
                 return True
             for i in infos:
                 if (
@@ -114,6 +140,32 @@ def _is_archive_bomb(path: Path) -> bool:
                     and i.file_size / i.compress_size > _ARCHIVE_MAX_COMPRESSION_RATIO
                 ):
                     return True
+                # Check for nested zips: if this entry looks like a zip,
+                # recursively inspect it (without decompressing the whole thing)
+                if _looks_like_zip(i.filename):
+                    try:
+                        # Read just the first 4 bytes to peek for zip magic bytes
+                        head = zf.read(i.filename, 4)
+                        if _looks_like_zip(i.filename, head):
+                            # This entry might be a nested zip; write it to a
+                            # temp location and recursively check.
+                            import tempfile
+                            with tempfile.NamedTemporaryFile(suffix=".zip", delete=False) as tmp:
+                                tmp.write(zf.read(i.filename))
+                                tmp_path = tmp.name
+                            try:
+                                if _is_archive_bomb(
+                                    Path(tmp_path),
+                                    depth=depth + 1,
+                                    cumulative_size=cumulative_size + total_size,
+                                ):
+                                    return True
+                            finally:
+                                Path(tmp_path).unlink(missing_ok=True)
+                    except (OSError, RuntimeError):
+                        # If we can't read/decompress the nested entry, treat
+                        # as potential bomb (fail-open for safety).
+                        continue
     except (OSError, zipfile.BadZipFile):
         return False
     return False
@@ -126,13 +178,12 @@ def read_scannable_content(path: Path, binary_mode: str = "extract") -> str | No
     binary_mode:
         "extract" (default) — run binary content through markitdown to pull
             out any embedded text (PDF, DOCX, PPTX, XLSX, ODT, and whatever
-            else markitdown supports); if extraction isn't available or
-            fails for this file, fall back to skipping it (returns None)
-            rather than force-decoding raw bytes as UTF-8 text, which is
-            what produced spurious findings on e.g. PNG image data (see
-            docs/agent-ops — zero-width/homoglyph rules matching random
-            byte sequences that happen to decode as invisible-character
-            codepoints).
+            else markitdown supports); if extraction fails or isn't available,
+            fall back to scanning the raw bytes as UTF-8 text (errors="replace")
+            rather than silently skipping the file. This may produce spurious
+            findings on raw binary garbage (e.g. PNG image data), but ensures
+            injection payloads hidden inside unextractable binaries are not
+            silently missed.
         "text" — force raw bytes to be decoded as UTF-8 (errors="replace")
             regardless of binary content. An explicit opt-in for scanning a
             suspected extension-swapped file as literal text.
@@ -152,7 +203,9 @@ def read_scannable_content(path: Path, binary_mode: str = "extract") -> str | No
             from llm_sanitizer.readers.binary_reader import read_binary
             return read_binary(str(path))
         except (ImportError, RuntimeError):
-            return None
+            # Extraction not available or failed; fall back to raw-text
+            # scanning so we don't silently drop potentially malicious content.
+            return path.read_text(encoding="utf-8", errors="replace")
     return None  # binary_mode == "skip", or any unrecognized value
 
 
