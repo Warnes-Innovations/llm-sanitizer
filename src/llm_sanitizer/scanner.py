@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import zipfile
 from pathlib import Path
 
 from llm_sanitizer.config import SanitizerConfig, load_config
@@ -51,6 +52,108 @@ def iter_scannable_files(root: Path, glob_pattern: str = "**/*") -> list[Path]:
     if glob_pattern != "**/*":
         files = [p for p in files if fnmatch.fnmatch(p.name, glob_pattern.lstrip("**/"))]
     return files
+
+
+# Bytes sniffed from the head of each file to classify it as binary. Matches
+# the heuristic git and most other tools use (presence of a NUL byte), rather
+# than an extension allowlist/denylist — classifying by content instead of
+# name means renaming a file can't change how it's handled, closing off an
+# evasion in both directions: a malicious text file renamed to a benign-
+# looking extension (e.g. .png) to dodge scanning, or a document renamed
+# *away* from its real extension to dodge markitdown text extraction.
+_BINARY_SNIFF_BYTES = 8000
+
+
+def _is_binary(path: Path) -> bool:
+    try:
+        with path.open("rb") as fh:
+            return b"\0" in fh.read(_BINARY_SNIFF_BYTES)
+    except OSError:
+        return False
+
+
+# markitdown's ZipConverter extracts every entry of a .zip (recursively, for
+# nested archives) with no size, entry-count, or compression-ratio limit of
+# its own. Since binary_mode="extract" is our default and this pipeline
+# routinely scans untrusted, attacker-supplied content, a small crafted zip
+# (classic zip-bomb: one entry with an extreme compression ratio, or many
+# entries) would be read fully into memory the moment it's scanned. These
+# are the same three heuristics general-purpose zip-bomb detectors use;
+# checking them from the archive's central directory (infolist()) is cheap
+# and doesn't require decompressing anything.
+_ARCHIVE_MAX_ENTRIES = 1000
+_ARCHIVE_MAX_UNCOMPRESSED_BYTES = 100 * 1024 * 1024  # 100 MB
+_ARCHIVE_MAX_COMPRESSION_RATIO = 100
+# Highly-compressible legitimate content (e.g. the repetitive XML inside a
+# small DOCX/PPTX) can trivially exceed the ratio threshold above while
+# expanding to a few KB — harmless. Only apply the ratio check once an
+# entry's *uncompressed* size is itself large enough to matter; small
+# entries can't produce a memory bomb regardless of ratio, and genuinely
+# oversized entries are still caught by this floor combined with the ratio.
+_ARCHIVE_MIN_RATIO_CHECK_BYTES = 10 * 1024 * 1024  # 10 MB
+
+
+def _is_archive_bomb(path: Path) -> bool:
+    """Cheaply inspect a zip's central directory (no decompression) for the
+    hallmarks of a zip bomb. Returns False for anything that isn't a valid
+    zip — malformed/non-zip binaries are left to their normal extract/skip
+    handling rather than being judged here."""
+    try:
+        if not zipfile.is_zipfile(path):
+            return False
+        with zipfile.ZipFile(path) as zf:
+            infos = zf.infolist()
+            if len(infos) > _ARCHIVE_MAX_ENTRIES:
+                return True
+            if sum(i.file_size for i in infos) > _ARCHIVE_MAX_UNCOMPRESSED_BYTES:
+                return True
+            for i in infos:
+                if (
+                    i.file_size > _ARCHIVE_MIN_RATIO_CHECK_BYTES
+                    and i.compress_size > 0
+                    and i.file_size / i.compress_size > _ARCHIVE_MAX_COMPRESSION_RATIO
+                ):
+                    return True
+    except (OSError, zipfile.BadZipFile):
+        return False
+    return False
+
+
+def read_scannable_content(path: Path, binary_mode: str = "extract") -> str | None:
+    """Read *path* for scanning, honoring *binary_mode* for content sniffed
+    as binary (see _is_binary). Text files are always read as text.
+
+    binary_mode:
+        "extract" (default) — run binary content through markitdown to pull
+            out any embedded text (PDF, DOCX, PPTX, XLSX, ODT, and whatever
+            else markitdown supports); if extraction isn't available or
+            fails for this file, fall back to skipping it (returns None)
+            rather than force-decoding raw bytes as UTF-8 text, which is
+            what produced spurious findings on e.g. PNG image data (see
+            docs/agent-ops — zero-width/homoglyph rules matching random
+            byte sequences that happen to decode as invisible-character
+            codepoints).
+        "text" — force raw bytes to be decoded as UTF-8 (errors="replace")
+            regardless of binary content. An explicit opt-in for scanning a
+            suspected extension-swapped file as literal text.
+        "skip" — never attempt to read binary content; always returns None.
+
+    Returns None when the file should be excluded from the scan entirely.
+    """
+    if not _is_binary(path):
+        return path.read_text(encoding="utf-8", errors="replace")
+
+    if binary_mode == "text":
+        return path.read_text(encoding="utf-8", errors="replace")
+    if binary_mode == "extract":
+        if _is_archive_bomb(path):
+            return None
+        try:
+            from llm_sanitizer.readers.binary_reader import read_binary
+            return read_binary(str(path))
+        except (ImportError, RuntimeError):
+            return None
+    return None  # binary_mode == "skip", or any unrecognized value
 
 
 def _build_summary(findings: list[Finding]) -> SummaryStats:
@@ -149,20 +252,29 @@ class Scanner:
         path: str,
         glob_pattern: str = "**/*",
         sensitivity: str = "medium",
+        binary_mode: str = "extract",
     ) -> DirScanResult:
-        """Recursively scan a directory and return aggregated results."""
+        """Recursively scan a directory and return aggregated results.
+
+        binary_mode controls how files sniffed as binary are handled — see
+        read_scannable_content for the "extract"/"text"/"skip" semantics.
+        """
         root = Path(path)
         results: list[ScanResult] = []
+        files_skipped_binary = 0
 
         files = iter_scannable_files(root, glob_pattern)
 
         for file_path in sorted(files):
             try:
-                content = file_path.read_text(encoding="utf-8", errors="replace")
-                result = self.scan(content, source=str(file_path), sensitivity=sensitivity)
-                results.append(result)
+                content = read_scannable_content(file_path, binary_mode=binary_mode)
             except OSError:
                 continue
+            if content is None:
+                files_skipped_binary += 1
+                continue
+            result = self.scan(content, source=str(file_path), sensitivity=sensitivity)
+            results.append(result)
 
         all_findings = [f for r in results for f in r.findings]
         max_risk: RiskLevel | None = None
@@ -174,6 +286,7 @@ class Scanner:
             source=path,
             sensitivity=sensitivity,
             files_scanned=len(results),
+            files_skipped_binary=files_skipped_binary,
             total_findings=len(all_findings),
             max_risk=max_risk,
             results=results,

@@ -64,7 +64,21 @@ llm-sanitize redact document.md -o clean_document.md
 
 # Redact a directory (mirrors structure)
 llm-sanitize redact ./docs/ -o ./clean_docs/
+
+# Control how binary files (PDF, DOCX, zip, images, ...) are handled —
+# detected by content, not extension, so renaming a file changes nothing
+llm-sanitize scan document.pdf --binary-mode extract  # pull embedded text via markitdown (default)
+llm-sanitize scan suspicious.png --binary-mode text    # force raw bytes to be scanned as literal text
+llm-sanitize scan large_dir/ --binary-mode skip        # exclude binary files from the scan entirely
+
+# Assemble a directory report from previously-saved `scan --format json`
+# results without re-scanning (for callers that cache scans by content hash)
+llm-sanitize merge --manifest manifest.txt --format sarif > report.sarif
 ```
+
+`--binary-mode extract` (the default) rejects malicious zip archives — excessive
+entry counts, total uncompressed size, or compression ratios — before
+decompressing anything.
 
 ### MCP Server
 
