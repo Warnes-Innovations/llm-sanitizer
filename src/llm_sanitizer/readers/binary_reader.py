@@ -19,7 +19,7 @@ def read_binary(path: str) -> str:
         RuntimeError: If extraction fails.
     """
     try:
-        from markitdown import MarkItDown  # type: ignore[import-untyped]
+        from markitdown import MarkItDown
     except ImportError as exc:
         raise ImportError(
             "Binary document support requires the 'binary' extra: "

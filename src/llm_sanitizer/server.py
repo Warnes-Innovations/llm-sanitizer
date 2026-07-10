@@ -44,14 +44,19 @@ def scan_file(path: str, sensitivity: str = "medium", binary_mode: str = "extrac
     """Scan a local file for embedded LLM instructions.
 
     Supports text, markdown, HTML, source code, and (with markitdown) PDF/DOCX.
-    Binary-ness is detected from file content, not the extension, so renaming
-    a file cannot change how it is classified.
+    Binary-ness and archive type are detected from file content, not the
+    extension, so renaming a file cannot change how it is classified.
+    Recognized archives (zip/tar/gz/bz2/xz, plus 7z/rar with the optional
+    extras) are expanded and their members recursively scanned; an archive
+    whose declared type doesn't match its content, that is corrupt, or that
+    needs an uninstalled tool yields a CRITICAL finding rather than being
+    silently mis-scanned.
 
     Args:
         path: Absolute or relative path to the file to scan.
         sensitivity: Detection sensitivity — "low", "medium", or "high".
         binary_mode: How to handle content sniffed as binary — "extract"
-            (default; pull embedded text via markitdown, e.g. PDF/DOCX),
+            (default; pull embedded text via markitdown and expand archives),
             "text" (force raw bytes to be scanned as literal UTF-8 text —
             use when a file's extension is suspected of being swapped to
             evade extraction/skipping), or "skip" (never read binary
@@ -62,20 +67,22 @@ def scan_file(path: str, sensitivity: str = "medium", binary_mode: str = "extrac
         the file could not be read or yielded no scannable text content.
     """
     from llm_sanitizer.formatters.json_format import format_json
-    from llm_sanitizer.readers import read_file
-    from llm_sanitizer.scanner import Scanner
+    from llm_sanitizer.scanner import ExtractorUnavailableError, Scanner
 
     try:
-        content = read_file(path, binary_mode=binary_mode)
+        result = Scanner().scan_file(
+            path, sensitivity=sensitivity, binary_mode=binary_mode
+        )
+    except ExtractorUnavailableError as exc:
+        return json.dumps({"status": "error", "message": exc.hint})
     except (OSError, ImportError, RuntimeError) as exc:
         return json.dumps({"status": "error", "message": str(exc)})
-    if content is None:
+    if result is None:
         return json.dumps({
             "status": "error",
             "message": f"No scannable text content (binary file, binary_mode={binary_mode!r}): {path}",
         })
 
-    result = Scanner().scan(content, source=path, sensitivity=sensitivity)
     return format_json(result)
 
 
@@ -127,12 +134,14 @@ def scan_dir(
         JSON string with aggregated findings report.
     """
     from llm_sanitizer.formatters.json_format import format_json
-    from llm_sanitizer.scanner import Scanner
+    from llm_sanitizer.scanner import ExtractorUnavailableError, Scanner
 
     try:
         result = Scanner().scan_dir(
             path, glob_pattern=glob, sensitivity=sensitivity, binary_mode=binary_mode
         )
+    except ExtractorUnavailableError as exc:
+        return json.dumps({"status": "error", "message": exc.hint})
     except (OSError, RuntimeError) as exc:
         return json.dumps({"status": "error", "message": str(exc)})
 
@@ -276,7 +285,13 @@ def redact_dir(
         JSON string with status and list of files written.
     """
     from llm_sanitizer import redactor as _redactor
-    from llm_sanitizer.scanner import Scanner, _is_binary, iter_scannable_files, read_scannable_content
+    from llm_sanitizer.scanner import (
+        ExtractorUnavailableError,
+        Scanner,
+        _is_binary,
+        iter_scannable_files,
+        read_scannable_content,
+    )
 
     src_path = Path(path)
     dst_path = Path(output_dir)
@@ -329,6 +344,8 @@ def redact_dir(
             "output_dir": output_dir,
             "files_written": files_written,
         })
+    except ExtractorUnavailableError as exc:
+        return json.dumps({"status": "error", "message": exc.hint})
     except (OSError, ValueError) as exc:
         return json.dumps({"status": "error", "message": str(exc)})
 

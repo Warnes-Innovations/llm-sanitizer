@@ -282,7 +282,7 @@ class HiddenContentRule(BaseRule):
         lines = content.splitlines()
         fid = 1
 
-        def emit(line_idx: int, m: re.Match, risk: RiskLevel, label: str) -> None:
+        def emit(line_idx: int, m: re.Match[str], risk: RiskLevel, label: str) -> None:
             nonlocal fid
             before, line_text, after = self._build_context(lines, line_idx)
             findings.append(
@@ -315,9 +315,9 @@ class HiddenContentRule(BaseRule):
 
         for line_idx, line in enumerate(lines):
             for m in _TEXT_COLOR_DECL_RE.finditer(line):
-                label = _classify_text_color(m.group(1), lines, line_idx)
-                if label is not None:
-                    emit(line_idx, m, RiskLevel.critical, label)
+                color_label = _classify_text_color(m.group(1), lines, line_idx)
+                if color_label is not None:
+                    emit(line_idx, m, RiskLevel.critical, color_label)
                 break  # one finding per line
 
         for line_idx, line in enumerate(lines):

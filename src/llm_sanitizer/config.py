@@ -56,12 +56,47 @@ class OutputSettings:
     context_lines: int = 2
 
 
+# Archive-handling limits. Defaults mirror the module-level constants in
+# llm_sanitizer.scanner, which remain the ultimate fallback (used when a
+# Scanner is built without a config, and by _is_archive_bomb's default args).
+# Keeping the numbers here in sync with those constants means configuration is
+# purely additive: nothing configured → identical behavior to before.
+_DEFAULT_ARCHIVE_FORMATS = ["zip", "tar", "gz", "bz2", "xz", "7z", "rar"]
+
+
+@dataclass
+class ArchiveSettings:
+    """Limits and enabled-format list for recursive archive extraction."""
+
+    max_depth: int = 3  # max archive-in-archive nesting levels
+    max_cumulative_bytes: int = 500 * 1024 * 1024  # across all nested levels
+    max_entries: int = 1000  # per-archive entry-count cap
+    max_uncompressed_bytes: int = 100 * 1024 * 1024  # per-archive size cap
+    max_compression_ratio: int = 100  # zip-bomb ratio guard
+    min_ratio_check_bytes: int = 10 * 1024 * 1024  # floor before ratio applies
+    formats: list[str] = field(
+        default_factory=lambda: list(_DEFAULT_ARCHIVE_FORMATS)
+    )
+
+
+# Governs a NON-archive binary that, under binary_mode="extract", is
+# successfully processed but yields NO extractable text (markitdown returns ""
+# or only whitespace). Does NOT govern extractor-unavailable (that fails fast)
+# or extraction-error/corrupt (that is always CRITICAL).
+_UNPROCESSABLE_BINARY_POLICIES = ("ignore", "scan-text", "fail")
+_DEFAULT_UNPROCESSABLE_BINARY_POLICY = "fail"
+
+
 @dataclass
 class SanitizerConfig:
     sensitivity: str = "medium"
     rules: dict[str, RuleSettings] = field(default_factory=dict)
     policy: PolicySettings = field(default_factory=PolicySettings)
     output: OutputSettings = field(default_factory=OutputSettings)
+    archive: ArchiveSettings = field(default_factory=ArchiveSettings)
+    # "fail" (default, fail-closed) | "scan-text" | "ignore" — see the constant
+    # comment above. Governs only the "processed but empty" outcome.
+    unprocessable_binary_policy: str = _DEFAULT_UNPROCESSABLE_BINARY_POLICY
 
     def is_rule_enabled(self, rule_id: str) -> bool:
         """Return True if the rule is enabled (default: True for all rules)."""
@@ -134,10 +169,48 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
         context_lines=output_raw.get("context_lines", 2),
     )
 
+    archive = _parse_archive(raw.get("archive", {}))
+
+    policy_value = raw.get(
+        "unprocessable_binary_policy", _DEFAULT_UNPROCESSABLE_BINARY_POLICY
+    )
+    if policy_value not in _UNPROCESSABLE_BINARY_POLICIES:
+        # Unknown value → fail closed rather than trust a typo'd opt-out.
+        policy_value = _DEFAULT_UNPROCESSABLE_BINARY_POLICY
+
     return SanitizerConfig(
         sensitivity=sensitivity,
         rules=rules,
         policy=policy,
         output=output,
+        archive=archive,
+        unprocessable_binary_policy=policy_value,
+    )
+
+
+def _parse_archive(raw: dict[str, Any]) -> ArchiveSettings:
+    """Build ArchiveSettings from a config mapping, falling back to the dataclass
+    defaults (which mirror the scanner's module-level constants) for any key the
+    config omits."""
+    defaults = ArchiveSettings()
+    formats = raw.get("formats", defaults.formats)
+    if not isinstance(formats, list):
+        formats = defaults.formats
+    return ArchiveSettings(
+        max_depth=raw.get("max_depth", defaults.max_depth),
+        max_cumulative_bytes=raw.get(
+            "max_cumulative_bytes", defaults.max_cumulative_bytes
+        ),
+        max_entries=raw.get("max_entries", defaults.max_entries),
+        max_uncompressed_bytes=raw.get(
+            "max_uncompressed_bytes", defaults.max_uncompressed_bytes
+        ),
+        max_compression_ratio=raw.get(
+            "max_compression_ratio", defaults.max_compression_ratio
+        ),
+        min_ratio_check_bytes=raw.get(
+            "min_ratio_check_bytes", defaults.min_ratio_check_bytes
+        ),
+        formats=[str(f) for f in formats],
     )
 

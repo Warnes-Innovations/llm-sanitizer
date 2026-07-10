@@ -60,12 +60,27 @@ def _build_parser() -> argparse.ArgumentParser:
         help=(
             "How to handle content sniffed as binary, by content not "
             "extension (default: extract). extract: pull embedded text via "
-            "markitdown (PDF/DOCX/zip/etc). text: force raw bytes to be "
+            "markitdown, and expand recognized archives (zip/tar/gz/7z/rar/…) "
+            "to recursively scan their members. text: force raw bytes to be "
             "scanned as literal UTF-8 text — use when a file's extension is "
             "suspected of being swapped to evade extraction/skipping. skip: "
             "exclude binary files from the scan entirely."
         ),
     )
+    scan_parser.add_argument(
+        "--unprocessable-binary-policy",
+        choices=["ignore", "scan-text", "fail"],
+        default=None,
+        help=(
+            "How to handle a NON-archive binary that is processed but yields no "
+            "extractable text (default: fail). fail: emit a CRITICAL "
+            "unscannable_binary finding (fail closed). scan-text: scan the raw "
+            "bytes as text for injection patterns. ignore: skip it (counted as "
+            "skipped). Does not affect extractor-unavailable (always fails the "
+            "run) or corrupt files (always CRITICAL)."
+        ),
+    )
+    _add_archive_args(scan_parser)
 
     # --- redact ---
     redact_parser = subparsers.add_parser("redact", help="Redact file, URL, directory, or stdin")
@@ -145,6 +160,58 @@ def _build_parser() -> argparse.ArgumentParser:
     return parser
 
 
+def _add_archive_args(parser: argparse.ArgumentParser) -> None:
+    """Add archive-handling override flags. These override the corresponding
+    keys from any loaded config file; unset flags leave the config (or its
+    built-in defaults) untouched."""
+    parser.add_argument(
+        "--archive-max-depth",
+        type=int,
+        default=None,
+        metavar="N",
+        help="Max archive-in-archive nesting depth to expand (default: 3)",
+    )
+    parser.add_argument(
+        "--archive-max-bytes",
+        type=int,
+        default=None,
+        metavar="BYTES",
+        help=(
+            "Max cumulative uncompressed bytes across all nested archive "
+            "levels before extraction stops (default: 524288000 = 500MB)"
+        ),
+    )
+    parser.add_argument(
+        "--archive-formats",
+        default=None,
+        metavar="LIST",
+        help=(
+            "Comma-separated list of archive formats to expand "
+            "(zip,tar,gz,bz2,xz,7z,rar). Formats omitted here are reported as "
+            "unsupported (CRITICAL) rather than expanded. Default: all."
+        ),
+    )
+
+
+def _config_with_archive_overrides(args: argparse.Namespace) -> object:
+    """Load config and apply any --archive-* / --unprocessable-binary-policy CLI
+    overrides on top of it."""
+    from llm_sanitizer.config import load_config
+
+    config = load_config()
+    if getattr(args, "archive_max_depth", None) is not None:
+        config.archive.max_depth = args.archive_max_depth
+    if getattr(args, "archive_max_bytes", None) is not None:
+        config.archive.max_cumulative_bytes = args.archive_max_bytes
+    if getattr(args, "archive_formats", None) is not None:
+        config.archive.formats = [
+            f.strip() for f in args.archive_formats.split(",") if f.strip()
+        ]
+    if getattr(args, "unprocessable_binary_policy", None) is not None:
+        config.unprocessable_binary_policy = args.unprocessable_binary_policy
+    return config
+
+
 def _get_version() -> str:
     from llm_sanitizer import __version__
 
@@ -202,11 +269,14 @@ def main() -> None:
 
 
 def _cmd_scan(args: argparse.Namespace) -> None:
+    from llm_sanitizer.config import SanitizerConfig
     from llm_sanitizer.formatters import format_output
     from llm_sanitizer.models import RiskLevel, ScanResult
-    from llm_sanitizer.scanner import Scanner
+    from llm_sanitizer.scanner import ExtractorUnavailableError, Scanner
 
-    scanner = Scanner()
+    config = _config_with_archive_overrides(args)
+    assert isinstance(config, SanitizerConfig)
+    scanner = Scanner(config)
     target: str = args.target
     binary_mode: str = args.binary_mode
 
@@ -215,6 +285,20 @@ def _cmd_scan(args: argparse.Namespace) -> None:
             result = scanner.scan_dir(
                 target, glob_pattern=args.glob, sensitivity=args.sensitivity, binary_mode=binary_mode
             )
+        elif target != "-" and not _is_url(target):
+            # Local file: use the archive-aware path so recognized archives are
+            # expanded and their members recursively scanned.
+            file_result = scanner.scan_file(
+                target, sensitivity=args.sensitivity, binary_mode=binary_mode
+            )
+            if file_result is None:
+                print(
+                    f"[llm-sanitize] Skipped: no scannable text content "
+                    f"(binary file, binary_mode={binary_mode!r}): {target}",
+                    file=sys.stderr,
+                )
+                sys.exit(3)
+            result = _filter_by_min_risk(file_result, args.min_risk)  # type: ignore[assignment]
         else:
             content, source = _read_content(target, binary_mode=binary_mode)
             if content is None:
@@ -224,8 +308,18 @@ def _cmd_scan(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(3)
-            result = scanner.scan(content, source=source, sensitivity=args.sensitivity)
+            result = scanner.scan(  # type: ignore[assignment]
+                content, source=source, sensitivity=args.sensitivity
+            )
             result = _filter_by_min_risk(result, args.min_risk)  # type: ignore[assignment]
+    except ExtractorUnavailableError as exc:
+        # A required extractor/backend is missing for content in this scan.
+        # Fail fast and loud — do not degrade or partially report.
+        print(
+            f"[llm-sanitize] Extractor unavailable — cannot complete scan: {exc.hint}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     except (OSError, RuntimeError) as exc:
         print(f"[llm-sanitize] Error: {exc}", file=sys.stderr)
         sys.exit(2)
@@ -241,7 +335,7 @@ def _cmd_scan(args: argparse.Namespace) -> None:
 
 def _cmd_redact(args: argparse.Namespace) -> None:
     from llm_sanitizer.redactor import redact
-    from llm_sanitizer.scanner import Scanner
+    from llm_sanitizer.scanner import ExtractorUnavailableError, Scanner
 
     scanner = Scanner()
     target: str = args.target
@@ -285,6 +379,12 @@ def _cmd_redact(args: argparse.Namespace) -> None:
                     Path(output).write_text(redacted, encoding="utf-8")
                 findings_count = scan_result.summary.total_findings
                 print(f"[llm-sanitize] Redacted {findings_count} finding(s) → {output}")
+    except ExtractorUnavailableError as exc:
+        print(
+            f"[llm-sanitize] Extractor unavailable — cannot complete redact: {exc.hint}",
+            file=sys.stderr,
+        )
+        sys.exit(2)
     except (OSError, RuntimeError, ValueError) as exc:
         print(f"[llm-sanitize] Error: {exc}", file=sys.stderr)
         sys.exit(2)
