@@ -40,8 +40,10 @@
 #   -h, --help       Show this help and exit
 #
 # Notes:
-#   * Run this inside the virtualenv you want the packages in (or let `uv`
-#     discover the project's .venv). Without a venv, pip installs with --user.
+#   * If a virtualenv is active, packages install into it. Otherwise the script
+#     creates and uses a repo-local .venv (REPO_ROOT/.venv) so the install and
+#     the post-install verification share one interpreter. It prints the venv
+#     path and how to activate it when done.
 #   * The system-library step may prompt for sudo.
 #   * RUN this script — do not `source` it. Sourcing runs it in your current
 #     shell (leaking `set -euo pipefail`) and breaks path detection under zsh.
@@ -113,8 +115,9 @@ Options:
   -h, --help       Show this help and exit
 
 Notes:
-  * Run this inside the virtualenv you want the packages in (or let `uv`
-    discover the project's .venv). Without a venv, pip installs with --user.
+  * If a virtualenv is active, packages install into it. Otherwise the script
+    creates and uses a repo-local .venv so install and verification share one
+    interpreter; it prints the path and how to activate it when done.
   * The system-library step may prompt for sudo.
   * RUN this script — do not `source` it.
 EOF
@@ -145,13 +148,42 @@ fi
 REPO_ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 
 # ---------------------------------------------------------------------------
+# Resolve the target Python environment (install target MUST equal verify
+# target). Policy: honor an active virtualenv; otherwise install into a
+# repo-local .venv, created on demand. This keeps every install step and the
+# post-install verification pointed at ONE interpreter, so we never install
+# into one environment and then check imports in another.
+# ---------------------------------------------------------------------------
+BASE_PY=""       # interpreter the user asked for (used to build the venv)
+TARGET_PY=""     # interpreter we install into AND verify against
+VENV_DIR=""      # non-empty only when we own a repo-local venv
+ENV_DESC="skipped (--no-python)"
+if [ "$DO_PYTHON" = 1 ]; then
+  BASE_PY="$(command -v "$PYTHON" 2>/dev/null || true)"
+  [ -n "$BASE_PY" ] || die "Python interpreter not found: $PYTHON"
+  if [ -n "${VIRTUAL_ENV:-}" ]; then
+    TARGET_PY="$VIRTUAL_ENV/bin/python"
+    ENV_DESC="active venv: $VIRTUAL_ENV"
+  else
+    VENV_DIR="$REPO_ROOT/.venv"
+    TARGET_PY="$VENV_DIR/bin/python"
+    if [ -x "$TARGET_PY" ]; then
+      ENV_DESC="repo venv (existing): $VENV_DIR"
+    else
+      ENV_DESC="repo venv (will create): $VENV_DIR"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # Preamble
 # ---------------------------------------------------------------------------
 OS="$(uname -s)"
 info "${C_BOLD}llm-sanitizer dependency installer${C_RESET}"
 printf '    OS            : %s\n' "$OS"
 printf '    Repo root     : %s\n' "$REPO_ROOT"
-printf '    Python        : %s\n' "$PYTHON"
+printf '    Python        : %s\n' "$PYTHON${BASE_PY:+ ($BASE_PY)}"
+printf '    Target env    : %s\n' "$ENV_DESC"
 printf '    System step   : %s\n' "$([ "$DO_SYSTEM" = 1 ] && echo enabled || echo skipped)"
 printf '    Python step   : %s\n' "$([ "$DO_PYTHON" = 1 ] && echo enabled || echo skipped)"
 printf '    Dev tooling   : %s\n' "$([ "$DO_DEV" = 1 ] && echo enabled || echo skipped)"
@@ -252,38 +284,60 @@ PY_PKGS=(
 )
 
 install_python_deps() {
-  command -v "$PYTHON" >/dev/null 2>&1 || die "Python interpreter not found: $PYTHON"
-  info "Python: $("$PYTHON" --version 2>&1)"
+  # Create the repo-local venv on demand (only when no venv is active; see the
+  # target-resolution block above, which sets VENV_DIR in that case). die() on
+  # failure is deliberate: without a target interpreter nothing else can run,
+  # and die's explicit exit works even though `set -e` is disabled in here.
+  if [ -n "$VENV_DIR" ] && [ ! -x "$TARGET_PY" ]; then
+    info "No active virtualenv — creating one at $VENV_DIR"
+    if command -v uv >/dev/null 2>&1; then
+      uv venv --python "$BASE_PY" "$VENV_DIR" || die "Failed to create venv at $VENV_DIR"
+    else
+      "$BASE_PY" -m venv "$VENV_DIR" || die "Failed to create venv at $VENV_DIR"
+    fi
+    ok "Created venv at $VENV_DIR"
+  fi
+  [ -x "$TARGET_PY" ] || die "Target interpreter not found: $TARGET_PY"
+  info "Target interpreter: $("$TARGET_PY" --version 2>&1) ($TARGET_PY)"
 
-  # Prefer uv when available (fast, and discovers the project .venv); otherwise
-  # fall back to pip. Honor an active virtualenv; without one, pip uses --user.
+  # Prefer uv when available (fast); fall back to pip. Either way we install
+  # into $TARGET_PY — an absolute interpreter path, never a bare name — so the
+  # install target is unambiguous and matches what verify() checks.
   local installer
   if command -v uv >/dev/null 2>&1; then
     installer="uv"
     info "Using uv for Python package installation"
   else
     installer="pip"
-    info "Using $PYTHON -m pip for Python package installation"
+    info "Using $TARGET_PY -m pip for Python package installation"
   fi
 
   py_install() {
     if [ "$installer" = "uv" ]; then
-      uv pip install --python "$PYTHON" "$@"
-    elif [ -n "${VIRTUAL_ENV:-}" ]; then
-      "$PYTHON" -m pip install "$@"
+      uv pip install --python "$TARGET_PY" "$@"
     else
-      "$PYTHON" -m pip install --user "$@"
+      "$TARGET_PY" -m pip install "$@"
     fi
   }
 
+  # NOTE: this function is invoked as `install_python_deps || rc=1`, which
+  # disables `set -e` inside it. Every install step must therefore check its
+  # own exit status explicitly and `return 1` on failure — otherwise a failed
+  # install would fall through to a misleading `ok` success message.
   info "Installing Python packages: ${PY_PKGS[*]}"
   py_install --upgrade pip >/dev/null 2>&1 || true
-  py_install "${PY_PKGS[@]}"
+  if ! py_install "${PY_PKGS[@]}"; then
+    err "Python package installation failed (see error above)"
+    return 1
+  fi
   ok "Python packages installed"
 
   if [ "$DO_DEV" = 1 ]; then
     info "Installing dev/type-check tooling: mypy"
-    py_install mypy
+    if ! py_install mypy; then
+      err "mypy installation failed (see error above)"
+      return 1
+    fi
     ok "dev tooling installed"
   fi
 
@@ -293,7 +347,10 @@ install_python_deps() {
     if [ -f "$REPO_ROOT/pyproject.toml" ]; then
       info "Installing llm-sanitizer ($_mode) from $REPO_ROOT"
       # shellcheck disable=SC2086  # $_flag is intentionally unquoted (empty = word-split away)
-      ( cd "$REPO_ROOT" && py_install $_flag . )
+      if ! ( cd "$REPO_ROOT" && py_install $_flag . ); then
+        err "llm-sanitizer ($_mode) installation failed (see error above)"
+        return 1
+      fi
       ok "llm-sanitizer installed ($_mode)"
     else
       warn "--$( [ "$DO_EDITABLE" = 1 ] && echo editable || echo install ) given but no pyproject.toml at $REPO_ROOT; skipping."
@@ -305,7 +362,12 @@ install_python_deps() {
 # Step 3 — verification
 # ---------------------------------------------------------------------------
 verify() {
-  info "Verifying imports"
+  info "Verifying imports in $TARGET_PY"
+  # Resolve the target env's bin dir so CLI tools are checked in the SAME
+  # environment we installed into — not via global PATH, which may shadow the
+  # venv (or miss it entirely if the venv isn't activated).
+  local venv_bin
+  venv_bin="$(dirname "$TARGET_PY")"
   # module_name:pip_name pairs — module name differs from pip name for some.
   local checks=(
     "filetype:filetype"
@@ -325,26 +387,25 @@ verify() {
   local entry mod pip
   for entry in "${checks[@]}"; do
     mod="${entry%%:*}"; pip="${entry##*:}"
-    if "$PYTHON" -c "import $mod" >/dev/null 2>&1; then
+    if "$TARGET_PY" -c "import $mod" >/dev/null 2>&1; then
       ok "$pip (import $mod)"
     else
       err "$pip — 'import $mod' failed"
       failed=1
     fi
   done
-  # CLI-only tooling (verified by presence on PATH, not by import). If installed
-  # via pip --user, ensure ~/.local/bin (Linux) or the user base bin is on PATH.
-  if command -v semgrep >/dev/null 2>&1; then
-    ok "semgrep ($(semgrep --version 2>/dev/null | head -1))"
+  # CLI-only tooling — checked at the target env's bin dir, not global PATH.
+  if [ -x "$venv_bin/semgrep" ]; then
+    ok "semgrep ($("$venv_bin/semgrep" --version 2>/dev/null | head -1))"
   else
-    err "semgrep — not found on PATH (if pip-installed --user, add its bin dir to PATH)"
+    err "semgrep — not found in $venv_bin"
     failed=1
   fi
   if [ "$DO_DEV" = 1 ]; then
-    if command -v mypy >/dev/null 2>&1; then
-      ok "mypy ($(mypy --version 2>/dev/null))"
+    if [ -x "$venv_bin/mypy" ]; then
+      ok "mypy ($("$venv_bin/mypy" --version 2>/dev/null))"
     else
-      err "mypy — not found on PATH (if pip-installed --user, add its bin dir to PATH)"
+      err "mypy — not found in $venv_bin"
       failed=1
     fi
   fi
@@ -381,6 +442,15 @@ fi
 echo
 if [ "$rc" = 0 ]; then
   info "${C_GREEN}${C_BOLD}Done.${C_RESET} Archive + document extraction dependencies are ready."
+  if [ -n "$VENV_DIR" ]; then
+    info "Installed into repo-local venv (no active venv was detected):"
+    info "    $VENV_DIR"
+    info "To use these tools, activate it first:"
+    info "    source \"$VENV_DIR/bin/activate\""
+    info "or invoke them by path, e.g. \"$VENV_DIR/bin/llm-sanitizer\"."
+  elif [ -n "$TARGET_PY" ]; then
+    info "Installed into the active virtualenv: ${VIRTUAL_ENV:-$TARGET_PY}"
+  fi
 else
   die "Finished with errors (see above)."
 fi
