@@ -107,4 +107,4 @@ _**User (2026-04-21 04:05:00Z)**_
 
 Add an `install.sh` script (and documentation to README) to `linkedown/` to add agent instructions for copilot, claude, codex, and cline.
 
-<!-- specstory-relocated: processed=2026-05-19T02:01:40Z source=cv-builder target=llm-sanitizer reason="https://github.com/Warnes-Innovations/llm-sanitizer)" -->
+<!-- specstory-relocated: processed=2026-07-14T15:25:58Z source=cv-builder target=llm-sanitizer reason="explicit repo URL" -->
