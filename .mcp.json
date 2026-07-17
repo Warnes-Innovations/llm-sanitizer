@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "llm-sanitizer": {
+      "command": "uv",
+      "args": ["run", "llm-sanitizer"]
+    }
+  }
+}
