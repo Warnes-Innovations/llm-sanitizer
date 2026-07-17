@@ -23,6 +23,10 @@ venv/
 # pytest
 .pytest_cache/
 
+# Scratch / test output (keep the dir, ignore its contents)
+/tmp/
+!/tmp/.gitkeep
+
 # Coverage
 htmlcov/
 .coverage

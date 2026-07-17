@@ -133,6 +133,7 @@ class DirScanResult(BaseModel):
     source: str
     sensitivity: str
     files_scanned: int
+    files_skipped_binary: int = 0
     total_findings: int
     max_risk: RiskLevel | None
     results: list[ScanResult]

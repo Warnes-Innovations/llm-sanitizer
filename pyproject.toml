@@ -36,6 +36,12 @@ dependencies = [
 	"mcp>=1.0",
 	"httpx>=0.27",
 	"pydantic>=2.0",
+	# Pure-Python (MIT) magic-byte type detection for Tier-1 extension-vs-content
+	# mismatch checks. Matches only known binary signatures (returns None for
+	# text/source), which keeps the check free of content-heuristic false positives.
+	"filetype>=1.2",
+	# Pure-Python (BSD) PDF parser for Tier-2 bounded structural validation.
+	"pypdf>=4.0",
 ]
 
 [dependency-groups]
@@ -46,9 +52,21 @@ test = [
 	"pytest-timeout>=2.4.0",
 	"pytest-xdist>=3.8.0",
 ]
+# Static type-checking. mypy is configured strict ([tool.mypy]) but was not
+# declared as a dependency anywhere; declare it here so the strict check is
+# reproducible. install-deps.sh installs this unless --no-dev is passed.
+dev = [
+	"mypy>=1.13",
+]
 
 [project.optional-dependencies]
 binary = ["markitdown>=0.1"]
+# 7z archive extraction. py7zr is LGPL-3.0 (dynamically imported, AGPL-compatible).
+7z = ["py7zr>=0.20"]
+# RAR (and general libarchive-backed) extraction. libarchive-c wraps the
+# BSD-licensed libarchive; the Python wrapper is CC0. Requires the system
+# libarchive shared library to be installed.
+rar = ["libarchive-c>=5.0"]
 
 [project.urls]
 Homepage = "https://github.com/Warnes-Innovations/llm-sanitizer"
@@ -90,3 +108,12 @@ pythonpath = ["."]
 
 [tool.mypy]
 strict = true
+
+# Optional/third-party modules without bundled type stubs (or optional at
+# runtime). ignore_missing_imports keeps the strict check environment-
+# independent: a no-op when the module is installed and typed, and it suppresses
+# import errors when the module is absent (these imports are lazy, guarded by
+# try/except ImportError).
+[[tool.mypy.overrides]]
+module = ["py7zr", "markitdown", "pypdf"]
+ignore_missing_imports = true

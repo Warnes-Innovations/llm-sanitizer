@@ -330,8 +330,149 @@ Inline text     ──→  (direct)                              ├─ markdown
 |-----------|---------|----------|
 | `mcp>=1.0` | MCP server framework (FastMCP) | Yes |
 | `httpx` | URL fetching (async-capable) | Yes |
-| `markitdown` | PDF/DOCX content extraction | Optional (binary doc support) |
 | `pydantic` | Data models and validation | Yes |
+| `filetype` | Tier-1 magic-byte type detection (MIT, pure-Python) | Yes (core) |
+| `pypdf` | Tier-2 bounded PDF structural validation (BSD, pure-Python) | Yes (core) |
+| `markitdown` | PDF/DOCX/etc content extraction | Optional (`[binary]` extra) |
+| `py7zr` | 7z archive extraction | Optional (`[7z]` extra — LGPL-3.0, AGPL-compatible) |
+| `libarchive-c` | RAR / general libarchive extraction | Optional (`[rar]` extra — wraps BSD-licensed libarchive) |
+
+ZIP, TAR, and TAR.GZ/BZ2/XZ (plus bare GZ/BZ2/XZ streams) need no optional
+dependency — they use the Python standard library (`zipfile`, `tarfile`,
+`gzip`, `bz2`, `lzma`).
+
+---
+
+## Archive Handling
+
+Archives are a distinct content class: their bytes are compressed, so scanning
+them as text is meaningless (it yields spurious zero-width/homoglyph findings on
+random bytes) and, worse, the real payload — an injection hidden *inside* an
+archived file — is never seen. Under the default `binary_mode="extract"`, the
+scanner therefore detects and expands archives, scanning each member through the
+normal rule pipeline.
+
+### Detection is content-based
+
+Archive *type* is determined from magic bytes (`readers/archive_reader.py`),
+never the file extension. A file's real content governs its handling, closing
+two evasions at once: a payload archive renamed to a benign extension, and a
+plain file renamed to an archive extension. ZIP-based *document* formats
+(`.docx`, `.pptx`, `.xlsx`, `.odt`, `.epub`, `.jar`, …) carry ZIP magic but are
+routed to the document (markitdown) path, not unpacked as archives.
+
+### Supported formats
+
+| Format | Backend | Availability |
+|--------|---------|--------------|
+| ZIP | `zipfile` (stdlib) | Always |
+| TAR, TAR.GZ, TAR.BZ2, TAR.XZ | `tarfile` (stdlib) | Always |
+| GZ, BZ2, XZ (single stream) | `gzip`/`bz2`/`lzma` (stdlib) | Always |
+| 7z | `py7zr` | `pip install llm-sanitizer[7z]` |
+| RAR (v3/4/5) + general fallback | `libarchive-c` | `pip install llm-sanitizer[rar]` |
+
+Optional backends are imported lazily; the package works without them. A
+`.tar.gz` is handled as a gzip stream that decompresses to a bare tar, which is
+then re-detected and expanded on the next recursion level.
+
+### Fail-closed integrity findings (CRITICAL)
+
+An archive that cannot be safely expanded is surfaced loudly rather than
+silently passed through or raw-text scanned — an unopenable or mislabeled
+archive is a potential evasion attempt:
+
+| Rule id | Raised when |
+|---------|-------------|
+| `archive_type_mismatch` | Extension and content magic disagree, or a non-archive-named file hides real archive bytes |
+| `archive_corrupt` | Recognized, supported format that is corrupt, truncated, encrypted, or expands past its size budget |
+| `archive_unsupported` | Format disabled by configuration, or its optional backend is not installed (message includes the install hint) |
+
+### Bomb defenses and limits
+
+The existing zip-bomb defense (entry count, total/per-entry uncompressed size,
+compression ratio, and nested "zip-of-zips" central-directory inspection) is
+reused, and extended across recursion by two cumulative guards: a maximum
+nesting depth and a maximum cumulative uncompressed size across all levels. An
+over-budget or too-deeply-nested archive is skipped (guarded) rather than
+expanded.
+
+All limits, and the enabled-format list, are configurable. Defaults mirror the
+module-level constants in `scanner.py` (the ultimate fallback), so behavior is
+unchanged when nothing is configured:
+
+```yaml
+# .llm-sanitizer.yml
+archive:
+  max_depth: 3
+  max_cumulative_bytes: 524288000      # 500 MB across all nested levels
+  max_entries: 1000
+  max_uncompressed_bytes: 104857600    # 100 MB per archive
+  max_compression_ratio: 100
+  min_ratio_check_bytes: 10485760      # 10 MB floor before ratio applies
+  formats: [zip, tar, gz, bz2, xz, 7z, rar]
+```
+
+CLI equivalents on `scan`: `--archive-max-depth`, `--archive-max-bytes`,
+`--archive-formats` (a comma-separated subset; formats omitted here are reported
+as `archive_unsupported` rather than expanded).
+
+---
+
+## Content Integrity (all files)
+
+The same content-over-name principle the archive path applies is generalized to
+every file, as two fail-closed tiers plus a policy knob and a fail-fast rule.
+
+### Tier 1 — extension vs. content type mismatch
+
+`readers/integrity_checks.detect_type_mismatch` uses the pure-Python `filetype`
+library, which matches only known *binary* magic signatures and returns None for
+text and source code. A CRITICAL `type_mismatch` is emitted only when the content
+resolves to a concrete binary type that contradicts the extension (a `.md`/`.txt`
+whose bytes are an ELF/PE/image), or when the bytes are unidentified *binary*
+(NUL-containing) hiding under a text extension. Markdown that embeds HTML, fenced
+code blocks, and scripts are text — never flagged. ZIP-based office documents are
+legitimately ZIP and are handled by Tier 2, not flagged here.
+
+### Tier 2 — bounded structural validation
+
+`readers/integrity_checks.validate_structure` performs a *bounded* structural
+parse for the formats flow-guard actually ingests, emitting CRITICAL
+`corrupt_file` on failure. Untrusted input is never fully rendered/decoded, and
+reads are bounded by the archive size/entry limits.
+
+| Format | Backend | Check |
+|--------|---------|-------|
+| PDF | `pypdf` (BSD, core) | Open + parse trailer and page tree; no rendering |
+| OOXML (.docx/.xlsx/.pptx) | stdlib `zipfile` + `xml.etree` | ZIP opens, `[Content_Types].xml` present, primary part is well-formed XML |
+| ODF (.odt/.ods/.odp) | stdlib `zipfile` + `xml.etree` | ZIP opens, `mimetype` present, `content.xml` is well-formed XML |
+
+Images, audio, and video are **out of Tier-2 scope** — Tier-1 magic/type-mismatch
+only.
+
+### Unprocessable-binary policy
+
+A *non-archive* binary that is successfully processed but yields no extractable
+text is governed by `unprocessable_binary_policy` (config) /
+`--unprocessable-binary-policy` (CLI):
+
+- `fail` (default, fail-closed) — CRITICAL `unscannable_binary`.
+- `scan-text` — scan the raw bytes as UTF-8 for injection patterns.
+- `ignore` — skip it (counted as skipped).
+
+This governs *only* the "processed but empty" outcome — not extractor-unavailable
+(fails fast, below) and not extraction-error/corrupt (always CRITICAL).
+
+### Fail-fast on a missing extractor/backend
+
+When content actually present in the scan needs an extractor/backend that isn't
+installed — markitdown (for binary extraction) or a 7z/rar backend (for those
+archive formats) — the scan does **not** degrade, skip, or emit a per-file
+finding. It raises `ExtractorUnavailableError` (a run-level failure) carrying the
+install hint: the CLI exits non-zero, the MCP tools return `status:"error"` with
+the hint. A systemic coverage gap must halt the run loudly, not be papered over
+file-by-file. (Corrupt files, and archive formats disabled by config, remain
+per-file CRITICAL findings — those are decisions, not coverage gaps.)
 
 ---
 
