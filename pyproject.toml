@@ -42,6 +42,14 @@ dependencies = [
 	"filetype>=1.2",
 	# Pure-Python (BSD) PDF parser for Tier-2 bounded structural validation.
 	"pypdf>=4.0",
+	# Binary document text extraction (PDF, DOCX, PPTX, XLSX, ODT). A CORE
+	# dependency, not optional: the file-scanning path (scan_file/scan_dir/
+	# redact_file) — and the downstream flow-guard sanitization protocol that
+	# relies on it — cannot scan binary documents without an extractor, and a
+	# server that silently can't scan PDFs fails closed in a way that surprises
+	# callers (returns status:"error" on every binary). Keeping it in base deps
+	# means the MCP server can never launch unable to scan binaries.
+	"markitdown>=0.1",
 ]
 
 [dependency-groups]
@@ -60,7 +68,12 @@ dev = [
 ]
 
 [project.optional-dependencies]
-binary = ["markitdown>=0.1"]
+# markitdown is now a CORE dependency (see [project] dependencies above), so
+# binary document scanning works out of the box. This extra is retained as a
+# no-op for backward compatibility: `pip install llm-sanitizer[binary]` and any
+# docs/scripts/protocol text that still reference the [binary] extra keep
+# resolving without error.
+binary = []
 # 7z archive extraction. py7zr is LGPL-3.0 (dynamically imported, AGPL-compatible).
 7z = ["py7zr>=0.20"]
 # RAR (and general libarchive-backed) extraction. libarchive-c wraps the

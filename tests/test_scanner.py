@@ -785,9 +785,14 @@ class TestFailFastExtractorUnavailable:
         from llm_sanitizer.scanner import ExtractorUnavailableError
 
         def _no_markitdown(_path: str) -> str:
+            # Mirror the real read_binary ImportError text: markitdown is a
+            # core dependency, so its absence signals a broken install, not a
+            # missing optional extra.
             raise ImportError(
-                "Binary document support requires the 'binary' extra: "
-                "pip install llm-sanitizer[binary]"
+                "markitdown is unavailable, but it is a core dependency of "
+                "llm-sanitizer — the running environment is missing declared "
+                "dependencies. Reinstall/sync it (e.g. 'uv sync' or "
+                "'pip install -e .') and relaunch the server."
             )
 
         _patch_extraction(monkeypatch, _no_markitdown)
@@ -795,7 +800,8 @@ class TestFailFastExtractorUnavailable:
         f.write_bytes(b"needs\x00extraction")
         with pytest.raises(ExtractorUnavailableError) as excinfo:
             Scanner().scan_file(f)
-        assert "llm-sanitizer[binary]" in str(excinfo.value)
+        assert "markitdown" in str(excinfo.value)
+        assert "core dependency" in str(excinfo.value)
 
     def test_scan_dir_halts_on_missing_extractor(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
