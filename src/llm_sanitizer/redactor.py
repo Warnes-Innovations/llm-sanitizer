@@ -66,7 +66,7 @@ def redact_content(
     mode: str = "strip",
     source: str = "<inline>",
     sensitivity: str = "medium",
-    max_passes: int = 3,
+    max_passes: int = 10,
 ) -> tuple[str, ScanResult]:
     """Scan *content*, redact findings, then re-scan until stable or *max_passes* reached.
 

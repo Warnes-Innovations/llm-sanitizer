@@ -68,6 +68,7 @@ class InstructionOverrideRule(BaseRule):
                         )
                     )
                     fid += 1
-                    break  # one finding per pattern per line
+                    # No per-line cap: minified/single-line content can carry
+                    # many instances, and redaction removes only reported spans.
 
         return findings

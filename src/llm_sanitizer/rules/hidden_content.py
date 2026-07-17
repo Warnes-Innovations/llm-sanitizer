@@ -307,24 +307,26 @@ class HiddenContentRule(BaseRule):
             )
             fid += 1
 
+        # Every match on a line is reported, not just the first. Minified
+        # HTML puts an entire document on one line — a first-match-only cap
+        # under-reports, and redaction (which removes exactly the reported
+        # spans) then needs one full scan/redact round trip per hidden span
+        # to converge on such files.
         for pattern, risk, label in _CSS_HIDDEN_PATTERNS + _INVISIBLE_PATTERNS:
             for line_idx, line in enumerate(lines):
                 for m in pattern.finditer(line):
                     emit(line_idx, m, risk, label)
-                    break  # one finding per pattern per line
 
         for line_idx, line in enumerate(lines):
             for m in _TEXT_COLOR_DECL_RE.finditer(line):
                 color_label = _classify_text_color(m.group(1), lines, line_idx)
                 if color_label is not None:
                     emit(line_idx, m, RiskLevel.critical, color_label)
-                break  # one finding per line
 
         for line_idx, line in enumerate(lines):
             for m in _OPACITY_DECL_RE.finditer(line):
                 opacity = _parse_opacity(m.group(1))
                 if opacity is not None and opacity < _NEAR_ZERO_ALPHA:
                     emit(line_idx, m, RiskLevel.high, _NEAR_ZERO_OPACITY_LABEL)
-                break  # one finding per line
 
         return findings

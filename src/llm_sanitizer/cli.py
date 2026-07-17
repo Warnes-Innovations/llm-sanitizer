@@ -94,6 +94,15 @@ def _build_parser() -> argparse.ArgumentParser:
     )
     redact_parser.add_argument("--glob", default="**/*", help="File pattern for directory redaction")
     redact_parser.add_argument(
+        "--sensitivity",
+        choices=["low", "medium", "high"],
+        default="medium",
+        help=(
+            "Detection sensitivity (default: medium). Use the same value as "
+            "the scan so redaction removes everything the scan reported."
+        ),
+    )
+    redact_parser.add_argument(
         "--affected-only",
         action="store_true",
         help="Only output files that had findings (directory mode)",
@@ -334,17 +343,21 @@ def _cmd_scan(args: argparse.Namespace) -> None:
 
 
 def _cmd_redact(args: argparse.Namespace) -> None:
-    from llm_sanitizer.redactor import redact
+    from llm_sanitizer.redactor import redact_content
     from llm_sanitizer.scanner import ExtractorUnavailableError, Scanner
 
     scanner = Scanner()
     target: str = args.target
     output: str = args.output
     binary_mode: str = args.binary_mode
+    sensitivity: str = args.sensitivity
 
     try:
         if Path(target).is_dir():
-            _redact_dir(scanner, target, output, args.mode, args.glob, args.affected_only, binary_mode)
+            _redact_dir(
+                scanner, target, output, args.mode, args.glob,
+                args.affected_only, binary_mode, sensitivity,
+            )
         else:
             from llm_sanitizer.scanner import _is_binary
 
@@ -356,8 +369,13 @@ def _cmd_redact(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(3)
-            scan_result = scanner.scan(content, source=source)
-            redacted = redact(content, scan_result, mode=args.mode)
+            # Iterate scan/redact to a stable state — a single pass can
+            # expose new findings (stripping zero-width characters reveals
+            # the text underneath; removing one span on a minified line
+            # uncovers the next).
+            redacted, scan_result = redact_content(
+                content, mode=args.mode, source=source, sensitivity=sensitivity
+            )
             if output == "-":
                 print(redacted, end="")
             else:
@@ -398,8 +416,9 @@ def _redact_dir(
     glob_pattern: str,
     affected_only: bool,
     binary_mode: str = "extract",
+    sensitivity: str = "medium",
 ) -> None:
-    from llm_sanitizer.redactor import redact
+    from llm_sanitizer.redactor import redact_content
     from llm_sanitizer.scanner import Scanner, _is_binary, iter_scannable_files, read_scannable_content
 
     assert isinstance(scanner, Scanner)
@@ -432,12 +451,16 @@ def _redact_dir(
                     shutil.copy2(file_path, out_path)
                     files_written.append(str(out_path))
                 continue
-            scan_result = scanner.scan(content, source=str(file_path))
+            # Iterate scan/redact per file to a stable state (see
+            # _cmd_redact's single-file path for rationale).
+            redacted, scan_result = redact_content(
+                content, mode=mode, source=str(file_path), sensitivity=sensitivity
+            )
             if scan_result.findings:
                 if is_binary_content:
                     shutil.copy2(file_path, out_path)
                 else:
-                    out_path.write_text(redact(content, scan_result, mode=mode), encoding="utf-8")
+                    out_path.write_text(redacted, encoding="utf-8")
                 files_written.append(str(out_path))
             elif not affected_only:
                 shutil.copy2(file_path, out_path)

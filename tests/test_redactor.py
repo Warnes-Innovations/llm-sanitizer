@@ -97,3 +97,46 @@ class TestRedactRealContent:
         assert "instructions for AI" not in redacted
         assert "Normal text" in redacted
         assert "more text" in redacted
+
+
+class TestMinifiedSingleLine:
+    """Regression tests for minified (single-line) HTML.
+
+    Real pages (e.g. LinkedIn captures) put the whole document on one line
+    with dozens of hidden spans. A first-match-per-line reporting cap made
+    each scan surface only one finding, so redaction needed one full
+    scan/redact round trip per span and never converged within the pass
+    bound.
+    """
+
+    N_SPANS = 8
+
+    def _minified(self) -> str:
+        spans = "".join(
+            f'<span style="display:none">hidden {i}</span><b>visible {i}</b>'
+            for i in range(self.N_SPANS)
+        )
+        return f"<html><body>{spans}</body></html>"
+
+    def test_scan_reports_every_hidden_span_on_one_line(self) -> None:
+        result = scan_text(self._minified(), sensitivity="high")
+        hidden = [f for f in result.findings if f.rule == "hidden_content"]
+        assert len(hidden) >= self.N_SPANS
+
+    def test_redact_content_converges_to_clean(self) -> None:
+        redacted, _ = redact_content(self._minified(), sensitivity="high")
+        rescan = scan_text(redacted, sensitivity="high")
+        assert rescan.summary.total_findings == 0
+        # Visible content survives redaction.
+        assert "visible 0" in redacted
+        assert f"visible {self.N_SPANS - 1}" in redacted
+
+    def test_redact_content_matches_scan_sensitivity(self) -> None:
+        # Redacting at the same sensitivity as the scan must remove
+        # everything that scan reports — no scan-at-high/redact-at-medium
+        # mismatch leaving residual findings behind.
+        content = self._minified()
+        for sensitivity in ("low", "medium", "high"):
+            redacted, _ = redact_content(content, sensitivity=sensitivity)
+            rescan = scan_text(redacted, sensitivity=sensitivity)
+            assert rescan.summary.total_findings == 0, sensitivity

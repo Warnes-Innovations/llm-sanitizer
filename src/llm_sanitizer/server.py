@@ -152,30 +152,48 @@ def scan_dir(
 
 
 @mcp.tool()
-def redact(content: str, mode: str = "strip") -> str:
+def redact(content: str, mode: str = "strip", sensitivity: str = "medium") -> str:
     """Redact embedded LLM instructions from inline text content.
+
+    Scans and redacts iteratively until the content is stable — a single
+    pass can expose new findings (e.g. stripping zero-width characters
+    reveals plain instruction text underneath).
 
     Args:
         content: The text content to redact.
         mode: Redaction mode — "strip" (remove), "comment" (replace with marker),
               or "highlight" (wrap in visible markers).
+        sensitivity: Detection sensitivity ("low" | "medium" | "high") —
+              use the same value as the scan call so redaction removes
+              everything the scan reported.
 
     Returns:
         Cleaned text content.
     """
-    from llm_sanitizer import redactor as _redactor
-    from llm_sanitizer.scanner import Scanner
+    from llm_sanitizer.redactor import redact_content
 
     try:
-        result = Scanner().scan(content, source="<inline>")
-        return _redactor.redact(content, result, mode=mode)
+        clean, _ = redact_content(
+            content, mode=mode, source="<inline>", sensitivity=sensitivity
+        )
+        return clean
     except ValueError as exc:
         return json.dumps({"status": "error", "message": str(exc)})
 
 
 @mcp.tool()
-def redact_file(path: str, output_path: str, mode: str = "strip", binary_mode: str = "extract") -> str:
+def redact_file(
+    path: str,
+    output_path: str,
+    mode: str = "strip",
+    binary_mode: str = "extract",
+    sensitivity: str = "medium",
+) -> str:
     """Redact a file and write a clean copy to the output path.
+
+    Scans and redacts iteratively until the content is stable — a single
+    pass can expose new findings (e.g. stripping zero-width characters
+    reveals plain instruction text underneath).
 
     Args:
         path: Path to the file to redact.
@@ -185,14 +203,17 @@ def redact_file(path: str, output_path: str, mode: str = "strip", binary_mode: s
             not extension) — "extract" (default; pull embedded text via
             markitdown), "text" (force raw bytes to be scanned as literal
             text), or "skip" (never read binary content).
+        sensitivity: Detection sensitivity ("low" | "medium" | "high") —
+            use the same value as the scan call so redaction removes
+            everything the scan reported.
 
     Returns:
         JSON string with status and output path, or {"status": "error", ...}
         if the file could not be read or yielded no scannable text content.
     """
-    from llm_sanitizer import redactor as _redactor
     from llm_sanitizer.readers import read_file
-    from llm_sanitizer.scanner import Scanner, _is_binary
+    from llm_sanitizer.redactor import redact_content
+    from llm_sanitizer.scanner import _is_binary
 
     try:
         content = read_file(path, binary_mode=binary_mode)
@@ -201,7 +222,6 @@ def redact_file(path: str, output_path: str, mode: str = "strip", binary_mode: s
                 "status": "error",
                 "message": f"No scannable text content (binary file, binary_mode={binary_mode!r}): {path}",
             })
-        result = Scanner().scan(content, source=path)
         is_binary_content = binary_mode != "text" and _is_binary(Path(path))
         if is_binary_content:
             # A binary file's *extracted* text can be scanned for findings,
@@ -209,9 +229,14 @@ def redact_file(path: str, output_path: str, mode: str = "strip", binary_mode: s
             # back into the original binary format — so binary files are
             # copied through unmodified rather than replaced with mangled
             # text (mirrors redact_dir's handling of the same case).
+            from llm_sanitizer.scanner import Scanner
+
+            result = Scanner().scan(content, source=path, sensitivity=sensitivity)
             shutil.copy2(path, output_path)
         else:
-            clean = _redactor.redact(content, result, mode=mode)
+            clean, result = redact_content(
+                content, mode=mode, source=path, sensitivity=sensitivity
+            )
             Path(output_path).write_text(clean, encoding="utf-8")
         return json.dumps({
             "status": "ok",
@@ -224,25 +249,32 @@ def redact_file(path: str, output_path: str, mode: str = "strip", binary_mode: s
 
 
 @mcp.tool()
-def redact_url(url: str, output_path: str, mode: str = "strip") -> str:
+def redact_url(url: str, output_path: str, mode: str = "strip", sensitivity: str = "medium") -> str:
     """Fetch a URL, redact its content, and write a clean copy to a local file.
+
+    Scans and redacts iteratively until the content is stable — a single
+    pass can expose new findings (e.g. stripping zero-width characters
+    reveals plain instruction text underneath).
 
     Args:
         url: The URL to fetch and redact.
         output_path: Local path where the clean content will be written.
         mode: Redaction mode — "strip", "comment", or "highlight".
+        sensitivity: Detection sensitivity ("low" | "medium" | "high") —
+            use the same value as the scan call so redaction removes
+            everything the scan reported.
 
     Returns:
         JSON string with status and output path.
     """
-    from llm_sanitizer import redactor as _redactor
     from llm_sanitizer.readers.url_reader import read_url as _read_url
-    from llm_sanitizer.scanner import Scanner
+    from llm_sanitizer.redactor import redact_content
 
     try:
         content = _read_url(url)
-        result = Scanner().scan(content, source=url)
-        clean = _redactor.redact(content, result, mode=mode)
+        clean, result = redact_content(
+            content, mode=mode, source=url, sensitivity=sensitivity
+        )
         Path(output_path).write_text(clean, encoding="utf-8")
         return json.dumps({
             "status": "ok",
