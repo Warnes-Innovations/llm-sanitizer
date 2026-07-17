@@ -42,14 +42,21 @@ dependencies = [
 	"filetype>=1.2",
 	# Pure-Python (BSD) PDF parser for Tier-2 bounded structural validation.
 	"pypdf>=4.0",
-	# Binary document text extraction (PDF, DOCX, PPTX, XLSX, ODT). A CORE
-	# dependency, not optional: the file-scanning path (scan_file/scan_dir/
-	# redact_file) — and the downstream flow-guard sanitization protocol that
-	# relies on it — cannot scan binary documents without an extractor, and a
-	# server that silently can't scan PDFs fails closed in a way that surprises
-	# callers (returns status:"error" on every binary). Keeping it in base deps
-	# means the MCP server can never launch unable to scan binaries.
-	"markitdown>=0.1",
+	# Binary document text extraction. A CORE dependency, not optional: the
+	# file-scanning path (scan_file/scan_dir/redact_file) — and the downstream
+	# flow-guard sanitization protocol that relies on it — cannot scan binary
+	# documents without an extractor, and a server that silently can't scan a
+	# PDF fails closed in a way that surprises callers (unscannable_binary /
+	# status:"error" on every binary). Keeping it in base deps means the MCP
+	# server can never launch unable to scan binaries.
+	#
+	# The per-format extras are REQUIRED: base markitdown parses no format at
+	# all (it raises MissingDependencyException, which surfaces as a critical
+	# unscannable_binary finding). Pin exactly the document types the protocol
+	# handles — PDF, DOCX, PPTX, XLSX/XLS — and deliberately exclude the
+	# markitdown[all] bloat (azure-doc-intelligence, audio transcription,
+	# youtube) that has no place in a security scanner.
+	"markitdown[pdf,docx,pptx,xlsx,xls]>=0.1",
 ]
 
 [dependency-groups]
