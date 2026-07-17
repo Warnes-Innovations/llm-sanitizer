@@ -20,6 +20,7 @@ up — especially security/correctness fixes to the scanner — **proactively pr
 to promote `devel → main`**. Do not let released consumers drift far behind `devel`.
 
 Good moments to prompt:
+
 - After merging security or content-integrity hardening.
 - After a fix to a user-reported scanning bug.
 - Before asking a consumer (e.g. flow-guard) to rely on new behavior.
@@ -36,6 +37,24 @@ gh pr merge <PR#> --merge      # do NOT pass --delete-branch (devel is the trunk
 
 Never delete `devel` when merging — it is the permanent working trunk.
 
+### Consumers may need `--refresh` after a promotion
+
+Consumers pin a **moving branch ref** (`@main`), and `uvx` caches built environments. After a
+`devel → main` promotion, a consumer running `uvx --from git+…@main llm-sanitizer` may keep
+serving the **previously cached** build until its cache refreshes — so the new `main` code does
+not always take effect immediately on the next session.
+
+To force a consumer to pick up the just-promoted `main`:
+
+```bash
+uvx --refresh --from git+https://github.com/Warnes-Innovations/llm-sanitizer.git@main llm-sanitizer
+# or clear the uv cache:  uv cache clean llm-sanitizer
+```
+
+**Agent instruction:** when you promote `devel → main` for a change a consumer needs *now*
+(e.g. a security fix flow-guard must use immediately), tell the maintainer that consumers may
+need a `uvx --refresh` (or a uv cache clean) before the new build is live.
+
 ## Local development vs. released consumption
 
 - **This repo's own `.mcp.json`** runs the server from local files (`uv run llm-sanitizer`) so it
@@ -43,8 +62,10 @@ Never delete `devel` when merging — it is the permanent working trunk.
 - **Consumers** (flow-guard) default to the released `@main` build. A developer who wants a
   consumer to exercise *local* llm-sanitizer edits adds a machine-local override that silently
   wins over the committed default:
+
   ```bash
   claude mcp add --transport stdio llm-sanitizer -s local -- \
     uv run --directory ~/src/llm-sanitizer llm-sanitizer
   ```
+
   Remove it to return to the released build: `claude mcp remove llm-sanitizer -s local`.
