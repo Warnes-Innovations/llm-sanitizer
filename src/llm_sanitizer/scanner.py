@@ -11,6 +11,8 @@ import tempfile
 import zipfile
 from pathlib import Path
 
+import filetype
+
 from llm_sanitizer.config import ArchiveSettings, SanitizerConfig, load_config
 from llm_sanitizer.models import (
     DirScanResult,
@@ -37,6 +39,7 @@ from llm_sanitizer.rules.integrity import (
     CORRUPT_FILE,
     TYPE_MISMATCH,
     UNSCANNABLE_BINARY,
+    UNSCANNABLE_MEDIA,
     make_integrity_finding,
 )
 
@@ -130,6 +133,37 @@ def _is_binary(path: Path) -> bool:
             return b"\0" in fh.read(_BINARY_SNIFF_BYTES)
     except OSError:
         return False
+
+
+def _recognized_media_kind(path: Path) -> str | None:
+    """Return 'image'/'audio'/'video' if *path*'s MAGIC BYTES identify it as
+    recognized media, else None. Content is the source of truth — the extension
+    is never consulted (a disguised payload can't dodge this by renaming)."""
+    try:
+        kind = filetype.guess(str(path))
+    except (OSError, TypeError, ValueError):
+        return None
+    if kind is None:
+        return None
+    top = kind.mime.split("/", 1)[0]
+    return top if top in ("image", "audio", "video") else None
+
+
+def _unscannable_finding(path: Path, source: str, reason: str) -> Finding:
+    """Build the right unscannable finding for *path*: recognized media is a
+    MEDIUM ``unscannable_media`` (no text to inject; the danger is *executing*
+    it, flagged by the code auditor); anything else is a CRITICAL
+    ``unscannable_binary`` (a wholly-unknown binary we cannot vouch for)."""
+    kind = _recognized_media_kind(path)
+    if kind is not None:
+        return make_integrity_finding(
+            UNSCANNABLE_MEDIA,
+            source,
+            f"Recognized {kind} media by magic bytes; {reason} Media carries no "
+            "injectable text, so this is MEDIUM (verify) — but code that "
+            "EXECUTES a media file is flagged separately by the code auditor.",
+        )
+    return make_integrity_finding(UNSCANNABLE_BINARY, source, reason)
 
 
 # markitdown's ZipConverter extracts every entry of a .zip (recursively, for
@@ -605,12 +639,12 @@ class Scanner:
         try:
             text = _extract_binary_text(path)
         except _ExtractionFailedError as exc:
-            # markitdown ran but failed on this file → fail closed.
+            # markitdown ran but failed on this file → fail closed (media → medium).
             return [
-                make_integrity_finding(
-                    UNSCANNABLE_BINARY,
+                _unscannable_finding(
+                    path,
                     source,
-                    f"Binary extraction failed (corrupt or unreadable): {exc}",
+                    f"binary extraction failed (corrupt or unreadable): {exc}.",
                 )
             ]
         if not text.strip():
@@ -621,13 +655,13 @@ class Scanner:
             if policy == "scan-text":
                 raw = path.read_text(encoding="utf-8", errors="replace")
                 return self.scan(raw, source=source, sensitivity=sensitivity).findings
-            # "fail" (default) — fail closed.
+            # "fail" (default) — fail closed (recognized media → medium).
             return [
-                make_integrity_finding(
-                    UNSCANNABLE_BINARY,
+                _unscannable_finding(
+                    path,
                     source,
-                    "Binary was processed but yielded no extractable text; it "
-                    "cannot be scanned (unprocessable_binary_policy='fail').",
+                    "processed but yielded no extractable text; it cannot be "
+                    "scanned (unprocessable_binary_policy='fail').",
                 )
             ]
         return self.scan(text, source=source, sensitivity=sensitivity).findings

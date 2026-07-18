@@ -135,5 +135,5 @@ strict = true
 # import errors when the module is absent (these imports are lazy, guarded by
 # try/except ImportError).
 [[tool.mypy.overrides]]
-module = ["py7zr", "markitdown", "pypdf"]
+module = ["py7zr", "markitdown", "pypdf", "filetype"]
 ignore_missing_imports = true
