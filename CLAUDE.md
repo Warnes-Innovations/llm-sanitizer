@@ -86,3 +86,32 @@ need a `uvx --refresh` (or a uv cache clean) before the new build is live.
   ```
 
   Remove it to return to the released build: `claude mcp remove llm-sanitizer -s local`.
+
+## Detection-rule design principles
+
+**An obfuscation rule should only fire if de-obfuscating reveals problematic
+text.** Obfuscation — base64, homoglyph/confusable substitution, zero-width
+characters, hidden/CSS-invisible text, and the like — is a *transport*, not a
+threat in itself. Such a rule must de-obfuscate the content (decode, normalize,
+strip, un-hide) and then decide based on whether the *recovered* text is
+actually problematic — i.e. whether it trips another detection rule — never on
+the mere presence of the obfuscation.
+
+- ✅ CORRECT: base64 decodes each blob and re-scans the decoded text with the
+  full ruleset (`rules/_rescan.py::scan_deobfuscated`); homoglyph normalizes
+  lookalikes and flags only when the normalized text is a known
+  instruction-override term or trips a rule. Innocent base64 (keys, hashes, an
+  encoded innocuous sentence) and innocent mixed-script (`Aβ`, `5µm`, `10kΩ`)
+  stay clean.
+- ❌ INCORRECT: flagging base64 merely because it decodes to prose, or a word
+  merely because it mixes scripts — this floods consumers with false positives
+  on scientific / internationalized / encoded-but-benign text and trains users
+  to ignore the scanner.
+- **Why:** the value of an obfuscation rule is catching a *hidden injection*,
+  not penalizing encoding. De-obfuscate-then-re-scan keeps precision high and
+  reuses the real detection rules as the single source of truth for "is this
+  problematic".
+- **Whole class.** When adding or reviewing any obfuscation rule, route through
+  the shared `scan_deobfuscated` helper (depth-guarded, so obfuscation rules can
+  safely recurse into one another). `zero_width` and `hidden_content` still flag
+  on presence and should be migrated to this pattern.
