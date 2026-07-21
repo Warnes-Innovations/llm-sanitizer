@@ -113,7 +113,7 @@ class TestMinifiedSingleLine:
 
     def _minified(self) -> str:
         spans = "".join(
-            f'<span style="display:none">hidden {i}</span><b>visible {i}</b>'
+            f'<span style="font-size:0">hidden {i}</span><b>visible {i}</b>'
             for i in range(self.N_SPANS)
         )
         return f"<html><body>{spans}</body></html>"
@@ -149,11 +149,11 @@ class TestPositionalRedaction:
     def test_repeated_match_redacts_flagged_occurrence(self) -> None:
         # Two identical hidden spans; both are flagged, both must be removed —
         # and nothing between/around them may be corrupted.
-        span = '<span style="display:none">x</span>'
+        span = '<span style="font-size:0">x</span>'
         content = f"A{span}B{span}C"
         result = scan_text(content, sensitivity="high")
         redacted = redact(content, result, mode="strip")
-        assert "display:none" not in redacted
+        assert "font-size:0" not in redacted
         assert redacted.startswith("A")
         assert redacted.endswith("C")
         assert "B" in redacted

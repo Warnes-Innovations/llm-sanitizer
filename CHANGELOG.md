@@ -10,13 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [0.2.0] — 2026-07-20
 
 ### Added
-- **Obfuscation rules now de-obfuscate, then re-scan.** base64 and homoglyph
-  detection share a new depth-guarded helper (`scan_deobfuscated`) that runs the
-  full detection ruleset over the *de-obfuscated* text — decoded base64, or
-  homoglyph-normalized text — and surfaces whatever the other rules find, rather
-  than matching a hardcoded keyword list. This catches keyword-less / rephrased
-  injections and nested obfuscation (base64-in-base64, a homoglyph phrase inside
-  base64), while leaving innocent base64 and innocent mixed-script text clean.
+- **Obfuscation rules now de-obfuscate, then re-scan.** base64, homoglyph, and
+  zero-width detection share a new depth-guarded helper (`scan_deobfuscated`)
+  that runs the full detection ruleset over the *de-obfuscated* text — decoded
+  base64, homoglyph-normalized text, or text with zero-width splitters stripped —
+  and surfaces whatever the other rules find, rather than matching a hardcoded
+  keyword list. This catches keyword-less / rephrased injections and nested
+  obfuscation (base64-in-base64, a homoglyph phrase inside base64), while leaving
+  innocent base64, innocent mixed-script, and benign invisible characters clean.
 - SSRF trust boundary **and** a response size cap in the URL reader: every hop
   (the initial URL and each redirect, followed manually) must be an `http(s)`
   URL whose host resolves only to public addresses — blocking loopback, private,
@@ -98,6 +99,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   instruction-override term or trips a detection rule — removing false positives
   on scientific / internationalized text (e.g. `Aβ`, `5µm`, `10kΩ`, and
   `filesystem` written with a Cyrillic `с`).
+- **zero_width rule** no longer flags the mere presence of invisible characters
+  (BOM, emoji joiners, bidi marks). It strips them and re-scans, flagging only
+  when removal reveals an injection the raw text did not already trip (a keyword
+  split by a zero-width space).
+- **hidden_content rule** no longer flags *structural* hiding (`display:none`,
+  `visibility:hidden`, the `hidden` attribute) — ubiquitous, legitimate
+  formatting whose concealed injections are already caught on the raw markup. It
+  now flags only *perceptual camouflage* — text rendered but made imperceptible
+  with no legitimate purpose (`color` ≈ `background`, near-zero `opacity`,
+  `font-size:0`, invisible U+E0000 tag characters) — at MEDIUM on its own, and
+  CRITICAL when the camouflaged text also trips an injection rule.
 - **Archive bomb guard now fails loud, not silent.** An archive that trips the
   bomb guard — over a depth/size/ratio budget, undecompressable, or nested beyond
   `archive.max_depth` — now yields a CRITICAL `corrupt_file` integrity finding

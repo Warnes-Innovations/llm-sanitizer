@@ -111,7 +111,25 @@ the mere presence of the obfuscation.
   not penalizing encoding. De-obfuscate-then-re-scan keeps precision high and
   reuses the real detection rules as the single source of truth for "is this
   problematic".
-- **Whole class.** When adding or reviewing any obfuscation rule, route through
-  the shared `scan_deobfuscated` helper (depth-guarded, so obfuscation rules can
-  safely recurse into one another). `zero_width` and `hidden_content` still flag
-  on presence and should be migrated to this pattern.
+- **Whole class.** Route de-obfuscation through the shared `scan_deobfuscated`
+  helper (depth-guarded, so obfuscation rules can safely recurse into one
+  another). `base64`, `homoglyph`, and `zero_width` all follow this — they
+  decode / normalize / strip and re-scan, flagging only what the *recovered*
+  text trips.
+- **Transport vs. steganography.** The de-obfuscate-then-re-scan rule above is
+  for *transport* obfuscation, where the hidden text is recoverable (decode
+  base64, normalize homoglyphs, strip zero-width splitters). *Camouflage* rules
+  (`hidden_content`) need a further distinction:
+  - **Structural hiding** — `display:none`, `visibility:hidden`, the `hidden`
+    attribute, off-screen `.sr-only`, hidden spreadsheet rows/sheets — is
+    ubiquitous, legitimate responsive/accessibility/document formatting and is
+    **NOT flagged**. Any injection inside it is already caught by the injection
+    rules scanning the raw markup, so flagging the mechanism only floods false
+    positives.
+  - **Perceptual camouflage** — text rendered but made imperceptible with no
+    legitimate purpose: `color` ≈ `background`, near-zero `opacity` (not a
+    transition start-state), `font-size:0`, sub-legible fonts, invisible tag
+    characters (U+E0000). This **is** flagged: MEDIUM on its own, escalated to
+    CRITICAL when the camouflaged text also trips an injection rule.
+  The durable tell is `perceived-by-human` vs `emitted-by-extractor`: flag the
+  delta, not the specific CSS trick.
