@@ -149,21 +149,85 @@ def _recognized_media_kind(path: Path) -> str | None:
     return top if top in ("image", "audio", "video") else None
 
 
+# Integrity findings are structural "we could not safely scan this file"
+# signals. They must ALWAYS surface (fail-closed) and are therefore EXEMPT from
+# the sensitivity min-risk filter — otherwise a MEDIUM unscannable_media would
+# be dropped entirely at sensitivity="low" (min_risk=high) and the file would
+# pass silently, defeating the whole point of the finding.
+_INTEGRITY_RULE_IDS: frozenset[str] = frozenset(
+    {TYPE_MISMATCH, CORRUPT_FILE, UNSCANNABLE_BINARY, UNSCANNABLE_MEDIA,
+     ARCHIVE_UNSUPPORTED}
+)
+
+
+def _has_appended_archive(path: Path) -> bool:
+    """True if *path* is ALSO a valid archive — e.g. a media file with a zip
+    concatenated onto its tail (a polyglot). ``zipfile.is_zipfile`` reads the
+    end-of-central-directory record from the file's TAIL, so it catches an
+    appended zip that the head-based archive router (which sniffs the leading
+    magic bytes) never sees."""
+    try:
+        return zipfile.is_zipfile(path)
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
 def _unscannable_finding(path: Path, source: str, reason: str) -> Finding:
-    """Build the right unscannable finding for *path*: recognized media is a
+    """Build the right unscannable finding for *path*. Recognized media is a
     MEDIUM ``unscannable_media`` (no text to inject; the danger is *executing*
-    it, flagged by the code auditor); anything else is a CRITICAL
-    ``unscannable_binary`` (a wholly-unknown binary we cannot vouch for)."""
+    it, flagged by the code auditor). A media header with an APPENDED archive is
+    a polyglot — its hidden payload was never expanded — and anything else is a
+    wholly-unknown binary; both are CRITICAL ``unscannable_binary`` (fail
+    closed). This is only called on the clean "no extractable text" path; a
+    file that CRASHES the extractor is CRITICAL unconditionally at the call
+    site (a crash is the corrupt-file danger signal, not benign media)."""
     kind = _recognized_media_kind(path)
+    if kind is not None and _has_appended_archive(path):
+        return make_integrity_finding(
+            UNSCANNABLE_BINARY,
+            source,
+            f"{reason} Despite a {kind}-media magic header the file is ALSO a "
+            "valid archive (polyglot); its appended archive was not expanded "
+            "and cannot be vouched for — fail closed.",
+        )
     if kind is not None:
         return make_integrity_finding(
             UNSCANNABLE_MEDIA,
             source,
-            f"Recognized {kind} media by magic bytes; {reason} Media carries no "
-            "injectable text, so this is MEDIUM (verify) — but code that "
-            "EXECUTES a media file is flagged separately by the code auditor.",
+            f"Recognized {kind} media by magic bytes; {reason} Embedded metadata "
+            "text was scanned and is clean, so this is MEDIUM (verify) — code "
+            "that EXECUTES a media file is flagged separately by the code "
+            "auditor.",
         )
     return make_integrity_finding(UNSCANNABLE_BINARY, source, reason)
+
+
+def _extract_printable_strings(
+    path: Path, min_run: int = 6, max_bytes: int = 1024 * 1024
+) -> str:
+    """Extract runs of printable text embedded in a binary. Media metadata —
+    PNG ``tEXt``/``iTXt``, EXIF, XMP — is stored as literal text, so injection
+    hidden there is invisible to markitdown (which yields no *document* text)
+    but recoverable this way. Reads a bounded prefix and joins runs of
+    ``>= min_run`` printable ASCII chars; compressed pixel/audio data does not
+    form long printable runs, so this surfaces injected metadata without the
+    false positives of scanning raw compressed bytes as text."""
+    try:
+        data = path.read_bytes()[:max_bytes]
+    except OSError:
+        return ""
+    runs: list[str] = []
+    cur = bytearray()
+    for b in data:
+        if 32 <= b < 127 or b in (9, 10, 13):
+            cur.append(b)
+        else:
+            if len(cur) >= min_run:
+                runs.append(cur.decode("ascii", "replace"))
+            cur.clear()
+    if len(cur) >= min_run:
+        runs.append(cur.decode("ascii", "replace"))
+    return "\n".join(runs)
 
 
 # markitdown's ZipConverter extracts every entry of a .zip (recursively, for
@@ -285,9 +349,14 @@ def _is_archive_bomb(
                             finally:
                                 Path(tmp_path).unlink(missing_ok=True)
                     except (OSError, RuntimeError):
-                        # If we can't read/decompress the nested entry, treat
-                        # as potential bomb (fail-open for safety).
-                        continue
+                        # If we can't read/decompress the nested entry, treat it
+                        # as a potential bomb and FAIL CLOSED — return True so
+                        # the caller skips extraction. (Previously this
+                        # `continue`d and the function fell through to
+                        # `return False` = "not a bomb, extract" — a fail-OPEN
+                        # bug that let a crafted unreadable nested entry bypass
+                        # the guard.)
+                        return True
     except (OSError, zipfile.BadZipFile):
         return False
     return False
@@ -426,7 +495,10 @@ class Scanner:
                 finding_id += 1
 
         # Filter by sensitivity threshold
-        filtered = [f for f in findings if f.risk >= min_risk]
+        filtered = [
+            f for f in findings
+            if f.risk >= min_risk or f.rule in _INTEGRITY_RULE_IDS
+        ]
 
         # Re-number after filtering
         for i, f in enumerate(filtered, start=1):
@@ -562,7 +634,20 @@ class Scanner:
 
         # --- Bomb guard (same defense as the pre-extract zip-bomb check) --
         if _is_archive_bomb(path, depth=depth, settings=settings):
-            return []  # silently skipped, matching the existing bomb defense
+            # Fail closed AND loud: an archive that trips the bomb guard (over a
+            # depth/size/ratio budget, or undecompressable) is not expanded, but
+            # we surface a CRITICAL integrity finding rather than returning []
+            # — which a caller would read as "scanned clean". Integrity findings
+            # bypass the sensitivity filter (see _INTEGRITY_RULE_IDS).
+            return [
+                make_integrity_finding(
+                    CORRUPT_FILE,
+                    source,
+                    f"Archive '{magic}' tripped the archive-bomb guard (exceeds a "
+                    "depth/size/ratio budget, or could not be decompressed). "
+                    "Not expanded.",
+                )
+            ]
 
         # --- Format disabled by configuration ----------------------------
         if magic not in settings.formats:
@@ -577,7 +662,18 @@ class Scanner:
 
         # --- Too deeply nested → bomb guard ------------------------------
         if depth >= settings.max_depth:
-            return []  # silently stop recursing, matching the bomb defense
+            # Same fail-closed-and-loud principle: an archive nested at or beyond
+            # the configured max depth is not expanded, and we say so with a
+            # CRITICAL finding instead of silently returning [].
+            return [
+                make_integrity_finding(
+                    CORRUPT_FILE,
+                    source,
+                    f"Archive nesting reached the configured maximum depth "
+                    f"({settings.max_depth}); this member is not expanded "
+                    "(bomb guard).",
+                )
+            ]
 
         # --- Expand and recursively scan members -------------------------
         return self._extract_and_scan(
@@ -639,12 +735,15 @@ class Scanner:
         try:
             text = _extract_binary_text(path)
         except _ExtractionFailedError as exc:
-            # markitdown ran but failed on this file → fail closed (media → medium).
+            # A file that CRASHES the extractor is treated as corrupt →
+            # unconditionally CRITICAL. A crash is a danger signal (the
+            # corrupt_file philosophy), NOT benign media; the media downgrade
+            # applies only to the clean "no extractable text" path below.
             return [
-                _unscannable_finding(
-                    path,
+                make_integrity_finding(
+                    UNSCANNABLE_BINARY,
                     source,
-                    f"binary extraction failed (corrupt or unreadable): {exc}.",
+                    f"binary extraction failed (corrupt or unreadable): {exc}",
                 )
             ]
         if not text.strip():
@@ -655,16 +754,40 @@ class Scanner:
             if policy == "scan-text":
                 raw = path.read_text(encoding="utf-8", errors="replace")
                 return self.scan(raw, source=source, sensitivity=sensitivity).findings
-            # "fail" (default) — fail closed (recognized media → medium).
-            return [
-                _unscannable_finding(
-                    path,
-                    source,
-                    "processed but yielded no extractable text; it cannot be "
-                    "scanned (unprocessable_binary_policy='fail').",
-                )
-            ]
+            # "fail" (default) — fail closed. Recognized media downgrades to
+            # MEDIUM only if its embedded metadata text is also clean.
+            return self._media_or_unscannable(
+                path,
+                source,
+                sensitivity,
+                "processed but yielded no extractable text; it cannot be "
+                "scanned (unprocessable_binary_policy='fail').",
+            )
         return self.scan(text, source=source, sensitivity=sensitivity).findings
+
+    def _media_or_unscannable(
+        self, path: Path, source: str, sensitivity: str, reason: str
+    ) -> list[Finding]:
+        """Decide the finding for a binary that yielded no document text under
+        the fail-closed policy. Recognized media (clean magic, no appended
+        archive) is downgraded to MEDIUM ``unscannable_media`` ONLY if its
+        embedded metadata text is also clean — a tEXt/EXIF/XMP chunk carrying
+        an injection surfaces at its own (high/critical) risk instead. Polyglots
+        and wholly-unknown binaries stay CRITICAL (via _unscannable_finding)."""
+        kind = _recognized_media_kind(path)
+        if kind is not None and not _has_appended_archive(path):
+            meta = _extract_printable_strings(path)
+            if meta:
+                found = [
+                    f
+                    for f in self.scan(
+                        meta, source=source, sensitivity=sensitivity
+                    ).findings
+                    if f.rule != "agent_config"  # drop the legit-file info note
+                ]
+                if found:
+                    return found
+        return [_unscannable_finding(path, source, reason)]
 
     def _extract_and_scan(
         self,
@@ -724,7 +847,10 @@ class Scanner:
         expansion), applying the sensitivity threshold and re-numbering IDs the
         same way :meth:`scan` does."""
         min_risk = _SENSITIVITY_RISK_MAP.get(sensitivity, RiskLevel.medium)
-        filtered = [f for f in findings if f.risk >= min_risk]
+        filtered = [
+            f for f in findings
+            if f.risk >= min_risk or f.rule in _INTEGRITY_RULE_IDS
+        ]
         renumbered = [
             f.model_copy(update={"id": i}) for i, f in enumerate(filtered, start=1)
         ]
