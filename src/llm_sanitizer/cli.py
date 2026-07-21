@@ -200,11 +200,22 @@ def _add_archive_args(parser: argparse.ArgumentParser) -> None:
             "unsupported (CRITICAL) rather than expanded. Default: all."
         ),
     )
+    parser.add_argument(
+        "--max-scan-bytes",
+        type=int,
+        default=None,
+        metavar="BYTES",
+        help=(
+            "Max bytes of text a single unit (file, extracted member, or inline "
+            "content) may be scanned. Larger input is refused with a CRITICAL "
+            "input_too_large finding (default: 26214400 = 25MB)"
+        ),
+    )
 
 
 def _config_with_archive_overrides(args: argparse.Namespace) -> object:
-    """Load config and apply any --archive-* / --unprocessable-binary-policy CLI
-    overrides on top of it."""
+    """Load config and apply any --archive-* / --unprocessable-binary-policy /
+    --max-scan-bytes CLI overrides on top of it."""
     from llm_sanitizer.config import load_config
 
     config = load_config()
@@ -218,6 +229,8 @@ def _config_with_archive_overrides(args: argparse.Namespace) -> object:
         ]
     if getattr(args, "unprocessable_binary_policy", None) is not None:
         config.unprocessable_binary_policy = args.unprocessable_binary_policy
+    if getattr(args, "max_scan_bytes", None) is not None:
+        config.max_scan_bytes = args.max_scan_bytes
     return config
 
 

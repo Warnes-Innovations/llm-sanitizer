@@ -111,20 +111,40 @@ print(result.findings)  # [Finding(rule='comment_directive', risk='high', ...)]
 Create `.llm-sanitizer.yml` at your project root:
 
 ```yaml
-sensitivity: medium
+sensitivity: medium                    # low | medium | high
 
 rules:
   zero_width:
     enabled: true
   instruction_override:
     enabled: true
-    sensitivity: high
+    sensitivity: high                  # per-rule sensitivity override
 
 policy:
-  mode: "allow-known"    # allow-known | allow-none | allow-all
+  mode: "allow-known"                  # allow-known | allow-none | allow-all
   agents:
     copilot: allow
     cursor: allow
+
+# Refuse oversized input fail-closed (a CRITICAL input_too_large finding)
+# rather than reading/scanning it. Default 25 MiB.
+max_scan_bytes: 26214400
+
+# How to treat a non-archive binary that yields no extractable text.
+unprocessable_binary_policy: fail      # fail (default) | scan-text | ignore
+
+# Recursive archive scanning limits (zip / tar / gz / bz2 / xz / 7z / rar).
+archive:
+  max_depth: 3                         # archive-in-archive nesting levels
+  max_cumulative_bytes: 524288000      # 500 MB across all nested levels
+  max_uncompressed_bytes: 104857600    # 100 MB per archive
+  max_entries: 1000                    # per-archive entry-count cap
+  max_compression_ratio: 100           # zip-bomb ratio guard
+  formats: [zip, tar, gz, bz2, xz, 7z, rar]
+
+output:
+  format: markdown                     # json | markdown | sarif
+  context_lines: 2
 ```
 
 ## Output Formats
