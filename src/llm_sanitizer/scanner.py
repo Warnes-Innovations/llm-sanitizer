@@ -34,6 +34,7 @@ from llm_sanitizer.readers.integrity_checks import (
     validate_structure,
 )
 from llm_sanitizer.rules import BaseRule, get_all_rules, is_legitimate_file
+from llm_sanitizer.rules._rescan import reset_rescan_budget
 from llm_sanitizer.rules.integrity import (
     ARCHIVE_UNSUPPORTED,
     CORRUPT_FILE,
@@ -485,7 +486,10 @@ class Scanner:
                 )
             )
 
-        # Run all enabled rules
+        # Run all enabled rules. Reset the de-obfuscation re-scan budget once
+        # here so every rule (and every nested re-scan they trigger) shares one
+        # bounded work allowance for this content unit (see _rescan).
+        reset_rescan_budget()
         finding_id = len(findings) + 1
         for rule in self._rules:
             rule_findings = rule.detect(content, source)

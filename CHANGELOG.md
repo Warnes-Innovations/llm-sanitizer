@@ -11,7 +11,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **Obfuscation rules now de-obfuscate, then re-scan.** base64, homoglyph, and
-  zero-width detection share a new depth-guarded helper (`scan_deobfuscated`)
+  zero-width detection share a new depth- and work-budget-guarded helper
+  (`scan_deobfuscated`, bounded so recursive re-scanning of adversarial input
+  stays O(budget) rather than fanning out)
   that runs the full detection ruleset over the *de-obfuscated* text — decoded
   base64, homoglyph-normalized text, or text with zero-width splitters stripped —
   and surfaces whatever the other rules find, rather than matching a hardcoded

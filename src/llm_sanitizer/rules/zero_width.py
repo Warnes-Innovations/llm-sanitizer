@@ -62,36 +62,41 @@ class ZeroWidthRule(BaseRule):
     )
 
     def detect(self, content: str, source: str = "") -> list[Finding]:
-        stripped = _ZERO_WIDTH_PATTERN.sub("", content)
-        if stripped == content:
-            return []  # no invisible characters present
-
-        # What does removing the invisible characters reveal, versus what the
-        # raw content already trips? Only injections that appear *because* the
-        # characters were removed (i.e. they were splitting a keyword) count.
-        revealed = scan_deobfuscated(stripped, source)
-        if not revealed:
-            return []
-        baseline = Counter(f.rule for f in scan_deobfuscated(content, source))
-        revealed_counts = Counter(f.rule for f in revealed)
-        newly = {
-            rule for rule, n in revealed_counts.items() if n > baseline.get(rule, 0)
-        }
-        if not newly:
-            return []
-
-        risk = max(
-            (f.risk for f in revealed if f.rule in newly), key=lambda r: r.value
-        )
-        tripped = ", ".join(sorted(newly))
-
         findings: list[Finding] = []
         lines = content.splitlines()
         fid = 1
+
+        # Evaluate each line independently: strip the invisible characters on
+        # THIS line and compare what it trips against the raw line. Only when
+        # stripping reveals an injection the raw line did not already trip do we
+        # flag this line's invisible-character runs. Per-line (not whole-doc)
+        # so a benign invisible character on one line is never flagged just
+        # because a real keyword-split exists on a different line.
         for line_idx, line in enumerate(lines):
+            stripped = _ZERO_WIDTH_PATTERN.sub("", line)
+            if stripped == line:
+                continue  # no invisible characters on this line
+            revealed = scan_deobfuscated(stripped, source)
+            if not revealed:
+                continue
+            baseline = Counter(f.rule for f in scan_deobfuscated(line, source))
+            revealed_counts = Counter(f.rule for f in revealed)
+            newly = {
+                rule
+                for rule, n in revealed_counts.items()
+                if n > baseline.get(rule, 0)
+            }
+            if not newly:
+                continue
+
+            risk = max(
+                (f.risk for f in revealed if f.rule in newly),
+                key=lambda r: r.value,
+            )
+            tripped = ", ".join(sorted(newly))
+            before, line_text, after = self._build_context(lines, line_idx)
             for m in _ZERO_WIDTH_PATTERN.finditer(line):
                 chars_found = sorted({hex(ord(c)) for c in m.group(0)})
-                before, line_text, after = self._build_context(lines, line_idx)
                 findings.append(
                     self._make_finding(
                         finding_id=fid,

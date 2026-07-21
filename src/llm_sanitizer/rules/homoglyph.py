@@ -141,7 +141,18 @@ class HomoglyphRule(BaseRule):
         # Normalization is length-preserving, so sub-finding locations map back.
         normalized_content = _normalize_homoglyphs(content)
         if normalized_content != content:
+            # Only credit findings that appear AFTER normalization but not
+            # before — i.e. that the de-homoglyphing actually revealed. Without
+            # this baseline diff, an unrelated finding (e.g. a base64 injection
+            # elsewhere) that trips identically on the raw content would be
+            # double-reported and mis-attributed to homoglyph normalization.
+            baseline_keys = {
+                (f.rule, f.location.line, f.location.column)
+                for f in scan_deobfuscated(content, source)
+            }
             for sub in scan_deobfuscated(normalized_content, source):
+                if (sub.rule, sub.location.line, sub.location.column) in baseline_keys:
+                    continue  # present pre-normalization — not revealed by it
                 loc = (sub.location.line, sub.location.column)
                 if loc in by_location:
                     continue  # already reported by Signal 1
