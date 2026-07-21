@@ -7,7 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-07-20
+
 ### Added
+- **Obfuscation rules now de-obfuscate, then re-scan.** base64 and homoglyph
+  detection share a new depth-guarded helper (`scan_deobfuscated`) that runs the
+  full detection ruleset over the *de-obfuscated* text — decoded base64, or
+  homoglyph-normalized text — and surfaces whatever the other rules find, rather
+  than matching a hardcoded keyword list. This catches keyword-less / rephrased
+  injections and nested obfuscation (base64-in-base64, a homoglyph phrase inside
+  base64), while leaving innocent base64 and innocent mixed-script text clean.
+- SSRF trust boundary **and** a response size cap in the URL reader: every hop
+  (the initial URL and each redirect, followed manually) must be an `http(s)`
+  URL whose host resolves only to public addresses — blocking loopback, private,
+  link-local, and cloud-metadata (`169.254.169.254`) targets — and the response
+  body is read as a bounded stream, aborted past a 10 MiB cap, so an untrusted
+  endpoint cannot exhaust memory.
 - Recursive archive scanning. Under the default `binary_mode="extract"`, files
   that are archives — detected by **content magic bytes, not extension** — are
   expanded and each member scanned through the normal pipeline, recursively for
@@ -74,6 +89,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hash
 
 ### Changed
+- **base64 rule** no longer flags on a keyword sub-list or on "decodes to
+  prose"; it flags only when the decoded text trips another detection rule (the
+  re-scan above). Innocent base64 (keys, hashes, an encoded innocuous sentence)
+  is no longer flagged.
+- **homoglyph rule** no longer flags mixed-script text merely for mixing
+  scripts. It flags only when normalizing the lookalikes yields a known
+  instruction-override term or trips a detection rule — removing false positives
+  on scientific / internationalized text (e.g. `Aβ`, `5µm`, `10kΩ`, and
+  `filesystem` written with a Cyrillic `с`).
+- **Archive bomb guard now fails loud, not silent.** An archive that trips the
+  bomb guard — over a depth/size/ratio budget, undecompressable, or nested beyond
+  `archive.max_depth` — now yields a CRITICAL `corrupt_file` integrity finding
+  instead of being silently skipped (which a caller read as "scanned clean").
 - The raw-text fallback for unextractable binaries was **removed**. Previously,
   when markitdown was absent or failed, `binary_mode="extract"` decoded the raw
   bytes as UTF-8 and scanned that — which produced spurious findings on binary
@@ -83,6 +111,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer documents any raw-text fallback.
 
 ### Fixed
+- `__version__` was pinned at `0.1.0` while the packaged version had moved on
+  (0.1.3); it is now kept in sync with the packaged metadata, and the smoke test
+  asserts the two match via `importlib.metadata` so they cannot drift again.
+- The base64 decoded-text re-scan previously called `detect()` on rule *classes*
+  (passing the text as `self`), so every call raised and was silently swallowed —
+  the re-scan never actually ran. Rules are now instantiated correctly.
 - `redact_dir` (CLI and MCP server) no longer silently drops binary files
   from the output directory when they aren't scanned (`binary_mode="skip"`,
   or `"extract"` with extraction unavailable/failed) — they're now copied

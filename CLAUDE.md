@@ -25,17 +25,34 @@ Good moments to prompt:
 - After a fix to a user-reported scanning bug.
 - Before asking a consumer (e.g. flow-guard) to rely on new behavior.
 
-To promote (requires the PR path, since `main` is protected):
+A promotion is also a **release**: it should cut a versioned GitHub Release so
+the new code reaches PyPI (consumers pin a PyPI version, e.g.
+`uvx llm-sanitizer==X.Y.Z`). Full procedure (`main` is protected, so promotion
+is always via PR):
 
 ```bash
-# from the repo root, with devel checked out and pushed
+# 1. On devel, clean tree: bump the version in BOTH pyproject.toml AND
+#    src/llm_sanitizer/__init__.py (keep them in sync — they have drifted
+#    before), and move CHANGELOG [Unreleased] -> [X.Y.Z] - <date>. Commit + push.
+
+# 2. Open the promotion PR and merge it (brings the bump onto main):
 gh pr create --base main --head devel \
-  --title "chore(release): promote devel → main" \
+  --title "chore(release): promote devel → main (vX.Y.Z)" \
   --body "Summarize what consumers gain."
 gh pr merge <PR#> --merge      # do NOT pass --delete-branch (devel is the trunk)
+
+# 3. Tag main and cut the Release — triggers publish.yml (Trusted Publishing)
+#    and publishes to PyPI. IRREVERSIBLE: a PyPI version is permanent even if
+#    yanked. Confirm with the maintainer before running this step.
+gh release create vX.Y.Z --target main --title "vX.Y.Z" --notes "See CHANGELOG.md."
 ```
 
 Never delete `devel` when merging — it is the permanent working trunk.
+
+**Versioning (SemVer):** on the `0.x` line, feature additions bump the minor
+(`0.1.x → 0.2.0`); reserve `1.0.0` for a committed-stable API. Don't inflate the
+minor for signalling. The version currently lives in two files — single-sourcing
+it (e.g. `importlib.metadata`) is a good follow-up.
 
 ### Consumers may need `--refresh` after a promotion
 
