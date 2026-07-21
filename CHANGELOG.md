@@ -20,6 +20,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   keyword list. This catches keyword-less / rephrased injections and nested
   obfuscation (base64-in-base64, a homoglyph phrase inside base64), while leaving
   innocent base64, innocent mixed-script, and benign invisible characters clean.
+- Input size cap: a `max_scan_bytes` config option (default 25 MiB) bounds the
+  text a single unit — a file, an extracted member, or inline content — may be
+  scanned. Oversized input is refused fail-closed with a CRITICAL
+  `input_too_large` integrity finding rather than read/scanned, so a huge or
+  adversarial file cannot exhaust memory or pin CPU. Files are checked by
+  on-disk size before being read.
 - SSRF trust boundary **and** a response size cap in the URL reader: every hop
   (the initial URL and each redirect, followed manually) must be an `http(s)`
   URL whose host resolves only to public addresses — blocking loopback, private,

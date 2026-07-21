@@ -41,6 +41,7 @@ CORRUPT_FILE = "corrupt_file"
 UNSCANNABLE_BINARY = "unscannable_binary"
 UNSCANNABLE_MEDIA = "unscannable_media"
 ARCHIVE_UNSUPPORTED = "archive_unsupported"
+INPUT_TOO_LARGE = "input_too_large"
 
 
 class TypeMismatchRule(BaseRule):
@@ -122,12 +123,28 @@ class ArchiveUnsupportedRule(BaseRule):
         return []
 
 
+class InputTooLargeRule(BaseRule):
+    rule_id = INPUT_TOO_LARGE
+    rule_name = "Input Too Large to Scan"
+    category = "integrity"
+    default_risk = RiskLevel.critical
+    description = (
+        "A file or content unit exceeds the configured maximum scan size "
+        "(max_scan_bytes) and was NOT scanned. Fail-closed: oversized untrusted "
+        "input is surfaced rather than silently skipped or allowed to pin CPU."
+    )
+
+    def detect(self, content: str, source: str = "") -> list[Finding]:
+        return []
+
+
 _RULE_NAMES: dict[str, str] = {
     TYPE_MISMATCH: TypeMismatchRule.rule_name,
     CORRUPT_FILE: CorruptFileRule.rule_name,
     UNSCANNABLE_BINARY: UnscannableBinaryRule.rule_name,
     UNSCANNABLE_MEDIA: UnscannableMediaRule.rule_name,
     ARCHIVE_UNSUPPORTED: ArchiveUnsupportedRule.rule_name,
+    INPUT_TOO_LARGE: InputTooLargeRule.rule_name,
 }
 
 # Per-rule risk. Most integrity failures are CRITICAL (fail-closed); recognized
@@ -138,6 +155,7 @@ _RULE_RISKS: dict[str, RiskLevel] = {
     UNSCANNABLE_BINARY: UnscannableBinaryRule.default_risk,
     UNSCANNABLE_MEDIA: UnscannableMediaRule.default_risk,
     ARCHIVE_UNSUPPORTED: ArchiveUnsupportedRule.default_risk,
+    INPUT_TOO_LARGE: InputTooLargeRule.default_risk,
 }
 
 

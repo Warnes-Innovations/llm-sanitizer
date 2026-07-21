@@ -38,6 +38,7 @@ from llm_sanitizer.rules._rescan import reset_rescan_budget
 from llm_sanitizer.rules.integrity import (
     ARCHIVE_UNSUPPORTED,
     CORRUPT_FILE,
+    INPUT_TOO_LARGE,
     TYPE_MISMATCH,
     UNSCANNABLE_BINARY,
     UNSCANNABLE_MEDIA,
@@ -157,7 +158,7 @@ def _recognized_media_kind(path: Path) -> str | None:
 # pass silently, defeating the whole point of the finding.
 _INTEGRITY_RULE_IDS: frozenset[str] = frozenset(
     {TYPE_MISMATCH, CORRUPT_FILE, UNSCANNABLE_BINARY, UNSCANNABLE_MEDIA,
-     ARCHIVE_UNSUPPORTED}
+     ARCHIVE_UNSUPPORTED, INPUT_TOO_LARGE}
 )
 
 
@@ -467,6 +468,25 @@ class Scanner:
         min_risk = _SENSITIVITY_RISK_MAP.get(sensitivity, RiskLevel.medium)
         findings: list[Finding] = []
 
+        # Refuse oversized content (fail-closed). Scanning it would pin CPU (the
+        # ruleset, incl. the recursive de-obfuscation re-scan, is roughly linear
+        # in size), and an untrusted unit we cannot afford to scan must be
+        # surfaced, not silently allowed through.
+        if len(content) > self._config.max_scan_bytes:
+            return self._result_from_findings(
+                source,
+                sensitivity,
+                [
+                    make_integrity_finding(
+                        INPUT_TOO_LARGE,
+                        source,
+                        f"content is {len(content):,} bytes, over the "
+                        f"{self._config.max_scan_bytes:,}-byte max_scan_bytes "
+                        "limit; not scanned.",
+                    )
+                ],
+            )
+
         # Check if this is a legitimate file and add an info-level finding if so
         if is_legitimate_file(source):
             from llm_sanitizer.models import FindingContext, Location
@@ -720,6 +740,23 @@ class Scanner:
         CRITICAL unscannable_binary finding for a failed/empty extraction.
 
         Lets ExtractorUnavailableError propagate (fail fast) — never caught."""
+        # Refuse oversized files by their on-disk size BEFORE reading, so a huge
+        # file is never loaded into memory. Fail-closed with an integrity finding.
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None  # missing/unreadable — let the read below raise as before
+        if size is not None and size > self._config.max_scan_bytes:
+            return [
+                make_integrity_finding(
+                    INPUT_TOO_LARGE,
+                    source,
+                    f"file is {size:,} bytes, over the "
+                    f"{self._config.max_scan_bytes:,}-byte max_scan_bytes limit; "
+                    "not scanned.",
+                )
+            ]
+
         # Text content is always scanned as text, regardless of binary_mode.
         # An OSError here (e.g. a missing file) propagates: directory scans
         # catch it per-file (skip), and the CLI/MCP surface it as an error —
