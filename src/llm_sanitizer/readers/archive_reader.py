@@ -327,7 +327,25 @@ def _iter_7z(
         ) from exc
     try:
         with py7zr.SevenZipFile(path, mode="r") as archive:
+            # Decompression-bomb pre-check (committee MED-3): readall()
+            # decompresses EVERY member into memory at once, so guard on the
+            # header-declared uncompressed size and entry count BEFORE calling
+            # it — mirroring the zip central-directory guard — instead of OOMing
+            # first and checking sizes after.
+            infos = archive.list()
+            if len(infos) > max_entries:
+                raise ArchiveError(
+                    f"7z archive has more than {max_entries} entries"
+                )
+            declared = sum(int(getattr(fi, "uncompressed", 0) or 0) for fi in infos)
+            if declared > max_total_bytes:
+                raise ArchiveError(
+                    f"7z archive declares {declared} uncompressed bytes, beyond "
+                    f"the {max_total_bytes}-byte limit"
+                )
             contents = archive.readall()
+    except ArchiveError:
+        raise
     except Exception as exc:  # py7zr raises a variety of internal errors
         raise ArchiveError(f"corrupt or unreadable 7z archive: {exc}") from exc
 
@@ -368,14 +386,19 @@ def _iter_rar(
                     raise ArchiveError(
                         f"rar archive has more than {max_entries} entries"
                     )
-                data = b"".join(entry.get_blocks())
-                total += len(data)
-                if total > max_total_bytes:
-                    raise ArchiveError(
-                        f"rar archive expands beyond the {max_total_bytes}-byte "
-                        "limit"
-                    )
-                yield entry.pathname, data
+                # Accumulate blocks with a running cap (committee MED-3): a
+                # single huge entry must be caught mid-read, not after joining
+                # its full decompressed content into memory.
+                parts: list[bytes] = []
+                for block in entry.get_blocks():
+                    total += len(block)
+                    if total > max_total_bytes:
+                        raise ArchiveError(
+                            f"rar archive expands beyond the {max_total_bytes}-byte "
+                            "limit"
+                        )
+                    parts.append(bytes(block))
+                yield entry.pathname, b"".join(parts)
     except ArchiveError:
         raise
     except Exception as exc:  # libarchive raises its own error hierarchy

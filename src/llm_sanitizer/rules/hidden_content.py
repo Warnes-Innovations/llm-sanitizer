@@ -385,12 +385,19 @@ class HiddenContentRule(BaseRule):
                 if deadline_exceeded():
                     return findings
                 for m in pattern.finditer(line):
+                    if deadline_exceeded():
+                        return findings
                     emit(line_idx, m, label)
 
         for line_idx, line in enumerate(lines):
             if deadline_exceeded():
                 return findings
             for m in _TEXT_COLOR_DECL_RE.finditer(line):
+                # Per-match check: a single minified line can hold tens of
+                # thousands of `color:` decls, so a per-LINE check alone leaves
+                # this loop uninterruptible (committee HIGH residual).
+                if deadline_exceeded():
+                    return findings
                 color = _parse_css_color(m.group(1))
                 if color is None:
                     continue
@@ -410,6 +417,8 @@ class HiddenContentRule(BaseRule):
             if deadline_exceeded():
                 return findings
             for m in _OPACITY_DECL_RE.finditer(line):
+                if deadline_exceeded():
+                    return findings
                 opacity = _parse_opacity(m.group(1))
                 if opacity is not None and opacity < _NEAR_ZERO_ALPHA:
                     # Skip a fade-in transition/animation start state (benign).

@@ -156,15 +156,22 @@ def redact_content(
     all_findings.extend(first_result.findings)
     current = redact(content, first_result, mode=mode)
 
-    for _ in range(max_passes - 1):
-        if current == content:
-            break
-        content = current
-        next_result = scan_text(current, source=source, sensitivity=sensitivity)
-        if not next_result.findings:
-            break
-        all_findings.extend(next_result.findings)
-        current = redact(current, next_result, mode=mode)
+    # Only "strip" benefits from re-scan-until-stable: removing one layer (e.g.
+    # zero-width splitters) can expose plain instruction text underneath.
+    # "comment"/"highlight" DELIBERATELY keep the matched text (as a marker), so
+    # re-scanning always re-detects it — iterating those modes never converges,
+    # nesting the marker max_passes deep and inflating the finding count
+    # (committee MED-2). Redact them in a single pass.
+    if mode == "strip":
+        for _ in range(max_passes - 1):
+            if current == content:
+                break
+            content = current
+            next_result = scan_text(current, source=source, sensitivity=sensitivity)
+            if not next_result.findings:
+                break
+            all_findings.extend(next_result.findings)
+            current = redact(current, next_result, mode=mode)
 
     combined = first_result.model_copy(
         update={"findings": all_findings, "summary": _build_summary(all_findings)}
