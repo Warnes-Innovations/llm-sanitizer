@@ -1,0 +1,92 @@
+{
+  "persona": "LLM Software Developer",
+  "target": "/Users/warnes/src/llm-sanitizer",
+  "review_date": "2026-07-21",
+  "model": "opus",
+  "verification_method": "Read src/llm_sanitizer/{server,models,scanner,config,cli,redactor,formatters/json_format}.py and ran the package in .venv to capture real tool output (scan_text, scan_dir, redact_content). All behavioral claims below are marked verified/inferred/assumed.",
+  "summary": "The MCP surface is well-documented per-tool and the scanner's fail-closed design is strong, but four verified inconsistencies hurt agent integration: (1) scan_dir returns a different JSON shape than scan_text/scan_file/scan_url (max_risk/total_findings at top level, NO summary object), so an agent that reads summary.max_risk from single-file scans silently gets nothing on a directory scan; (2) the inline redact tool returns polymorphic types (plain text on success, JSON error object on failure) and successfully-redacted content can be byte-identical to the error shape, making success/error indistinguishable; (3) the version field in every scan result is hardcoded 0.1.0 while the package is 0.2.0 — a third, already-drifted source of truth; (4) the documented config keys sensitivity: (global) and per-rule sensitivity: are dead — never consulted by the scanner or CLI.",
+  "most_important_issue": "F1 — scan_dir result shape diverges from scan_* (top-level max_risk/total_findings, no summary object). This is the persona's headline red flag (wrong response field path) and it silently misreads directory-scan risk.",
+  "findings": [
+    {
+      "id": "F1",
+      "title": "scan_dir result shape diverges from scan_text/scan_file/scan_url — max_risk and total_findings are top-level with NO summary object",
+      "location": "src/llm_sanitizer/models.py:76-106 (ScanResult.summary) vs 126-145 (DirScanResult top-level fields); returned by server.py:113-148 (scan_dir) vs 24-110 (scan_text/file/url)",
+      "severity": "high",
+      "epistemic_status": "verified",
+      "evidence": "ScanResult exposes summary.max_risk / summary.total_findings (models.py:76-106). DirScanResult exposes max_risk, total_findings, files_scanned at the TOP level and has no summary field (models.py:126-145). Runtime confirmed: scan_dir JSON top-level keys = ['version','scan_timestamp','source','sensitivity','files_scanned','files_skipped_binary','total_findings','max_risk','results']; 'summary' in result == False; each element of results[] DOES have a summary. So the same concept (max_risk) lives at summary.max_risk for scan_text/file/url but at top-level max_risk for scan_dir.",
+      "impact": "An agent that learns 'read summary.max_risk to gate on risk' from single-file scans will read undefined/None on a scan_dir result and may treat a directory containing a CRITICAL injection as clean. This is exactly the 'wrong response field path' failure mode the persona is chartered to catch.",
+      "fix": "Add a summary object to DirScanResult mirroring ScanResult.summary (total_findings, by_risk, max_risk, rules_triggered) so summary.max_risk works uniformly across all scan tools. Keep the existing top-level fields to avoid breaking the CLI/formatters (additive change). Alternatively, at minimum, document the divergence prominently in each scan_dir docstring.",
+      "regression_check": "inferred: adding a nested summary alongside the existing top-level fields is additive and does not remove any field the markdown/sarif formatters or CLI merge currently read, so it is backward-compatible for existing consumers. Removing the top-level fields WOULD break them and should not be done."
+    },
+    {
+      "id": "F2",
+      "title": "redact (inline) returns polymorphic types — plain text on success vs JSON error object on failure — and redacted content can be byte-identical to the error shape",
+      "location": "src/llm_sanitizer/server.py:154-181 (redact); ValueError raised by src/llm_sanitizer/redactor.py:88-89 (unknown mode)",
+      "severity": "high",
+      "epistemic_status": "verified",
+      "evidence": "redact returns `clean` (a bare str) on success (server.py:179) but returns json.dumps({'status':'error','message':...}) on ValueError (server.py:180-181). Runtime: redact_content of the document '{\"status\": \"error\", \"message\": \"hi\"}' returns that exact string unchanged. So an agent that parses redact's return as JSON and checks status=='error' will misclassify a *successful* redaction of JSON-looking content as an error. Separately, on success the inline redact tool returns no findings count, so the agent cannot tell whether anything was removed (unlike redact_file/redact_url/redact_dir, which return findings_redacted — server.py:245,283).",
+      "impact": "Agents cannot reliably distinguish redact success from failure, and cannot tell whether any injection was actually removed. Both are safety-relevant: a false 'error' read may cause the agent to fall back to the un-sanitized original; a silent 'nothing removed' gives no signal to escalate.",
+      "fix": "Make redact return a structured object on every path, e.g. {'status':'ok','content': clean, 'findings_redacted': result.summary.total_findings} vs {'status':'error','message':...}. This removes the type ambiguity and adds the missing count. Update the docstring's Returns section accordingly.",
+      "regression_check": "inferred: this changes redact's return contract (bare text -> JSON object), which is breaking for any current caller that consumes the text directly. Gate it with the next minor version bump and note it in CHANGELOG; redact_file/redact_url/redact_dir already return JSON with findings_redacted, so this aligns the inline tool with the rest of the family rather than diverging."
+    },
+    {
+      "id": "F3",
+      "title": "version field in scan output hardcoded to 0.1.0 while package is 0.2.0 — a third, already-drifted source of truth",
+      "location": "src/llm_sanitizer/models.py:93 (ScanResult.version) and 129 (DirScanResult.version)",
+      "severity": "medium",
+      "epistemic_status": "verified",
+      "evidence": "pyproject.toml:3 version=\"0.2.0\" and src/llm_sanitizer/__init__.py:6 __version__=\"0.2.0\", but models.py:93/129 default version=\"0.1.0\". Runtime scan output shows \"version\": \"0.1.0\". CLAUDE.md already warns the version 'lives in two files ... they have drifted before'; this is a third location and it has drifted.",
+      "impact": "Any agent or downstream tool that keys off the reported scan version (cache invalidation, capability gating, provenance) records the wrong version — reproducibility and audit trails become misleading.",
+      "fix": "Single-source the version: set the model default via importlib.metadata.version('llm-sanitizer') (default_factory) or import __version__ from the package, and remove the hardcoded literals. This also resolves the CLAUDE.md follow-up about single-sourcing the version.",
+      "regression_check": "verified-safe: the change only corrects the emitted value; no consumer relies on the literal '0.1.0' being wrong. Tests that assert version=='0.1.0' (if any) would need updating — grep before applying."
+    },
+    {
+      "id": "F4",
+      "title": "Documented config keys `sensitivity:` (global) and per-rule `sensitivity:` are dead — never consulted by the scanner or CLI",
+      "location": "src/llm_sanitizer/config.py:113-116 (rule_sensitivity, defined but never called) and config.sensitivity (config.py:99,161); scan threshold set only from the call argument in src/llm_sanitizer/scanner.py:468, CLI default hardcoded in src/llm_sanitizer/cli.py:32-36",
+      "severity": "medium",
+      "epistemic_status": "verified",
+      "evidence": "grep across src/ shows config.rule_sensitivity() has zero callers and self.sensitivity is referenced only inside that dead method. Scanner.scan computes min_risk purely from the sensitivity argument (_SENSITIVITY_RISK_MAP.get(sensitivity,...), scanner.py:468); it never reads self._config.sensitivity. CLI --sensitivity default is a hardcoded 'medium' (cli.py:35), not sourced from config. MCP tools pass sensitivity='medium' by default (server.py:25,43,90,117). README.md:113-121 documents both `sensitivity: medium` and per-rule `sensitivity: high` as working configuration.",
+      "impact": "An agent (or user) that sets `sensitivity: high` in .llm-sanitizer.yml to widen detection still gets medium-threshold results, silently — a fail-silent configuration gap. Per-rule sensitivity overrides have no effect at all. This undermines the 'configuration + docs' contract for agent workflows that rely on project-level policy files.",
+      "fix": "Wire config.sensitivity as the effective default when the caller does not pass an explicit sensitivity (both CLI: use default=None then fall back to config; and Scanner: default to self._config.sensitivity), and consult rule_sensitivity per rule where per-rule thresholds are intended. If per-rule sensitivity is not going to be implemented, remove it from README to stop advertising dead config.",
+      "regression_check": "inferred: activating config.sensitivity changes behavior for anyone who currently has the key set (today it is ignored), so results may shift from medium to their configured level — this is the documented intent, but call it out in CHANGELOG. Keep the explicit CLI/MCP argument as an override so existing explicit callers are unaffected."
+    },
+    {
+      "id": "F5",
+      "title": "scan_timestamp makes tool output non-deterministic for identical input",
+      "location": "src/llm_sanitizer/models.py:94-96 (ScanResult.scan_timestamp) and 130-132 (DirScanResult.scan_timestamp)",
+      "severity": "low",
+      "epistemic_status": "verified",
+      "evidence": "Runtime: two format_json(Scanner().scan('hello', source='x')) calls differ only in scan_timestamp (unified diff showed a single changed line). The findings themselves are deterministic; the envelope carries a wall-clock timestamp.",
+      "impact": "The README 'merge' feature caches `scan --format json` results by content hash for reuse; embedding a per-call timestamp means the serialized artifact for identical content changes every run, and any agent that hashes/diffs raw tool output to detect change sees spurious churn. Findings are deterministic, so severity is low, but the non-deterministic envelope defeats naive output-level caching/diffing.",
+      "fix": "Document that findings are deterministic and only scan_timestamp varies, and/or exclude scan_timestamp from the payload that callers hash (e.g. offer a stable/canonical serialization, or move the timestamp out of the content-hashed body).",
+      "regression_check": "inferred: removing or relocating the timestamp is additive/optional; keeping it as a field but documenting determinism is fully backward-compatible."
+    },
+    {
+      "id": "F6",
+      "title": "Error-branch behavior undocumented for scan_url and scan_dir docstrings (LLM sees only the happy path)",
+      "location": "src/llm_sanitizer/server.py:97-98 (scan_url Returns), 133-135 (scan_dir Returns)",
+      "severity": "low",
+      "epistemic_status": "verified",
+      "evidence": "scan_file's docstring documents both paths ('...or {\"status\": \"error\", ...} if the file could not be read', server.py:65-67). scan_url (returns error JSON on RuntimeError, server.py:106-107) and scan_dir (returns error JSON on OSError/RuntimeError, server.py:145-146) only say 'JSON string with ... report' with no mention of the error shape. Note the success/error discriminator itself is implicit: a success result has no 'status' key, an error has status=='error' — this contract is never stated.",
+      "impact": "Per the persona's 'missing error branch' red flag, an LLM that reads only the happy-path Returns line has no guidance to check for {'status':'error'} and may treat an error object as a (malformed) findings report — e.g. concluding zero findings because summary is absent.",
+      "fix": "Mirror scan_file's wording in scan_url and scan_dir Returns sections, and state the discriminator once (success has summary/results and no status; error is {'status':'error','message':...}). Consider adding status:'ok' to success payloads for a uniform discriminator across scan and redact tools.",
+      "regression_check": "verified-safe for docstring edits; adding a status:'ok' field to success payloads is additive but would be a payload change — treat like F1/F2 and note in CHANGELOG if done."
+    }
+  ],
+  "red_flag_checklist": [
+    {"flag": "Wrong response field path (summary.max_risk vs top-level max_risk)", "status": "FOUND", "ref": "F1 — scan_dir puts max_risk/total_findings at top level with no summary object; single-file scans nest them under summary."},
+    {"flag": "Vague 'flag for human review' instructions without a confirmation format", "status": "NOT FOUND", "ref": "CLAUDE.md's agent instructions (release ritual, obfuscation-rule design) are specific and actionable; no vague human-review directives in the tool-facing prose."},
+    {"flag": "Missing error branch in tool-call handling / docstrings", "status": "FOUND", "ref": "F6 — scan_url and scan_dir docstrings document only the happy path; the success/error discriminator is unstated."},
+    {"flag": "Agent-to-agent (subagent-to-subagent) invocation assumed without verification", "status": "NOT FOUND", "ref": "No orchestration prose in this repo assumes subagent-to-subagent calls."},
+    {"flag": "CLAUDE.md loaded from symlinked paths", "status": "N/A", "ref": "This repo's CLAUDE.md is a checked-in project root file, not symlinked from agent-config."},
+    {"flag": "Instruction ordering conflicts (scan-before-act vs output-gate)", "status": "NOT FOUND", "ref": "No conflicting per-agent header vs output-gate ordering in this repo."},
+    {"flag": "Sensitivity parameter on redact implied but unsupported", "status": "NOT FOUND", "ref": "redact/redact_file/redact_url all DO accept and pass a sensitivity parameter (server.py:155,191,252); documented consistently. This prior red flag does not apply here."},
+    {"flag": "Hook stdin/envelope format version-dependency", "status": "N/A", "ref": "No PostToolUse hook consumption in this repo."},
+    {"flag": "--dangerously-skip-permissions scope ambiguity", "status": "N/A", "ref": "Not referenced in this repo's docs."}
+  ],
+  "additional_observations": [
+    "Beyond the persona's example red-flag list: F3 (version field drift), F4 (dead sensitivity config), and F5 (non-deterministic timestamp) are recurring 'declared-but-not-wired' / 'stale-literal' issues worth adding to this persona's checklist as a 'config/output field advertised but not honored' pattern.",
+    "Strengths for agent integration: every MCP tool has a thorough docstring with typed Args; the scanner is consistently fail-closed (integrity findings bypass the sensitivity filter, oversized input and archive bombs surface CRITICAL findings rather than skipping); binary classification is by content not extension, closing rename-evasion in both directions; the de-obfuscate-then-re-scan design keeps false positives low. These are good LLM-workflow properties."
+  ]
+}
