@@ -8,7 +8,14 @@ from __future__ import annotations
 import re
 
 from llm_sanitizer.models import Finding, RiskLevel
-from llm_sanitizer.rules import BaseRule, is_legitimate_file, register_rule
+from llm_sanitizer.rules import (
+    BaseRule,
+    deadline_exceeded,
+    is_legitimate_file,
+    line_number_at,
+    newline_offsets,
+    register_rule,
+)
 
 # XML-style system prompt markers
 _XML_MARKERS = re.compile(
@@ -66,10 +73,14 @@ class SystemPromptRule(BaseRule):
         # Lower risk for legitimate instruction files
         base_risk = RiskLevel.medium if is_legitimate_file(source) else self.default_risk
 
+        offsets = newline_offsets(content)
         for pattern, label in _PATTERNS:
+            if deadline_exceeded():
+                break
             for m in pattern.finditer(content):
-                # Calculate line number from character offset
-                line_no = content[: m.start()].count("\n")
+                if deadline_exceeded():
+                    break
+                line_no = line_number_at(offsets, m.start())
                 col = m.start() - (content.rfind("\n", 0, m.start()) + 1) + 1
                 before, line_text, after = self._build_context(lines, line_no)
                 findings.append(

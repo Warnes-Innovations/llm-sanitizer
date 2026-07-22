@@ -111,7 +111,11 @@ def _fold_char(c: str) -> str:
         0x1D400 <= cp <= 0x1D7FF  # Mathematical Alphanumeric Symbols
         or 0xFF01 <= cp <= 0xFF5E  # Fullwidth ASCII forms
         or 0x2460 <= cp <= 0x24FF  # Enclosed Alphanumerics
+        or 0x2100 <= cp <= 0x214F  # Letterlike Symbols (ℊ ℴ ℯ ℐ ℬ ℛ ℓ …)
     )
+    # All these ranges are >= U+2100, well above the U+0000–U+00FF that a
+    # latin-1 base64 decode can produce — so folding them cannot reintroduce the
+    # M-REG1 binary false positives.
     if not styled_latin:
         return c
     norm = unicodedata.normalize("NFKC", c)

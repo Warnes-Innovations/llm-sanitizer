@@ -7,6 +7,60 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+Hardening from a multi-persona committee review (detection precision/recall,
+DoS bounds, MCP-interface consistency, and SSRF).
+
+### Added
+- **New `char_split` rule** — detects character-splitting obfuscation
+  (`i g n o r e`, `ignore___all`) by reconstructing the split text and re-scanning
+  it, flagging only when the reconstruction trips a real rule (snake_case and
+  prose stay clean).
+- **`chained_obfuscation`** — de-obfuscation now fails closed with a finding at
+  the depth cap instead of silently dropping a payload, so deeply nested/stacked
+  transports (4-layer base64, base64+homoglyph) are caught.
+- **`rescan_incomplete` / `scan_timeout` integrity findings** — a scan that
+  exhausts the de-obfuscation work budget, or hits the new `max_scan_seconds`
+  wall-clock deadline, now says so instead of reporting a silent all-clear.
+- **`max_scan_seconds`** config option (default 60 s) bounding per-unit scan
+  time, enforced inside heavy rules' match loops (not just between rules).
+- Non-English override-phrase coverage (French/Spanish/Italian/German/
+  Portuguese/Russian).
+- `.github/SECURITY.md`, `.github/dependabot.yml`, and `docs/DATA_HANDLING.md`.
+
+### Changed
+- **Homoglyph** normalization expanded (Cyrillic/Greek upper+lower) plus a
+  length-preserving NFKC fallback for styled-Latin lookalikes (math-bold,
+  fullwidth), gated to those ranges so it does not false-positive on
+  latin-1-decoded binary.
+- **Instruction-override / role-play precision** tightened so benign prose
+  (`you are now the owner`, `act as a proxy`, `from now on you will …`) no longer
+  emits high-risk findings; the base64 min-length floor lowered and MIME-wrapped
+  base64 reassembled before decoding.
+- **De-obfuscation re-scan is memoized** per content unit — identical decoded
+  blobs are scanned once, bounding a many-blob fan-out.
+- **`DirScanResult` now carries a `summary` object** mirroring `ScanResult`, so
+  `result.summary.max_risk` is uniform across single-file and directory scans.
+- The emitted result `version` is single-sourced from package metadata (was a
+  hardcoded literal).
+- Per-rule `sensitivity` config overrides now actually affect filtering;
+  `list_rules` reports each rule's effective `enabled`/`sensitivity`.
+- Invalid `sensitivity` is rejected at the boundary (scan and file paths) instead
+  of silently coercing to medium.
+- The inline `redact` MCP tool now raises on error (surfaced as an MCP error)
+  instead of returning a JSON string a caller could mistake for cleaned content.
+
+### Fixed
+- **O(n²) DoS in `hidden_content`** color analysis (memoized per-line block and
+  background lookup); a measured ~40-min 1 MB single-line stylesheet now scans in
+  well under a second.
+- CI workflow actions pinned to immutable commit SHAs.
+
+### Security
+- **DNS-rebinding TOCTOU** in the URL reader closed: the validated IP is pinned
+  onto the connection for each hop (TLS SNI/cert still use the hostname), and
+  IPv4-mapped/6to4/Teredo IPv6 addresses are unwrapped and re-checked so an
+  embedded private/metadata IPv4 cannot slip past on older interpreters.
+
 ## [0.2.0] — 2026-07-20
 
 ### Added

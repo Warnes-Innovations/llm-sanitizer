@@ -22,7 +22,10 @@ _PATTERNS = [
     # change object so benign "from now on you will receive updates" stays clean.
     (re.compile(r'\bfrom\s+now\s+on,?\s+you\s+(?:are\s+(?:now\s+)?(?:a|an|the|no\s+longer)\b|will\s+(?:act|behave|respond\s+only|pretend|be\s+(?:a|an|the))|must\s+(?:act|behave|pretend|only|ignore)|should\s+(?:act|behave|pretend)|can\s+(?:ignore|do\s+anything))', re.IGNORECASE), "persistent persona override"),
     (re.compile(r'\byour\s+new\s+(?:role|identity|persona|name)\s+is\b', re.IGNORECASE), "new role assignment"),
-    (re.compile(r'\b(?:do\s+anything\s+now|DAN\b)', re.IGNORECASE), "DAN jailbreak"),
+    # "DAN" is matched case-SENSITIVELY (via (?-i:DAN)): under IGNORECASE the
+    # token matched the ordinary name "Dan", flooding HIGH false positives on
+    # emails/chat/commit logs. The jailbreak is spelled all-caps.
+    (re.compile(r'\b(?:do\s+anything\s+now|(?-i:DAN))\b', re.IGNORECASE), "DAN jailbreak"),
     (re.compile(r'\bjailbreak\b', re.IGNORECASE), "jailbreak keyword"),
     (re.compile(r'\byou\s+(?:have|had)\s+no\s+(?:restrictions?|limits?|rules?|guidelines?|ethics?)\b', re.IGNORECASE), "restriction removal"),
     (re.compile(r'\bbehave\s+as\s+(?:if|though)\s+you\s+(?:have|had)\s+no\b', re.IGNORECASE), "unconstrained behavior"),

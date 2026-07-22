@@ -233,8 +233,25 @@ def _validate_office(
                         f"Office document part '{part}' is too large to validate "
                         f"({info.file_size} bytes)."
                     )
+                raw = zf.read(part)
+                # Defense-in-depth (committee round-2): stdlib ElementTree/expat
+                # expands internal entities, so a <1 KB "billion laughs" DTD in an
+                # OOXML/ODF part can exhaust memory — and whether it's stopped
+                # depends entirely on the interpreter's libexpat version, which we
+                # must not trust (same principle as the IPv6 SSRF unwrap). Office
+                # document parts have no legitimate DTD/entity, so refuse to parse
+                # any that declares one, fail-closed, before it reaches the parser.
+                # A DTD/entity declaration lives in the prolog, before the root
+                # element; scan a generous prolog window for it.
+                prolog = raw[:16384]
+                if b"<!DOCTYPE" in prolog or b"<!ENTITY" in prolog:
+                    return (
+                        f"Office document part '{part}' declares a DTD/entity, "
+                        "which is not valid in an OOXML/ODF part and is a common "
+                        "XML-bomb vector; refusing to parse."
+                    )
                 try:
-                    ElementTree.fromstring(zf.read(part))
+                    ElementTree.fromstring(raw)
                 except ElementTree.ParseError as exc:
                     return f"Office document part '{part}' is not well-formed XML: {exc}"
     except zipfile.BadZipFile as exc:

@@ -1000,6 +1000,14 @@ class Scanner:
         Recognized archives are expanded and their members scanned recursively
         (see scan_file).
         """
+        # M6/MED-1: validate up front so an EMPTY or all-skipped directory (which
+        # scans no files and so never reaches scan_file's guard) still rejects an
+        # invalid sensitivity instead of echoing it back.
+        if sensitivity not in _SENSITIVITY_RISK_MAP:
+            raise ValueError(
+                f"invalid sensitivity {sensitivity!r}; expected one of "
+                f"{', '.join(sorted(_SENSITIVITY_RISK_MAP))}"
+            )
         root = Path(path)
         results: list[ScanResult] = []
         files_skipped_binary = 0

@@ -293,7 +293,7 @@ def main() -> None:
 def _cmd_scan(args: argparse.Namespace) -> None:
     from llm_sanitizer.config import SanitizerConfig
     from llm_sanitizer.formatters import format_output
-    from llm_sanitizer.models import RiskLevel, ScanResult
+    from llm_sanitizer.models import DirScanResult, RiskLevel, ScanResult
     from llm_sanitizer.scanner import ExtractorUnavailableError, Scanner
 
     config = _config_with_archive_overrides(args)
@@ -348,8 +348,11 @@ def _cmd_scan(args: argparse.Namespace) -> None:
 
     print(format_output(result, fmt=args.format))
 
-    # Exit code logic
-    if args.exit_code_threshold and isinstance(result, ScanResult):
+    # Exit code logic. Both ScanResult and DirScanResult expose .summary.max_risk
+    # (DirScanResult is a SIBLING type, not a subclass) — a directory scan must
+    # gate the exit code too, or `scan <dir> --exit-code-threshold` fails open and
+    # a directory full of injections exits 0 (committee round-2 HIGH).
+    if args.exit_code_threshold and isinstance(result, (ScanResult, DirScanResult)):
         threshold = RiskLevel.from_str(args.exit_code_threshold)
         if result.summary.max_risk is not None and result.summary.max_risk >= threshold:
             sys.exit(1)
