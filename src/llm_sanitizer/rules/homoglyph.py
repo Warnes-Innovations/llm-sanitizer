@@ -23,6 +23,7 @@ false-positive class over scientific / internationalized text.
 from __future__ import annotations
 
 import re
+import unicodedata
 
 from llm_sanitizer.models import Finding, RiskLevel
 from llm_sanitizer.rules import BaseRule, register_rule
@@ -32,25 +33,45 @@ from llm_sanitizer.rules._rescan import scan_deobfuscated
 # cross-script lookalikes belong here — plain accented Latin letters (à, é,
 # etc.) are NOT homoglyphs in any adversarial sense (unicodedata still
 # classifies them as LATIN script) and are ordinary internationalized text.
+#
+# Cyrillic and Greek confusables are listed explicitly because they are NOT
+# compatibility-decomposable — ``unicodedata.normalize("NFKC", "ԁ")`` leaves the
+# Cyrillic komi-de unchanged, so NFKC alone (the fallback in _fold_char) can
+# never catch them. Styled/fullwidth Latin (math-bold 𝐢, fullwidth ｉ, circled)
+# IS NFKC-decomposable to a single ASCII letter and is handled by that fallback
+# instead of being enumerated here.
 _HOMOGLYPHS: dict[str, str] = {
-    # Cyrillic lookalikes
-    "а": "a",  # Cyrillic а → a
-    "е": "e",  # Cyrillic е → e
-    "о": "o",  # Cyrillic о → o
-    "р": "r",  # Cyrillic р → r
-    "с": "c",  # Cyrillic с → c
-    "х": "x",  # Cyrillic х → x
-    "у": "y",  # Cyrillic у → y
-    "і": "i",  # Cyrillic і → i
-    "є": "e",  # Cyrillic є → e
-    "ј": "j",  # Cyrillic ј → j
-    # Greek lookalikes
-    "ο": "o",  # Greek ο → o
-    "α": "a",  # Greek α → a
-    "ε": "e",  # Greek ε → e
-    "ι": "i",  # Greek ι → i
-    "ν": "v",  # Greek ν → v
-    "ρ": "p",  # Greek ρ → p
+    # Cyrillic lowercase lookalikes
+    "а": "a",  # U+0430 Cyrillic а → a
+    "е": "e",  # U+0435 Cyrillic е → e
+    "о": "o",  # U+043E Cyrillic о → o
+    "р": "r",  # U+0440 Cyrillic р → r  (visually p; kept as r per prior behavior)
+    "с": "c",  # U+0441 Cyrillic с → c
+    "х": "x",  # U+0445 Cyrillic х → x
+    "у": "y",  # U+0443 Cyrillic у → y
+    "і": "i",  # U+0456 Cyrillic і → i
+    "ј": "j",  # U+0458 Cyrillic ј → j
+    "є": "e",  # U+0454 Cyrillic є → e
+    "ѕ": "s",  # U+0455 Cyrillic ѕ → s
+    "ԁ": "d",  # U+0501 Cyrillic komi de → d
+    "һ": "h",  # U+04BB Cyrillic һ → h
+    "ԛ": "q",  # U+051B Cyrillic ԛ → q
+    "ԝ": "w",  # U+051D Cyrillic ԝ → w
+    "ӏ": "l",  # U+04CF Cyrillic palochka (lower) → l
+    # Cyrillic uppercase lookalikes
+    "А": "A", "В": "B", "Е": "E", "К": "K", "М": "M", "Н": "H", "О": "O",
+    "Р": "P", "С": "C", "Т": "T", "У": "Y", "Х": "X", "Ѕ": "S", "І": "I",
+    "Ј": "J", "Ԁ": "D",
+    # Greek lowercase lookalikes
+    "ο": "o",  # U+03BF Greek ο → o
+    "α": "a",  # U+03B1 Greek α → a
+    "ε": "e",  # U+03B5 Greek ε → e
+    "ι": "i",  # U+03B9 Greek ι → i
+    "ν": "v",  # U+03BD Greek ν → v
+    "ρ": "p",  # U+03C1 Greek ρ → p
+    # Greek uppercase lookalikes
+    "Α": "A", "Β": "B", "Ε": "E", "Ζ": "Z", "Η": "H", "Ι": "I", "Κ": "K",
+    "Μ": "M", "Ν": "N", "Ο": "O", "Ρ": "P", "Τ": "T", "Υ": "Y", "Χ": "X",
 }
 
 # Instruction-like keywords checked after normalization. Matched as whole words
@@ -63,11 +84,32 @@ _SUSPICIOUS_TERMS = frozenset([
 ])
 
 
+def _fold_char(c: str) -> str:
+    """Fold a single character to its Latin lookalike, 1 char → 1 char.
+
+    Order: curated cross-script map first (Cyrillic/Greek, which NFKC leaves
+    alone), then a compatibility-decomposition fallback for styled/fullwidth
+    Latin (math alphanumerics 𝐢, fullwidth ｉ, circled, etc.). The fallback is
+    accepted ONLY when NFKC yields exactly one ASCII alphanumeric — so length is
+    always preserved (ligatures like ﬁ→"fi" and fractions ½→"1⁄2" are left
+    as-is), keeping finding offsets valid.
+    """
+    mapped = _HOMOGLYPHS.get(c)
+    if mapped is not None:
+        return mapped
+    if c.isascii():
+        return c
+    norm = unicodedata.normalize("NFKC", c)
+    if len(norm) == 1 and norm.isascii() and norm.isalnum():
+        return norm
+    return c
+
+
 def _normalize_homoglyphs(text: str) -> str:
     """Replace known homoglyph characters with their Latin equivalents. The
     substitution is 1 character → 1 character, so positions are preserved and a
     finding's line/column in the normalized text maps back to the original."""
-    return "".join(_HOMOGLYPHS.get(c, c) for c in text)
+    return "".join(_fold_char(c) for c in text)
 
 
 def _has_non_ascii_letter(text: str) -> bool:

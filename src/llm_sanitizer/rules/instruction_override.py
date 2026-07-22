@@ -38,7 +38,11 @@ _PATTERNS = [
     r"forget\s+(everything|all)(\s+above|\s+before|\s+prior)?",
     r"new\s+system\s+prompt",
     r"override[:\s]+you\s+are\s+now",
-    r"you\s+are\s+now\s+(?:a|an|the)\s+\w+",
+    # Role reassignment to an AI persona (H5/SP-1 precision fix): require an
+    # AI-persona noun so benign "you are now the owner/admin/winner" does not
+    # fire. Unconstrained-persona phrasing ("you are now a bot with no rules")
+    # is additionally covered by the role_play rule.
+    r"you\s+are\s+now\s+(?:a|an|the)\s+(?:\w+\s+){0,2}?(?:AI|assistant|language\s+model|model|LLM|chatbot|persona)\b",
     r"from\s+now\s+on[\s,]+ignore",
     r"override\s+(?:all\s+)?(?:previous|prior)\s+(?:instructions?|rules?|guidelines?)",
     r"reset\s+(?:all\s+)?(?:previous|prior)?\s*(?:instructions?|rules?|settings?)",
@@ -52,6 +56,16 @@ _PATTERNS = [
     # and "pay no attention to" are now covered by the cross-product above.
     r"(?:instead\s+of|rather\s+than)\s+(?:following\s+)?(?:your|the)\s+(?:original\s+|previous\s+|prior\s+)?(?:task|instructions?|guidance|directions?)",
     r"your\s+(?:real|actual|true|updated|new|revised)\s+(?:task|objective|instructions?|directive)\s+(?:is|are)\b",
+    # High-confidence non-English overrides (M3). Vocabulary-bounded stopgap for
+    # the most common languages; the durable fix for arbitrary phrasings/
+    # languages is the semantic-intent layer tracked in OBO. Accents optional so
+    # both "précédentes" and "precedentes" match.
+    r"ignorez\s+(?:toutes\s+)?(?:les\s+)?instructions",          # French
+    r"ignora\s+(?:todas\s+)?(?:las\s+)?instrucciones",           # Spanish
+    r"ignora\s+(?:tutte\s+)?(?:le\s+)?istruzioni",               # Italian
+    r"ignoriere\s+(?:alle\s+)?(?:vorherigen\s+)?anweisungen",    # German
+    r"ignore\s+(?:todas\s+)?(?:as\s+)?instru[çc][õo]es",         # Portuguese
+    r"пропустите\s+(?:все\s+)?(?:предыдущие\s+)?инструкции",     # Russian
 ]
 
 _COMPILED = [re.compile(p, re.IGNORECASE | re.DOTALL) for p in _PATTERNS]

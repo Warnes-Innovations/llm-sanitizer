@@ -28,7 +28,7 @@ from __future__ import annotations
 
 import contextvars
 
-from llm_sanitizer.models import Finding
+from llm_sanitizer.models import Finding, FindingContext, Location, RiskLevel
 
 # Max levels of de-obfuscation re-scan. Depth 1 = re-scan the once-decoded text;
 # higher depths catch nesting (base64-in-base64, a homoglyph phrase inside
@@ -57,6 +57,49 @@ _scanned_bytes: contextvars.ContextVar[int] = contextvars.ContextVar(
 _scanner_managed: contextvars.ContextVar[bool] = contextvars.ContextVar(
     "llm_sanitizer_deobfuscation_managed", default=False
 )
+# Per-content-unit memo of de-obfuscated-text → findings. Identical decoded
+# blobs (e.g. the same base64 token repeated thousands of times, or many blobs
+# decoding to the same payload) are scanned once and the result reused. This
+# both bounds a breadth fan-out — many *distinct top-level* blobs that decode to
+# the same text (Red-Team F3 / M2) — and keeps the low base64 floor (M10)
+# affordable. Set to a fresh dict by reset_rescan_budget; None for direct
+# rule.detect() calls (no memo, behaves as before).
+_rescan_cache: contextvars.ContextVar[dict[str, list[Finding]] | None] = (
+    contextvars.ContextVar("llm_sanitizer_rescan_cache", default=None)
+)
+
+
+def _chained_obfuscation_finding(text: str) -> Finding:
+    """Fail-closed finding emitted when de-obfuscation hits the depth cap.
+
+    Reaching the cap means the text has already been peeled through
+    ``_MAX_DEOBFUSCATION_DEPTH`` obfuscation layers and is STILL obfuscated
+    enough that another rule wants to decode it further. One layer of encoding is
+    transport; several independent layers stacked on top of each other have no
+    legitimate purpose and are the durable tell of an attempt to hide a payload
+    from the scanner. Mechanism-independent: any mix of transports (base64 →
+    base64, base64 → homoglyph, zero-width → base64, …) that reached this depth
+    counts. HIGH, not CRITICAL: the payload itself was never recovered, so we
+    flag the evasion structure rather than a confirmed injection.
+    """
+    snippet = text[:80]
+    return Finding(
+        id=1,
+        rule="chained_obfuscation",
+        rule_name="Chained Obfuscation",
+        risk=RiskLevel.high,
+        location=Location(line=1, column=1, end_line=1, end_column=1),
+        matched=snippet + ("..." if len(text) > 80 else ""),
+        matched_raw=text,
+        context=FindingContext(before=[], line=snippet, after=[]),
+        explanation=(
+            "Content is wrapped in multiple stacked obfuscation layers "
+            f"(≥{_MAX_DEOBFUSCATION_DEPTH} deep); de-obfuscation was halted at the "
+            "safe-depth cap before the payload could be recovered. Deeply nested "
+            "transports have no legitimate purpose and are treated as an attempt "
+            "to evade detection (fail-closed)."
+        ),
+    )
 
 
 def reset_rescan_budget() -> None:
@@ -65,6 +108,7 @@ def reset_rescan_budget() -> None:
     they trigger) shares a single bounded budget."""
     _scanned_bytes.set(0)
     _scanner_managed.set(True)
+    _rescan_cache.set({})
 
 
 def scan_deobfuscated(text: str, source: str = "") -> list[Finding]:
@@ -87,7 +131,18 @@ def scan_deobfuscated(text: str, source: str = "") -> list[Finding]:
         _scanned_bytes.set(0)
 
     if depth >= _MAX_DEOBFUSCATION_DEPTH:
-        return []
+        # Do not silently drop the payload (that is the V004/H8 bypass): the
+        # content is still obfuscated at the safe-depth cap, so fail closed.
+        return [_chained_obfuscation_finding(text)]
+
+    # Memo hit: an identical blob was already scanned this content unit — reuse
+    # its result without re-running the ruleset or consuming more budget.
+    cache = _rescan_cache.get()
+    if cache is not None:
+        cached = cache.get(text)
+        if cached is not None:
+            return cached
+
     if _scanned_bytes.get() + len(text) > _MAX_RESCAN_BYTES:
         return []
     _scanned_bytes.set(_scanned_bytes.get() + len(text))
@@ -102,6 +157,8 @@ def scan_deobfuscated(text: str, source: str = "") -> list[Finding]:
             except Exception:
                 # A single misbehaving rule must not sink the whole re-scan.
                 continue
+        if cache is not None:
+            cache[text] = findings
         return findings
     finally:
         _depth.reset(token)

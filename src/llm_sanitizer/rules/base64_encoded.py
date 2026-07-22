@@ -21,12 +21,22 @@ from llm_sanitizer.models import Finding, RiskLevel
 from llm_sanitizer.rules import BaseRule, register_rule
 from llm_sanitizer.rules._rescan import scan_deobfuscated
 
-# Minimum length to avoid false positives on short base64-looking tokens
-_MIN_B64_LENGTH = 40
+# Minimum length of a base64-looking run (non-padding chars) to bother decoding.
+# Kept low (M10): "act as DAN" is only 14 non-pad base64 chars. The floor is
+# precision-NEUTRAL — a blob is only ever reported if its DECODED text trips a
+# real rule (scan_deobfuscated), so short random tokens (hashes, ids) decode to
+# gibberish and stay clean. The floor exists only to skip trivially-short runs
+# and bound decode attempts; total re-scan work is separately capped by the
+# _rescan byte budget.
+_MIN_B64_LENGTH = 12
 
 _B64_PATTERN = re.compile(
     r'(?<![A-Za-z0-9+/])([A-Za-z0-9+/]{' + str(_MIN_B64_LENGTH) + r',}={0,2})(?![A-Za-z0-9+/=])'
 )
+
+# A whole line that is nothing but base64 (as MIME wraps it, ~76 chars/line).
+# Used to reassemble a blob split across several lines (M11).
+_B64_FULL_LINE = re.compile(r'^[A-Za-z0-9+/]{16,}={0,2}$')
 
 
 def _try_decode_base64(s: str) -> str | None:
@@ -105,5 +115,58 @@ class Base64EncodedRule(BaseRule):
                     )
                 )
                 fid += 1
+
+        # M11: reassemble base64 blobs wrapped across consecutive lines (MIME
+        # style), which the per-line pass above cannot decode because each line
+        # is only a fragment. Join runs of >=2 whole-base64 lines, decode, and
+        # re-scan; report at the run's first line.
+        run_start = 0
+        run: list[str] = []
+
+        def _flush_run(start: int, parts: list[str]) -> None:
+            nonlocal fid
+            if len(parts) < 2:
+                return
+            joined = "".join(parts)
+            decoded = _try_decode_base64(joined)
+            if not decoded:
+                return
+            sub_findings = scan_deobfuscated(decoded, source)
+            if not sub_findings:
+                return
+            risk = max((f.risk for f in sub_findings), key=lambda r: r.value)
+            tripped = ", ".join(sorted({f.rule_name for f in sub_findings}))
+            before, line_text, after = self._build_context(lines, start)
+            findings.append(
+                self._make_finding(
+                    finding_id=fid,
+                    rule_id=self.rule_id,
+                    rule_name=self.rule_name,
+                    risk=risk,
+                    line_no=start + 1,
+                    col=1,
+                    end_col=len(lines[start]) + 1,
+                    matched=joined[:80] + ("..." if len(joined) > 80 else ""),
+                    matched_raw=joined,
+                    before=before,
+                    line_text=line_text,
+                    after=after,
+                    explanation=(
+                        f"Base64 content wrapped across {len(parts)} lines decodes "
+                        f"to text flagged by {tripped}: {decoded[:100]!r}"
+                    ),
+                )
+            )
+            fid += 1
+
+        for idx, line in enumerate(lines):
+            if _B64_FULL_LINE.match(line.strip()):
+                if not run:
+                    run_start = idx
+                run.append(line.strip())
+            else:
+                _flush_run(run_start, run)
+                run = []
+        _flush_run(run_start, run)
 
         return findings

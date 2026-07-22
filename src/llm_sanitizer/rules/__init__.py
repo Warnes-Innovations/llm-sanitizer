@@ -142,6 +142,7 @@ def get_all_rules() -> list[type[BaseRule]]:
     from llm_sanitizer.rules import (  # noqa: F401
         agent_config,
         base64_encoded,
+        char_split,
         comment_directive,
         data_exfil,
         hidden_content,

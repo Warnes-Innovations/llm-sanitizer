@@ -250,7 +250,7 @@ class TestCLIListRules:
         out, _ = capsys.readouterr()
         rules = json.loads(out)
         assert isinstance(rules, list)
-        assert len(rules) == 10
+        assert len(rules) == 11
 
     def test_list_rules_has_required_fields(self, capsys: pytest.CaptureFixture[str]) -> None:
         sys.argv = ["llm-sanitize", "list-rules"]

@@ -11,10 +11,16 @@ from llm_sanitizer.models import Finding, RiskLevel
 from llm_sanitizer.rules import BaseRule, register_rule
 
 _PATTERNS = [
-    (re.compile(r'\bact\s+as\b', re.IGNORECASE), "act-as persona"),
+    # "act as" (H5/SP-1 precision fix): the bare phrase over-matched benign prose
+    # ("act as a proxy/bridge/catalyst"). Require an unconstrained-persona cue or
+    # an explicit removal-of-constraints clause instead.
+    (re.compile(r'\bact\s+as\s+(?:an?\s+|the\s+)?(?:\w+\s+){0,2}?(?:jailbroken|unrestricted|unfiltered|uncensored|unconstrained|unethical|amoral|evil|rogue|lawless|DAN)\b', re.IGNORECASE), "act-as unconstrained persona"),
+    (re.compile(r'\bact\s+as\b[^.\n]{0,40}?(?:without\s+(?:any\s+)?|with\s+no\s+|\bno\s+)(?:restrictions?|limits?|rules?|filters?|guidelines?|ethics?|constraints?|guardrails?|safeguards?)', re.IGNORECASE), "act-as no-constraints persona"),
     (re.compile(r'\bpretend\s+(?:you\s+are|to\s+be)\b', re.IGNORECASE), "pretend persona"),
     (re.compile(r'\byou\s+are\s+(?:now\s+)?(?:a|an|the)\s+\w+\s+(?:without|with\s+no)', re.IGNORECASE), "unconstrained persona"),
-    (re.compile(r'\bfrom\s+now\s+on\s+(?:you\s+(?:are|will|should|must|can))', re.IGNORECASE), "persistent persona override"),
+    # "from now on you …" (H5/SP-1 precision fix): require a persona/behavior-
+    # change object so benign "from now on you will receive updates" stays clean.
+    (re.compile(r'\bfrom\s+now\s+on,?\s+you\s+(?:are\s+(?:now\s+)?(?:a|an|the|no\s+longer)\b|will\s+(?:act|behave|respond\s+only|pretend|be\s+(?:a|an|the))|must\s+(?:act|behave|pretend|only|ignore)|should\s+(?:act|behave|pretend)|can\s+(?:ignore|do\s+anything))', re.IGNORECASE), "persistent persona override"),
     (re.compile(r'\byour\s+new\s+(?:role|identity|persona|name)\s+is\b', re.IGNORECASE), "new role assignment"),
     (re.compile(r'\b(?:do\s+anything\s+now|DAN\b)', re.IGNORECASE), "DAN jailbreak"),
     (re.compile(r'\bjailbreak\b', re.IGNORECASE), "jailbreak keyword"),

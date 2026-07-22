@@ -101,7 +101,7 @@ class TestRulesRegistry:
     def test_all_rules_registered(self) -> None:
         from llm_sanitizer.rules import get_all_rules
         rules = get_all_rules()
-        assert len(rules) == 10
+        assert len(rules) == 11
 
     def test_rule_ids_are_unique(self) -> None:
         from llm_sanitizer.rules import get_all_rules
@@ -116,7 +116,7 @@ class TestRulesRegistry:
         expected = {
             "instruction_override", "zero_width", "hidden_content", "role_play",
             "system_prompt", "data_exfil", "comment_directive", "base64_encoded",
-            "homoglyph", "agent_config",
+            "homoglyph", "agent_config", "char_split",
         }
         assert ids == expected
 
