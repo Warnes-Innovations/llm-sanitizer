@@ -17,8 +17,11 @@ malicious endpoint cannot exhaust memory with an unbounded/huge body.
 
 from __future__ import annotations
 
+import contextlib
 import ipaddress
 import socket
+from collections.abc import Iterator
+from typing import Any
 from urllib.parse import urljoin, urlparse
 
 _ALLOWED_SCHEMES = ("http", "https")
@@ -46,15 +49,15 @@ def _ip_is_blocked(ip: str) -> bool:
     )
 
 
-def _assert_safe_url(url: str) -> None:
-    """Raise RuntimeError unless *url* is an http(s) URL whose host resolves
-    only to public addresses. Fails closed on any parse/resolution failure.
+def _assert_safe_url(url: str) -> tuple[str, list[str]]:
+    """Validate *url* and return ``(host, validated_public_ips)``.
 
-    NOTE: this resolves-then-validates; a determined DNS-rebinding attacker
-    could in principle return a different IP at connect time (TOCTOU). Closing
-    that fully requires pinning the validated IP for the connection; this guard
-    stops the common direct and redirect-based SSRF (metadata/loopback/private)
-    which is what the trust boundary was previously missing entirely.
+    Raises RuntimeError unless *url* is an http(s) URL whose host resolves ONLY
+    to public addresses. Fails closed on any parse/resolution failure. The
+    returned IPs are pinned onto the connection by :func:`_pin_host_to_ips` so
+    the request goes to exactly what was validated — closing the DNS-rebinding
+    TOCTOU where a short-TTL attacker returns a public IP at validation and a
+    metadata/loopback IP at connect time (committee M1).
     """
     parsed = urlparse(url)
     scheme = parsed.scheme.lower()
@@ -77,6 +80,43 @@ def _assert_safe_url(url: str) -> None:
             f"blocked SSRF target: {host!r} resolves to non-public address(es) "
             f"{blocked or list(ips)} (loopback/private/link-local/metadata)"
         )
+    return host, sorted(ips)
+
+
+def _addrinfo_for(ip: str, port: int) -> tuple[Any, ...]:
+    """Build a getaddrinfo-style tuple for a literal IP (v4 or v6)."""
+    try:
+        family = socket.AF_INET6 if ipaddress.ip_address(ip).version == 6 else socket.AF_INET
+    except ValueError:
+        family = socket.AF_INET
+    sockaddr: tuple[Any, ...] = (ip, port) if family == socket.AF_INET else (ip, port, 0, 0)
+    return (family, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", sockaddr)
+
+
+@contextlib.contextmanager
+def _pin_host_to_ips(host: str, ips: list[str]) -> Iterator[None]:
+    """Temporarily force ``socket.getaddrinfo`` to return ONLY *ips* for *host*,
+    so the underlying connection goes to the pre-validated address rather than a
+    freshly (and possibly rebinding) re-resolution. TLS SNI and certificate
+    verification still use *host*, so HTTPS is unaffected. Other hosts resolve
+    normally.
+
+    Caveat: this patches a process-global for the duration of the request; it is
+    intended for the scanner's serial URL fetches, not high-concurrency use.
+    """
+    real_getaddrinfo = socket.getaddrinfo
+
+    def pinned(h: object, port: object, *args: object, **kwargs: object) -> list[Any]:
+        if h == host:
+            p = int(port) if isinstance(port, (int, str)) and str(port).isdigit() else 0
+            return [_addrinfo_for(ip, p) for ip in ips]
+        return real_getaddrinfo(h, port, *args, **kwargs)  # type: ignore[arg-type]
+
+    socket.getaddrinfo = pinned  # type: ignore[assignment]
+    try:
+        yield
+    finally:
+        socket.getaddrinfo = real_getaddrinfo
 
 
 def _read_capped(response: object) -> str:
@@ -122,8 +162,13 @@ def read_url(url: str) -> str:
     try:
         with httpx.Client(follow_redirects=False, timeout=30.0) as client:
             for _ in range(_MAX_REDIRECTS + 1):
-                _assert_safe_url(current)
-                with client.stream("GET", current) as response:
+                host, ips = _assert_safe_url(current)
+                # Pin the connection to the just-validated IP(s) so httpx cannot
+                # re-resolve the host to a different (metadata/loopback) address
+                # at connect time (M1 DNS-rebinding TOCTOU).
+                with _pin_host_to_ips(host, ips), client.stream(
+                    "GET", current
+                ) as response:
                     if response.is_redirect:
                         loc = response.headers.get("location")
                         if not loc:

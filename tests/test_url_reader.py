@@ -116,3 +116,37 @@ def test_read_url_blocks_before_request(monkeypatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", _boom)
     with pytest.raises(RuntimeError, match="scheme"):
         read_url("file:///etc/passwd")
+
+
+class TestDnsRebindingPin:
+    """M1: the validated IP is pinned to the connection so httpx cannot
+    re-resolve the host to a different (metadata/loopback) address at connect
+    time (DNS-rebinding TOCTOU)."""
+
+    def test_pin_restricts_and_restores(self) -> None:
+        from llm_sanitizer.readers.url_reader import _pin_host_to_ips
+
+        real = socket.getaddrinfo
+        with _pin_host_to_ips("target.example", ["203.0.113.7"]):
+            infos = socket.getaddrinfo("target.example", 443)
+            assert {i[4][0] for i in infos} == {"203.0.113.7"}
+        # restored after the context
+        assert socket.getaddrinfo is real
+
+    def test_pin_passes_other_hosts_through(self) -> None:
+        from llm_sanitizer.readers.url_reader import _pin_host_to_ips
+
+        called = {}
+
+        def fake(host, port, *a, **k):
+            called["host"] = host
+            return [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", ("1.2.3.4", port))]
+
+        orig = socket.getaddrinfo
+        socket.getaddrinfo = fake
+        try:
+            with _pin_host_to_ips("pinned.example", ["203.0.113.7"]):
+                socket.getaddrinfo("other.example", 80)
+            assert called["host"] == "other.example"
+        finally:
+            socket.getaddrinfo = orig
