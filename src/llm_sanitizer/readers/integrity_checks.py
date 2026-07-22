@@ -111,7 +111,7 @@ def detect_type_mismatch(path: Path) -> str | None:
         return None
 
     try:
-        import filetype  # type: ignore[import-untyped]
+        import filetype
     except ImportError:
         # Core dep missing → Tier 1 inactive (graceful degradation).
         return None

@@ -350,7 +350,7 @@ def _iter_rar(
     path: Path, max_total_bytes: int, max_entries: int
 ) -> Iterator[tuple[str, bytes]]:
     try:
-        import libarchive  # type: ignore[import-untyped]
+        import libarchive
     except ImportError as exc:
         raise ArchiveToolUnavailable(
             "RAR archive support requires the 'rar' extra: "
