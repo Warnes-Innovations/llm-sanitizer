@@ -20,7 +20,7 @@ import re
 
 from llm_sanitizer.models import Finding, RiskLevel
 from llm_sanitizer.rules import BaseRule, register_rule
-from llm_sanitizer.rules._rescan import scan_deobfuscated
+from llm_sanitizer.rules._rescan import deadline_exceeded, scan_deobfuscated
 
 # Separators an attacker uses to break up a word/phrase. Kept as a character-
 # class body: '-' is last so it is a literal, '.', '*', '|' are literal inside
@@ -99,6 +99,8 @@ class CharSplitRule(BaseRule):
         fid = 1
 
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                break
             if not _looks_split(line):
                 continue
             reconstructed = _reconstruct(line)

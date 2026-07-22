@@ -239,11 +239,29 @@ class TestScanCompletenessSurfaced:
         # A single base64 blob that decodes to more than the 4 MiB re-scan
         # budget is refused by scan_deobfuscated; the scanner must surface a
         # MEDIUM rescan_incomplete finding rather than silently skipping it.
+        # Deadline disabled so this is deterministic and not masked by a timeout
+        # near the default 60 s (committee: timeout must not mask rescan_incomplete).
         import base64
 
+        from llm_sanitizer.config import SanitizerConfig
+
         big = base64.b64encode(b"A" * (5 * 1024 * 1024)).decode()  # decodes to 5 MiB
-        r = scan_text(big, sensitivity="high")
+        r = scan_text(big, config=SanitizerConfig(max_scan_seconds=0))
         assert any(f.rule == "rescan_incomplete" for f in r.findings)
+
+    def test_deadline_interrupts_a_single_rule(self) -> None:
+        # Committee HIGH: max_scan_seconds must bound a single rule's per-match
+        # loop, not just the between-rules gap. A huge one-line stylesheet used
+        # to run for minutes inside one hidden_content.detect() call.
+        import time
+
+        from llm_sanitizer.config import SanitizerConfig
+
+        line = "div{" + "color:#123456;" * 60000 + "}"
+        start = time.monotonic()
+        r = scan_text(line, config=SanitizerConfig(max_scan_seconds=2.0))
+        assert time.monotonic() - start < 15.0
+        assert any(f.rule == "scan_timeout" for f in r.findings)
 
     def test_wall_clock_deadline_emits_scan_timeout(self) -> None:
         from llm_sanitizer.config import SanitizerConfig
@@ -304,3 +322,33 @@ class TestInterfaceFindings:
         assert isinstance(server.redact("benign text", mode="strip"), str)
         with pytest.raises(ValueError):
             server.redact("x", mode="not-a-real-mode")
+
+
+class TestConvergenceRoundFixes:
+    """Second-round committee findings introduced by the first fix batch."""
+
+    def test_nfkc_no_false_positives_on_decoded_binary(self) -> None:
+        # M-REG1: the H2 NFKC fold must not fire on latin-1-decoded base64
+        # binary (hash/id lists). Token-dense hash docs must stay clean.
+        import base64
+        import hashlib
+
+        tokens = "\n".join(
+            base64.b64encode(hashlib.sha256(str(i).encode()).digest()).decode()
+            for i in range(1500)
+        )
+        r = scan_text(tokens, sensitivity="medium")
+        assert not any(f.rule == "base64_encoded" for f in r.findings)
+
+    def test_scan_file_validates_sensitivity(self) -> None:
+        # MED-1: the file path (not just scan()) rejects invalid sensitivity.
+        import tempfile
+        from pathlib import Path
+
+        from llm_sanitizer.scanner import Scanner
+
+        with tempfile.TemporaryDirectory() as d:
+            p = Path(d, "a.txt")
+            p.write_text("hello world")
+            with pytest.raises(ValueError):
+                Scanner().scan_file(p, sensitivity="strict")

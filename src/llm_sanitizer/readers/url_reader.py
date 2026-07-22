@@ -31,14 +31,7 @@ _MAX_REDIRECTS = 5
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 
 
-def _ip_is_blocked(ip: str) -> bool:
-    """True if *ip* is a non-public address we must never fetch (loopback,
-    private, link-local incl. cloud metadata, reserved, multicast). Unparseable
-    → blocked (fail closed)."""
-    try:
-        addr = ipaddress.ip_address(ip)
-    except ValueError:
-        return True
+def _addr_is_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
     return bool(
         addr.is_private
         or addr.is_loopback
@@ -47,6 +40,32 @@ def _ip_is_blocked(ip: str) -> bool:
         or addr.is_multicast
         or addr.is_unspecified
     )
+
+
+def _ip_is_blocked(ip: str) -> bool:
+    """True if *ip* is a non-public address we must never fetch (loopback,
+    private, link-local incl. cloud metadata, reserved, multicast). Unparseable
+    → blocked (fail closed).
+
+    Defense-in-depth (committee MED-2): an IPv4-mapped/6to4/Teredo IPv6 address
+    embeds an IPv4 address. Older CPython (<3.11.10 / <3.12.4) did NOT reflect
+    the embedded IPv4's private/link-local status on the IPv6 wrapper, so
+    ``::ffff:169.254.169.254`` could pass. We explicitly unwrap and re-check the
+    embedded IPv4 rather than trusting the interpreter's patch level."""
+    try:
+        addr = ipaddress.ip_address(ip)
+    except ValueError:
+        return True
+    if _addr_is_blocked(addr):
+        return True
+    if isinstance(addr, ipaddress.IPv6Address):
+        embedded = addr.ipv4_mapped or addr.sixtofour or getattr(addr, "teredo", None)
+        # `teredo` returns a (server, client) tuple; check the client address.
+        if isinstance(embedded, tuple):
+            embedded = embedded[1] if embedded else None
+        if embedded is not None and _addr_is_blocked(embedded):
+            return True
+    return False
 
 
 def _assert_safe_url(url: str) -> tuple[str, list[str]]:

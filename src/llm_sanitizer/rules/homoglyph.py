@@ -99,6 +99,21 @@ def _fold_char(c: str) -> str:
         return mapped
     if c.isascii():
         return c
+    # NFKC fallback ONLY for genuinely styled-Latin lookalike ranges: math
+    # alphanumeric symbols, fullwidth ASCII, and enclosed/circled alphanumerics.
+    # It deliberately does NOT fold general Latin-1 Supplement compatibility
+    # chars (ª→a, º→o, ¹²³→123): those routinely appear in base64-decoded binary
+    # (latin-1 fallback), and folding them made the homoglyph re-scan emit HIGH
+    # false-positive injections on token-dense files like lockfiles (committee
+    # M-REG1). Only the styled-Latin PoCs (𝐢𝐠𝐧𝐨𝐫𝐞, fullwidth) need this path.
+    cp = ord(c)
+    styled_latin = (
+        0x1D400 <= cp <= 0x1D7FF  # Mathematical Alphanumeric Symbols
+        or 0xFF01 <= cp <= 0xFF5E  # Fullwidth ASCII forms
+        or 0x2460 <= cp <= 0x24FF  # Enclosed Alphanumerics
+    )
+    if not styled_latin:
+        return c
     norm = unicodedata.normalize("NFKC", c)
     if len(norm) == 1 and norm.isascii() and norm.isalnum():
         return norm

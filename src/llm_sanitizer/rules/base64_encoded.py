@@ -19,7 +19,7 @@ import re
 
 from llm_sanitizer.models import Finding, RiskLevel
 from llm_sanitizer.rules import BaseRule, register_rule
-from llm_sanitizer.rules._rescan import scan_deobfuscated
+from llm_sanitizer.rules._rescan import deadline_exceeded, scan_deobfuscated
 
 # Minimum length of a base64-looking run (non-padding chars) to bother decoding.
 # Kept low (M10): "act as DAN" is only 14 non-pad base64 chars. The floor is
@@ -53,9 +53,12 @@ def _try_decode_base64(s: str) -> str | None:
                 text = decoded_bytes.decode("latin-1")
             except UnicodeDecodeError:
                 return None
-        # Must be mostly printable
-        printable = sum(c.isprintable() for c in text)
-        if len(text) > 0 and printable / len(text) > 0.8:
+        # Must be mostly printable. Sample the first 64 KiB for the ratio so a
+        # multi-MB decoded blob doesn't cost an O(n) per-char isprintable() pass
+        # (the printable-ratio is representative from a prefix).
+        sample = text[:65536]
+        printable = sum(c.isprintable() for c in sample)
+        if len(sample) > 0 and printable / len(sample) > 0.8:
             return text
     except Exception:
         pass
@@ -80,7 +83,11 @@ class Base64EncodedRule(BaseRule):
         fid = 1
 
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                break
             for m in _B64_PATTERN.finditer(line):
+                if deadline_exceeded():
+                    break
                 candidate = m.group(1)
                 decoded = _try_decode_base64(candidate)
                 if not decoded:
@@ -160,6 +167,9 @@ class Base64EncodedRule(BaseRule):
             fid += 1
 
         for idx, line in enumerate(lines):
+            if deadline_exceeded():
+                run = []
+                break
             if _B64_FULL_LINE.match(line.strip()):
                 if not run:
                     run_start = idx

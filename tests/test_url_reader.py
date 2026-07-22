@@ -150,3 +150,21 @@ class TestDnsRebindingPin:
             assert called["host"] == "other.example"
         finally:
             socket.getaddrinfo = orig
+
+
+class TestIpv4MappedIpv6:
+    """MED-2: IPv4-mapped / 6to4 / Teredo IPv6 addresses embedding a private or
+    link-local IPv4 must be blocked regardless of the interpreter's patch level
+    (older CPython did not reflect the embedded IPv4's status)."""
+
+    def test_mapped_metadata_and_loopback_blocked(self) -> None:
+        from llm_sanitizer.readers.url_reader import _ip_is_blocked
+
+        assert _ip_is_blocked("::ffff:169.254.169.254")
+        assert _ip_is_blocked("::ffff:127.0.0.1")
+        assert _ip_is_blocked("::ffff:10.0.0.5")
+
+    def test_public_mapped_allowed(self) -> None:
+        from llm_sanitizer.readers.url_reader import _ip_is_blocked
+
+        assert not _ip_is_blocked("::ffff:93.184.216.34")  # example.com (public)

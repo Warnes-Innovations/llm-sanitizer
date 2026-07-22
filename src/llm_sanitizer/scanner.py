@@ -35,7 +35,11 @@ from llm_sanitizer.readers.integrity_checks import (
     validate_structure,
 )
 from llm_sanitizer.rules import BaseRule, get_all_rules, is_legitimate_file
-from llm_sanitizer.rules._rescan import reset_rescan_budget, rescan_budget_exhausted
+from llm_sanitizer.rules._rescan import (
+    reset_rescan_budget,
+    rescan_budget_exhausted,
+    set_scan_deadline,
+)
 from llm_sanitizer.rules.integrity import (
     ARCHIVE_UNSUPPORTED,
     CORRUPT_FILE,
@@ -522,26 +526,37 @@ class Scanner:
         # bounded work allowance for this content unit (see _rescan).
         reset_rescan_budget()
         finding_id = len(findings) + 1
-        # M4: bound total wall-clock per content unit. Checked between rules
-        # (rule granularity is enough — no single rule is unbounded now that the
-        # hidden_content O(n²) and char_split ReDoS are fixed and re-scan is
-        # budgeted). 0/negative disables.
+        # M4: bound total wall-clock per content unit. The deadline is checked
+        # between rules AND, via set_scan_deadline, INSIDE the long per-match
+        # loops of heavy rules (hidden_content/char_split/base64) which each run
+        # in one otherwise-uninterruptible detect() call. 0/negative disables.
         deadline = (
             time.monotonic() + self._config.max_scan_seconds
             if self._config.max_scan_seconds > 0
             else None
         )
+        set_scan_deadline(deadline)
         timed_out = False
-        for rule in self._rules:
-            if deadline is not None and time.monotonic() > deadline:
-                timed_out = True
-                break
-            rule_findings = rule.detect(content, source)
-            for f in rule_findings:
-                # Re-number finding IDs sequentially across all rules
-                findings.append(f.model_copy(update={"id": finding_id}))
-                finding_id += 1
+        try:
+            for rule in self._rules:
+                if deadline is not None and time.monotonic() > deadline:
+                    timed_out = True
+                    break
+                rule_findings = rule.detect(content, source)
+                for f in rule_findings:
+                    # Re-number finding IDs sequentially across all rules
+                    findings.append(f.model_copy(update={"id": finding_id}))
+                    finding_id += 1
+                # A rule may have self-interrupted on the deadline mid-loop.
+                if deadline is not None and time.monotonic() > deadline:
+                    timed_out = True
+                    break
+        finally:
+            set_scan_deadline(None)
 
+        # M2/M4: report each incompleteness independently — a scan can both hit
+        # the deadline AND exhaust the re-scan budget, and previously the timeout
+        # branch masked the budget-exhaustion finding.
         if timed_out:
             findings.append(
                 make_integrity_finding(
@@ -554,7 +569,7 @@ class Scanner:
                 )
             )
             finding_id += 1
-        elif rescan_budget_exhausted():
+        if rescan_budget_exhausted():
             # M2: some obfuscated content could not be fully re-scanned within
             # the de-obfuscation work budget, so a hidden injection may have been
             # missed. Surface it rather than reporting a silent all-clear.
@@ -947,7 +962,16 @@ class Scanner:
         """Build a ScanResult from pre-computed findings (from archive
         expansion), applying the sensitivity threshold and re-numbering IDs the
         same way :meth:`scan` does."""
-        min_risk = _SENSITIVITY_RISK_MAP.get(sensitivity, RiskLevel.medium)
+        # M6 (MED-1): validate here too — this is the scan_file/scan_dir/archive
+        # path, which does not go through scan()'s guard. Without this an invalid
+        # sensitivity silently coerced to medium and was echoed back on the file
+        # path (the exact bug scan() now rejects).
+        if sensitivity not in _SENSITIVITY_RISK_MAP:
+            raise ValueError(
+                f"invalid sensitivity {sensitivity!r}; expected one of "
+                f"{', '.join(sorted(_SENSITIVITY_RISK_MAP))}"
+            )
+        min_risk = _SENSITIVITY_RISK_MAP[sensitivity]
         filtered = [
             f for f in findings
             if f.risk >= min_risk or f.rule in _INTEGRITY_RULE_IDS

@@ -9,7 +9,7 @@ import re
 
 from llm_sanitizer.models import Finding, RiskLevel
 from llm_sanitizer.rules import BaseRule, register_rule
-from llm_sanitizer.rules._rescan import scan_deobfuscated
+from llm_sanitizer.rules._rescan import deadline_exceeded, scan_deobfuscated
 
 # CAMOUFLAGE patterns: text that is rendered but made imperceptible to a human
 # reader while remaining in the machine-extracted text — with essentially no
@@ -377,12 +377,19 @@ class HiddenContentRule(BaseRule):
                     bg_cache[idx] = (False, None)
             return bg_cache[idx]
 
+        # Deadline checks (committee HIGH): a minified single line can hold
+        # thousands of matches; without an intra-loop check this one detect()
+        # call runs uninterruptibly past max_scan_seconds.
         for pattern, label in _CAMOUFLAGE_PATTERNS:
             for line_idx, line in enumerate(lines):
+                if deadline_exceeded():
+                    return findings
                 for m in pattern.finditer(line):
                     emit(line_idx, m, label)
 
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                return findings
             for m in _TEXT_COLOR_DECL_RE.finditer(line):
                 color = _parse_css_color(m.group(1))
                 if color is None:
@@ -400,6 +407,8 @@ class HiddenContentRule(BaseRule):
                     emit(line_idx, m, _WHITE_NO_BG_LABEL)
 
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                return findings
             for m in _OPACITY_DECL_RE.finditer(line):
                 opacity = _parse_opacity(m.group(1))
                 if opacity is not None and opacity < _NEAR_ZERO_ALPHA:

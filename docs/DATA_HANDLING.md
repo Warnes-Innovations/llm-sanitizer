@@ -50,7 +50,7 @@ A deployer handling regulated data should still:
 - A cumulative re-scan **work budget** bounds the de-obfuscation fan-out.
 - Archive extraction is bounded by entry count, compression ratio, uncompressed
   size, and nesting depth (zip-bomb protection).
-- The URL reader caps response size and total time.
+- The URL reader caps response size and applies a per-request timeout.
 
 ## Reporting a concern
 

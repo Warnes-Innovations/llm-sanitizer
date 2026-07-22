@@ -27,6 +27,7 @@ ContextVars, so they are correct under threads/async):
 from __future__ import annotations
 
 import contextvars
+import time
 
 from llm_sanitizer.models import Finding, FindingContext, Location, RiskLevel
 
@@ -121,6 +122,29 @@ def reset_rescan_budget() -> None:
 def rescan_budget_exhausted() -> bool:
     """True if any re-scan this content unit was refused for lack of budget."""
     return _budget_exhausted.get()
+
+
+# Wall-clock deadline (monotonic seconds) for the whole content unit. The
+# scanner sets it; rules with long per-match/per-line loops consult
+# deadline_exceeded() and break, so max_scan_seconds is enforced at sub-rule
+# granularity — a single rule (hidden_content's per-`color:` finding loop,
+# base64's per-token re-scan) can otherwise run for minutes in one uninterruptible
+# detect() call that the between-rules check never reaches (committee HIGH).
+_deadline: contextvars.ContextVar[float | None] = contextvars.ContextVar(
+    "llm_sanitizer_scan_deadline", default=None
+)
+
+
+def set_scan_deadline(deadline: float | None) -> None:
+    """Set (or clear, with None) the monotonic wall-clock deadline for the unit."""
+    _deadline.set(deadline)
+
+
+def deadline_exceeded() -> bool:
+    """True if a scan deadline is set and has passed. Rules call this inside
+    their match loops to stop early rather than run past max_scan_seconds."""
+    d = _deadline.get()
+    return d is not None and time.monotonic() > d
 
 
 def scan_deobfuscated(text: str, source: str = "") -> list[Finding]:
