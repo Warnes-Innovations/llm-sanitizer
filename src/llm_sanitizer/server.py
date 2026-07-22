@@ -168,17 +168,21 @@ def redact(content: str, mode: str = "strip", sensitivity: str = "medium") -> st
               everything the scan reported.
 
     Returns:
-        Cleaned text content.
+        Cleaned text content on success. On invalid input the tool raises, which
+        the MCP layer surfaces as a tool error — so an error is never confusable
+        with a successful redaction whose cleaned text merely happens to be JSON
+        (committee H4). (Previously the error path returned a JSON string that a
+        caller could not distinguish from cleaned content.)
     """
     from llm_sanitizer.redactor import redact_content
 
-    try:
-        clean, _ = redact_content(
-            content, mode=mode, source="<inline>", sensitivity=sensitivity
-        )
-        return clean
-    except ValueError as exc:
-        return json.dumps({"status": "error", "message": str(exc)})
+    # Let ValueError propagate: FastMCP returns it as an MCP error response,
+    # which is distinguishable from a successful text return. Do NOT catch it
+    # and return a look-alike JSON string.
+    clean, _ = redact_content(
+        content, mode=mode, source="<inline>", sensitivity=sensitivity
+    )
+    return clean
 
 
 @mcp.tool()
@@ -387,7 +391,12 @@ def redact_dir(
 
 @mcp.tool()
 def list_rules(category: str | None = None) -> str:
-    """List active detection rules and their configuration.
+    """List detection rules and their effective configuration.
+
+    Reflects the discovered configuration (`.llm-sanitizer.yml` in the working
+    directory, if any): each rule reports whether it is currently `enabled` and
+    its `effective_sensitivity`, so the output describes what actually runs
+    rather than just the built-in defaults (committee M8).
 
     Args:
         category: Optional category filter to show only rules in that category.
@@ -395,8 +404,10 @@ def list_rules(category: str | None = None) -> str:
     Returns:
         JSON string with rule details.
     """
+    from llm_sanitizer.config import load_config
     from llm_sanitizer.rules import get_all_rules
 
+    config = load_config()
     rules = get_all_rules()
     if category:
         rules = [r for r in rules if r.category == category]
@@ -407,6 +418,8 @@ def list_rules(category: str | None = None) -> str:
             "name": r.rule_name,
             "category": r.category,
             "default_risk": r.default_risk.name,
+            "enabled": config.is_rule_enabled(r.rule_id),
+            "effective_sensitivity": config.rule_sensitivity(r.rule_id),
             "description": r.description,
         }
         for r in rules

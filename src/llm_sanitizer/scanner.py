@@ -468,7 +468,15 @@ class Scanner:
             source: Source path/URL for context and legitimate-file classification.
             sensitivity: "low" | "medium" | "high"
         """
-        min_risk = _SENSITIVITY_RISK_MAP.get(sensitivity, RiskLevel.medium)
+        # M6: validate at the boundary instead of silently coercing an unknown
+        # value to "medium" and echoing the invalid value back in the result
+        # (which asserted a setting that was never applied).
+        if sensitivity not in _SENSITIVITY_RISK_MAP:
+            raise ValueError(
+                f"invalid sensitivity {sensitivity!r}; expected one of "
+                f"{', '.join(sorted(_SENSITIVITY_RISK_MAP))}"
+            )
+        min_risk = _SENSITIVITY_RISK_MAP[sensitivity]
         findings: list[Finding] = []
 
         # Refuse oversized content (fail-closed). Scanning it would pin CPU (the
@@ -562,10 +570,18 @@ class Scanner:
             )
             finding_id += 1
 
-        # Filter by sensitivity threshold
+        # Filter by sensitivity threshold. M7: honor a per-rule `sensitivity`
+        # override from config (previously dead — the documented key had no
+        # effect); a rule without an override uses the scan's global sensitivity.
+        def _min_risk_for(rule_id: str) -> RiskLevel:
+            rule_cfg = self._config.rules.get(rule_id)
+            if rule_cfg is not None and rule_cfg.sensitivity:
+                return _SENSITIVITY_RISK_MAP.get(rule_cfg.sensitivity, min_risk)
+            return min_risk
+
         filtered = [
             f for f in findings
-            if f.risk >= min_risk or f.rule in _INTEGRITY_RULE_IDS
+            if f.risk >= _min_risk_for(f.rule) or f.rule in _INTEGRITY_RULE_IDS
         ]
 
         # Re-number after filtering
