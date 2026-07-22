@@ -77,7 +77,9 @@ class TestScanResult:
             findings=[],
         )
         assert result.source == "test.md"
-        assert result.version == "0.1.0"
+        from llm_sanitizer import __version__
+
+        assert result.version == __version__  # single-sourced (committee M9)
         assert result.scan_timestamp != ""
 
     def test_json_friendly_max_risk_is_string(self) -> None:

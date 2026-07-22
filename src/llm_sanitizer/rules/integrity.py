@@ -42,6 +42,8 @@ UNSCANNABLE_BINARY = "unscannable_binary"
 UNSCANNABLE_MEDIA = "unscannable_media"
 ARCHIVE_UNSUPPORTED = "archive_unsupported"
 INPUT_TOO_LARGE = "input_too_large"
+RESCAN_INCOMPLETE = "rescan_incomplete"
+SCAN_TIMEOUT = "scan_timeout"
 
 
 class TypeMismatchRule(BaseRule):
@@ -145,6 +147,8 @@ _RULE_NAMES: dict[str, str] = {
     UNSCANNABLE_MEDIA: UnscannableMediaRule.rule_name,
     ARCHIVE_UNSUPPORTED: ArchiveUnsupportedRule.rule_name,
     INPUT_TOO_LARGE: InputTooLargeRule.rule_name,
+    RESCAN_INCOMPLETE: "Re-scan Budget Exhausted",
+    SCAN_TIMEOUT: "Scan Time Limit Reached",
 }
 
 # Per-rule risk. Most integrity failures are CRITICAL (fail-closed); recognized
@@ -156,6 +160,12 @@ _RULE_RISKS: dict[str, RiskLevel] = {
     UNSCANNABLE_MEDIA: UnscannableMediaRule.default_risk,
     ARCHIVE_UNSUPPORTED: ArchiveUnsupportedRule.default_risk,
     INPUT_TOO_LARGE: InputTooLargeRule.default_risk,
+    # MEDIUM: some obfuscated content could not be fully re-scanned, so a hidden
+    # injection may have been missed — surfaced rather than silently dropped.
+    RESCAN_INCOMPLETE: RiskLevel.medium,
+    # HIGH: scanning hit the wall-clock deadline and stopped early; the unit was
+    # only partially scanned.
+    SCAN_TIMEOUT: RiskLevel.high,
 }
 
 

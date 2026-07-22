@@ -67,6 +67,12 @@ _scanner_managed: contextvars.ContextVar[bool] = contextvars.ContextVar(
 _rescan_cache: contextvars.ContextVar[dict[str, list[Finding]] | None] = (
     contextvars.ContextVar("llm_sanitizer_rescan_cache", default=None)
 )
+# Set True when a re-scan was refused because the work budget was exhausted, so
+# the scanner can surface a MEDIUM "rescan_incomplete" finding (committee M2 —
+# distinct-blob exhaustion must not silently drop a possible injection).
+_budget_exhausted: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_sanitizer_deobfuscation_budget_exhausted", default=False
+)
 
 
 def _chained_obfuscation_finding(text: str) -> Finding:
@@ -109,6 +115,12 @@ def reset_rescan_budget() -> None:
     _scanned_bytes.set(0)
     _scanner_managed.set(True)
     _rescan_cache.set({})
+    _budget_exhausted.set(False)
+
+
+def rescan_budget_exhausted() -> bool:
+    """True if any re-scan this content unit was refused for lack of budget."""
+    return _budget_exhausted.get()
 
 
 def scan_deobfuscated(text: str, source: str = "") -> list[Finding]:
@@ -144,6 +156,7 @@ def scan_deobfuscated(text: str, source: str = "") -> list[Finding]:
             return cached
 
     if _scanned_bytes.get() + len(text) > _MAX_RESCAN_BYTES:
+        _budget_exhausted.set(True)
         return []
     _scanned_bytes.set(_scanned_bytes.get() + len(text))
 

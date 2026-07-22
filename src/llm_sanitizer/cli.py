@@ -554,11 +554,11 @@ def _cmd_merge(args: argparse.Namespace) -> None:
         sensitivities.add(result.sensitivity)
         results.append(result.model_copy(update={"source": current_path}))
 
+    from llm_sanitizer.scanner import _build_summary
+
     all_findings = [f for r in results for f in r.findings]
-    max_risk: RiskLevel | None = None
-    for f in all_findings:
-        if max_risk is None or f.risk > max_risk:
-            max_risk = f.risk
+    summary = _build_summary(all_findings)
+    max_risk = summary.max_risk
 
     # Manifest entries can legitimately have been scanned under different
     # --sensitivity settings (a cache accumulated across runs) — report that
@@ -571,8 +571,9 @@ def _cmd_merge(args: argparse.Namespace) -> None:
         sensitivity=sensitivity,
         files_scanned=len(results),
         files_skipped_binary=args.skipped_binary,
-        total_findings=len(all_findings),
-        max_risk=max_risk,
+        summary=summary,
+        total_findings=summary.total_findings,
+        max_risk=summary.max_risk,
         results=results,
     )
 

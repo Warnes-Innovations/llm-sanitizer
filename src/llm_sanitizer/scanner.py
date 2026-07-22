@@ -8,6 +8,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import tempfile
+import time
 import zipfile
 from pathlib import Path
 
@@ -34,11 +35,13 @@ from llm_sanitizer.readers.integrity_checks import (
     validate_structure,
 )
 from llm_sanitizer.rules import BaseRule, get_all_rules, is_legitimate_file
-from llm_sanitizer.rules._rescan import reset_rescan_budget
+from llm_sanitizer.rules._rescan import reset_rescan_budget, rescan_budget_exhausted
 from llm_sanitizer.rules.integrity import (
     ARCHIVE_UNSUPPORTED,
     CORRUPT_FILE,
     INPUT_TOO_LARGE,
+    RESCAN_INCOMPLETE,
+    SCAN_TIMEOUT,
     TYPE_MISMATCH,
     UNSCANNABLE_BINARY,
     UNSCANNABLE_MEDIA,
@@ -158,7 +161,7 @@ def _recognized_media_kind(path: Path) -> str | None:
 # pass silently, defeating the whole point of the finding.
 _INTEGRITY_RULE_IDS: frozenset[str] = frozenset(
     {TYPE_MISMATCH, CORRUPT_FILE, UNSCANNABLE_BINARY, UNSCANNABLE_MEDIA,
-     ARCHIVE_UNSUPPORTED, INPUT_TOO_LARGE}
+     ARCHIVE_UNSUPPORTED, INPUT_TOO_LARGE, RESCAN_INCOMPLETE, SCAN_TIMEOUT}
 )
 
 
@@ -511,12 +514,53 @@ class Scanner:
         # bounded work allowance for this content unit (see _rescan).
         reset_rescan_budget()
         finding_id = len(findings) + 1
+        # M4: bound total wall-clock per content unit. Checked between rules
+        # (rule granularity is enough — no single rule is unbounded now that the
+        # hidden_content O(n²) and char_split ReDoS are fixed and re-scan is
+        # budgeted). 0/negative disables.
+        deadline = (
+            time.monotonic() + self._config.max_scan_seconds
+            if self._config.max_scan_seconds > 0
+            else None
+        )
+        timed_out = False
         for rule in self._rules:
+            if deadline is not None and time.monotonic() > deadline:
+                timed_out = True
+                break
             rule_findings = rule.detect(content, source)
             for f in rule_findings:
                 # Re-number finding IDs sequentially across all rules
                 findings.append(f.model_copy(update={"id": finding_id}))
                 finding_id += 1
+
+        if timed_out:
+            findings.append(
+                make_integrity_finding(
+                    SCAN_TIMEOUT,
+                    source,
+                    f"scanning exceeded the {self._config.max_scan_seconds:g}s "
+                    "time limit and stopped early; this unit was only partially "
+                    "scanned. Treat as potentially unscanned.",
+                    finding_id=finding_id,
+                )
+            )
+            finding_id += 1
+        elif rescan_budget_exhausted():
+            # M2: some obfuscated content could not be fully re-scanned within
+            # the de-obfuscation work budget, so a hidden injection may have been
+            # missed. Surface it rather than reporting a silent all-clear.
+            findings.append(
+                make_integrity_finding(
+                    RESCAN_INCOMPLETE,
+                    source,
+                    "the de-obfuscation re-scan budget was exhausted; some "
+                    "obfuscated content was not fully re-scanned and a hidden "
+                    "injection may have been missed.",
+                    finding_id=finding_id,
+                )
+            )
+            finding_id += 1
 
         # Filter by sensitivity threshold
         filtered = [
@@ -935,18 +979,16 @@ class Scanner:
             results.append(result)
 
         all_findings = [f for r in results for f in r.findings]
-        max_risk: RiskLevel | None = None
-        for f in all_findings:
-            if max_risk is None or f.risk > max_risk:
-                max_risk = f.risk
+        summary = _build_summary(all_findings)
 
         return DirScanResult(
             source=path,
             sensitivity=sensitivity,
             files_scanned=len(results),
             files_skipped_binary=files_skipped_binary,
-            total_findings=len(all_findings),
-            max_risk=max_risk,
+            summary=summary,
+            total_findings=summary.total_findings,
+            max_risk=summary.max_risk,
             results=results,
         )
 

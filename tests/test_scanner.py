@@ -50,8 +50,12 @@ class TestScannerBasic:
         assert result.scan_timestamp != ""
 
     def test_scan_result_has_version(self) -> None:
+        from llm_sanitizer import __version__
+
         result = scan_text("content")
-        assert result.version == "0.1.0"
+        # Version is single-sourced from the package (committee M9), not a
+        # hardcoded literal.
+        assert result.version == __version__
 
     def test_scan_returns_scan_result_type(self) -> None:
         result = scan_text("content")

@@ -352,6 +352,31 @@ class HiddenContentRule(BaseRule):
         # under-reports, and redaction (which removes exactly the reported
         # spans) then needs one full scan/redact round trip per hidden span
         # to converge on such files.
+        # H1: memoize the per-line rule-block text and its background lookup.
+        # A minified line can carry thousands of `color:` decls that all resolve
+        # to the SAME enclosing block; recomputing _rule_block_text and the
+        # background regex search for each was O(n²) per line (measured: a 1 MB
+        # one-line stylesheet took ~40 min). Compute once per line index.
+        block_cache: dict[int, str] = {}
+
+        def block_of(idx: int) -> str:
+            if idx not in block_cache:
+                block_cache[idx] = _rule_block_text(lines, idx)
+            return block_cache[idx]
+
+        # Per line: (background_declared, background_rgb_or_None).
+        bg_cache: dict[int, tuple[bool, tuple[int, int, int] | None]] = {}
+
+        def bg_of(idx: int) -> tuple[bool, tuple[int, int, int] | None]:
+            if idx not in bg_cache:
+                m = _BACKGROUND_DECL_RE.search(block_of(idx))
+                if m:
+                    parsed = _parse_css_color(m.group(1))
+                    bg_cache[idx] = (True, parsed[:3] if parsed else None)
+                else:
+                    bg_cache[idx] = (False, None)
+            return bg_cache[idx]
+
         for pattern, label in _CAMOUFLAGE_PATTERNS:
             for line_idx, line in enumerate(lines):
                 for m in pattern.finditer(line):
@@ -359,16 +384,27 @@ class HiddenContentRule(BaseRule):
 
         for line_idx, line in enumerate(lines):
             for m in _TEXT_COLOR_DECL_RE.finditer(line):
-                color_label = _classify_text_color(m.group(1), lines, line_idx)
-                if color_label is not None:
-                    emit(line_idx, m, color_label)
+                color = _parse_css_color(m.group(1))
+                if color is None:
+                    continue
+                r, g, b, alpha = color
+                if alpha < _NEAR_ZERO_ALPHA:
+                    emit(line_idx, m, _TEXT_TRANSPARENT_LABEL)
+                    continue
+                declared, bg_rgb = bg_of(line_idx)
+                if declared:
+                    if bg_rgb is not None and bg_rgb == (r, g, b):
+                        emit(line_idx, m, _TEXT_MATCHES_BG_LABEL)
+                    # explicit, different/unparsable background — presumed visible
+                elif (r, g, b) == (255, 255, 255):
+                    emit(line_idx, m, _WHITE_NO_BG_LABEL)
 
         for line_idx, line in enumerate(lines):
             for m in _OPACITY_DECL_RE.finditer(line):
                 opacity = _parse_opacity(m.group(1))
                 if opacity is not None and opacity < _NEAR_ZERO_ALPHA:
                     # Skip a fade-in transition/animation start state (benign).
-                    if _TRANSITION_RE.search(_rule_block_text(lines, line_idx)):
+                    if _TRANSITION_RE.search(block_of(line_idx)):
                         continue
                     emit(line_idx, m, _NEAR_ZERO_OPACITY_LABEL)
 

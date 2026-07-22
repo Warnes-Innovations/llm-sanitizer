@@ -12,6 +12,31 @@ from typing import Any
 from pydantic import BaseModel, Field, model_validator
 
 
+def _package_version() -> str:
+    """Single source of truth for the emitted version (committee M9).
+
+    Reads the installed distribution metadata (which comes from pyproject.toml),
+    falling back to the package ``__version__`` for odd/uninstalled layouts.
+    Previously every result hardcoded "0.1.0", which drifted from the real
+    package version.
+    """
+    try:
+        from importlib.metadata import PackageNotFoundError, version
+
+        try:
+            return version("llm-sanitizer")
+        except PackageNotFoundError:
+            pass
+    except Exception:
+        pass
+    try:
+        from llm_sanitizer import __version__
+
+        return __version__
+    except Exception:
+        return "0.0.0"
+
+
 class RiskLevel(IntEnum):
     """Five-level risk taxonomy from benign to confirmed malicious."""
 
@@ -90,7 +115,7 @@ class SummaryStats(BaseModel):
 class ScanResult(BaseModel):
     """Complete result of scanning a single content source."""
 
-    version: str = "0.1.0"
+    version: str = Field(default_factory=_package_version)
     scan_timestamp: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -126,7 +151,7 @@ class RuleConfig(BaseModel):
 class DirScanResult(BaseModel):
     """Aggregate result of scanning a directory."""
 
-    version: str = "0.1.0"
+    version: str = Field(default_factory=_package_version)
     scan_timestamp: str = Field(
         default_factory=lambda: datetime.now(timezone.utc).isoformat()
     )
@@ -134,12 +159,20 @@ class DirScanResult(BaseModel):
     sensitivity: str
     files_scanned: int
     files_skipped_binary: int = 0
+    # `summary` mirrors ScanResult.summary so a consumer can read
+    # `result.summary.max_risk` / `.total_findings` uniformly across single-file
+    # and directory scans (committee H3 — an agent that gated on summary.max_risk
+    # otherwise read None on a dir scan and could treat a directory containing a
+    # CRITICAL as clean). The top-level total_findings/max_risk are kept for
+    # backward compatibility with existing CLI/formatter readers.
+    summary: SummaryStats
     total_findings: int
     max_risk: RiskLevel | None
     results: list[ScanResult]
 
     def model_dump_json_friendly(self) -> dict[str, Any]:
         d = self.model_dump()
+        d["summary"] = self.summary.model_dump_json_friendly()
         d["max_risk"] = str(self.max_risk) if self.max_risk is not None else None
         d["results"] = [r.model_dump_json_friendly() for r in self.results]
         return d
