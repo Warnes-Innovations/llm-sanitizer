@@ -241,10 +241,12 @@ def _validate_office(
                 # must not trust (same principle as the IPv6 SSRF unwrap). Office
                 # document parts have no legitimate DTD/entity, so refuse to parse
                 # any that declares one, fail-closed, before it reaches the parser.
-                # A DTD/entity declaration lives in the prolog, before the root
-                # element; scan a generous prolog window for it.
-                prolog = raw[:16384]
-                if b"<!DOCTYPE" in prolog or b"<!ENTITY" in prolog:
+                # Scan the WHOLE part (already size-bounded by the file_size
+                # check above) — not just a prolog window: XML legally allows
+                # comments before the DOCTYPE, so a >16 KB leading comment could
+                # otherwise push the declaration past a fixed window and re-expose
+                # the bomb. A bytes substring search over a bounded buffer is cheap.
+                if b"<!DOCTYPE" in raw or b"<!ENTITY" in raw:
                     return (
                         f"Office document part '{part}' declares a DTD/entity, "
                         "which is not valid in an OOXML/ODF part and is a common "
