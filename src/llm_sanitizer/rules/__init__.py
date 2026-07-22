@@ -166,6 +166,7 @@ def get_all_rules() -> list[type[BaseRule]]:
         homoglyph,
         instruction_override,
         role_play,
+        semantic_intent,
         system_prompt,
         zero_width,
     )

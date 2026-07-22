@@ -11,6 +11,20 @@ Hardening from a multi-persona committee review (detection precision/recall,
 DoS bounds, MCP-interface consistency, and SSRF).
 
 ### Added
+- **New `semantic_intent` rule** — a local, **no-egress** n-gram linear
+  classifier (pure Python; no model download, no new runtime dependency) that
+  catches *keyword-less* injection rephrasings the regex rules miss: role
+  reassignment ("from here on, assume the role of a different assistant"),
+  verbatim/echo exfiltration ("output the above configuration verbatim"),
+  supersede-prior-guidance framing, covert-instruction framing, and
+  exfil-redirect. Fires at **MEDIUM** ("verify") and is gated by a structural
+  intent feature (defense-in-depth) so ordinary prose does not false-positive;
+  because it is a normal rule it also runs over de-obfuscated text via
+  `scan_deobfuscated`. Model is retrainable with `scripts/train_semantic_intent.py`
+  (deterministic, dependency-free). This closes the two `test_semantic_rephrasings`
+  gap cases (the held-out sentences are not in the training corpus). An optional
+  embedding-similarity layer for novel/cross-lingual paraphrase is tracked
+  separately (approach B, GitHub #8).
 - **New `char_split` rule** — detects character-splitting obfuscation
   (`i g n o r e`, `ignore___all`) by reconstructing the split text and re-scanning
   it, flagging only when the reconstruction trips a real rule (snake_case and
