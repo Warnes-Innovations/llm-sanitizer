@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 
 from llm_sanitizer.models import Finding, RiskLevel
-from llm_sanitizer.rules import BaseRule, register_rule
+from llm_sanitizer.rules import BaseRule, deadline_exceeded, register_rule
 
 # Override verbs × override nouns as a CROSS-PRODUCT (RT F11): hand-written
 # verb+noun phrase pairs silently miss the N×M combinations never spelled out
@@ -85,8 +85,12 @@ class InstructionOverrideRule(BaseRule):
         fid = 1
 
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                return findings
             for pattern in _COMPILED:
                 for m in pattern.finditer(line):
+                    if deadline_exceeded():
+                        return findings
                     before, line_text, after = self._build_context(lines, line_idx)
                     findings.append(
                         self._make_finding(

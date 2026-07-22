@@ -26,7 +26,7 @@ import re
 import unicodedata
 
 from llm_sanitizer.models import Finding, RiskLevel
-from llm_sanitizer.rules import BaseRule, register_rule
+from llm_sanitizer.rules import BaseRule, deadline_exceeded, register_rule
 from llm_sanitizer.rules._rescan import scan_deobfuscated
 
 # Map of cross-script homoglyphs (non-Latin → Latin equivalent). Only genuine
@@ -165,9 +165,13 @@ class HomoglyphRule(BaseRule):
 
         # Signal 1: a single word that de-homoglyphs to a known suspicious term.
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                return sorted(by_location.values(), key=lambda f: f.risk.value, reverse=True)
             if not _has_non_ascii_letter(line):
                 continue
             for word_match in re.finditer(r"\b\w+\b", line):
+                if deadline_exceeded():
+                    return sorted(by_location.values(), key=lambda f: f.risk.value, reverse=True)
                 word = word_match.group(0)
                 if not _has_non_ascii_letter(word):
                     continue

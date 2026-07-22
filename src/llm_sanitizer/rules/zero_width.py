@@ -20,7 +20,7 @@ import re
 from collections import Counter
 
 from llm_sanitizer.models import Finding, RiskLevel
-from llm_sanitizer.rules import BaseRule, register_rule
+from llm_sanitizer.rules import BaseRule, deadline_exceeded, register_rule
 from llm_sanitizer.rules._rescan import scan_deobfuscated
 
 # Zero-width and invisible Unicode characters, defined by codepoint so the
@@ -73,6 +73,8 @@ class ZeroWidthRule(BaseRule):
         # so a benign invisible character on one line is never flagged just
         # because a real keyword-split exists on a different line.
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                return findings
             stripped = _ZERO_WIDTH_PATTERN.sub("", line)
             if stripped == line:
                 continue  # no invisible characters on this line

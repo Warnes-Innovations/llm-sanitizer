@@ -8,7 +8,7 @@ from __future__ import annotations
 import re
 
 from llm_sanitizer.models import Finding, RiskLevel
-from llm_sanitizer.rules import BaseRule, register_rule
+from llm_sanitizer.rules import BaseRule, deadline_exceeded, register_rule
 
 _PATTERNS = [
     # "act as" (H5/SP-1 precision fix): the bare phrase over-matched benign prose
@@ -49,8 +49,12 @@ class RolePlayRule(BaseRule):
         fid = 1
 
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                return findings
             for pattern, label in _PATTERNS:
                 for m in pattern.finditer(line):
+                    if deadline_exceeded():
+                        return findings
                     before, line_text, after = self._build_context(lines, line_idx)
                     findings.append(
                         self._make_finding(
