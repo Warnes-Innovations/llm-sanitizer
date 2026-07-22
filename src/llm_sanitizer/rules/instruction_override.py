@@ -10,8 +10,29 @@ import re
 from llm_sanitizer.models import Finding, RiskLevel
 from llm_sanitizer.rules import BaseRule, register_rule
 
+# Override verbs × override nouns as a CROSS-PRODUCT (RT F11): hand-written
+# verb+noun phrase pairs silently miss the N×M combinations never spelled out
+# (e.g. "ignore" was only paired with "instructions", so "ignore the guidance"
+# slipped through). Composing verb-alternation × noun-alternation covers every
+# combination automatically.
+_OVERRIDE_VERB = (
+    r"(?:ignore|disregard|forget|discard|drop|skip|bypass|override|reset|"
+    r"set\s+aside|put\s+aside|pay\s+no\s+attention\s+to|"
+    r"do\s+not\s+follow|stop\s+following)"
+)
+_OVERRIDE_NOUN = (
+    r"(?:instructions?|guidance|guidelines?|rules?|directions?|directives?|"
+    r"prompt|context|constraints?|restrictions?)"
+)
+# Optional qualifier words between verb and noun (all/any/the/your/prior/…).
+_OVERRIDE_QUAL = (
+    r"(?:(?:all|any|the|your|these|those|prior|previous|earlier|above|"
+    r"preceding|original|initial|system)\s+)*"
+)
+
 # Patterns that attempt to override or reset prior LLM instructions
 _PATTERNS = [
+    _OVERRIDE_VERB + r"\s+" + _OVERRIDE_QUAL + _OVERRIDE_NOUN,
     r"ignore\s+(all\s+)?(previous|prior|earlier|above|preceding)\s+instructions?",
     r"disregard\s+(all\s+)?(previous|prior|earlier|above|preceding)\s+instructions?",
     r"forget\s+(everything|all)(\s+above|\s+before|\s+prior)?",
@@ -27,6 +48,10 @@ _PATTERNS = [
     r"clear\s+(?:all\s+)?(?:your|the)?\s*(?:previous\s+)?(?:instructions?|context|memory)",
     r"(?:your\s+)?new\s+(?:primary\s+)?(?:directive|objective|goal|mission|purpose)\s+is",
     r"act\s+as\s+if\s+(?:you\s+)?(?:have\s+)?no\s+(?:previous\s+)?instructions?",
+    # Paraphrased overrides NOT expressible as verb×noun (RT F1). "set/put aside"
+    # and "pay no attention to" are now covered by the cross-product above.
+    r"(?:instead\s+of|rather\s+than)\s+(?:following\s+)?(?:your|the)\s+(?:original\s+|previous\s+|prior\s+)?(?:task|instructions?|guidance|directions?)",
+    r"your\s+(?:real|actual|true|updated|new|revised)\s+(?:task|objective|instructions?|directive)\s+(?:is|are)\b",
 ]
 
 _COMPILED = [re.compile(p, re.IGNORECASE | re.DOTALL) for p in _PATTERNS]
