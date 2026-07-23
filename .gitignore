@@ -27,6 +27,15 @@ venv/
 /tmp/
 !/tmp/.gitkeep
 
+# Training corpora — third-party datasets are NOT redistributed (only the
+# trained model.json is vendored). Ignore the downloaded data files; keep the
+# provenance docs and fetch helper tracked.
+/data-raw/*
+!/data-raw/README.md
+!/data-raw/SOURCES.md
+!/data-raw/fetch_datasets.py
+!/data-raw/pinned-revisions.json
+
 # Coverage
 htmlcov/
 .coverage

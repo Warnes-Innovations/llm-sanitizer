@@ -19,6 +19,11 @@ Design (see CLAUDE.md "Detection-rule design principles"):
 * **MEDIUM ("verify").** This is a lower-confidence, fuzzy signal than a keyword
   match, so it defaults to MEDIUM rather than HIGH/CRITICAL — it should prompt
   review, not hard-block. Its value is catching what the keyword rules *miss*.
+* **Gated firing policy (defense-in-depth).** The classifier fires only when the
+  probability clears its threshold AND the span exhibits a structural intent
+  feature; see :func:`llm_sanitizer.semantic.classifier.predict` for why a
+  probability-only path was rejected. The model is trained on a curated corpus
+  plus optional domain-matched public datasets (see ``data-raw/SOURCES.md``).
 * **Bounded.** Honors ``deadline_exceeded()`` between spans (a large minified
   input must not run past ``max_scan_seconds`` in one uninterruptible call), and
   each span is length-capped before featurization.
@@ -45,9 +50,18 @@ from llm_sanitizer.rules import (
 from llm_sanitizer.semantic.classifier import model_available, predict
 
 # Candidate spans: maximal runs that don't cross a sentence terminator or a
-# newline. finditer gives exact offsets in the original content, so the reported
-# line/column and the redaction span are precise.
-_SPAN_RE = re.compile(r"[^.!?;\n]+")
+# newline. A terminator only counts when FOLLOWED by whitespace/end-of-text —
+# the dots inside "~/.ssh/id_rsa", "example.com", or "v1.2.3" are not sentence
+# boundaries. Splitting on every '.' fragmented such sentences, and a fragment
+# span partially overlapping another rule's span made redaction strip the
+# evidence piecewise while leaving an actionable directive stub behind
+# ("Read the file ~/.." survived a strip). finditer gives exact offsets in the
+# original content, so the reported line/column and the redaction span are
+# precise. Written to consume text in BULK char-class chunks — the punctuation
+# branch only engages at an actual [.!?;] — because the naive per-char form
+# `(?:[^.!?;\n]|[.!?;](?!\s|$))+` costs seconds on a multi-MB single-line input,
+# and one finditer step is uninterruptible by the scan deadline.
+_SPAN_RE = re.compile(r"[^.!?;\n]+(?:[.!?;](?!\s|$)[^.!?;\n]*)*")
 
 # A span must carry enough words to be a meaningful instruction; 1–3 word
 # fragments are both low-signal and a precision risk, so they are skipped.

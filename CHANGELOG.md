@@ -11,6 +11,21 @@ Hardening from a multi-persona committee review (detection precision/recall,
 DoS bounds, MCP-interface consistency, and SSRF).
 
 ### Added
+- **Enriched `semantic_intent` training corpus** — the classifier is now trained
+  on the hand-curated corpus **plus** domain-matched public datasets (used at
+  train time only; never redistributed — only the trained `model.json` ships):
+  [prodnull/prompt-injection-repo-dataset](https://huggingface.co/datasets/prodnull/prompt-injection-repo-dataset)
+  (Apache-2.0; 5,671 repo-file snippets with hard negatives) and positives from
+  [deepset/prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections)
+  (Apache-2.0). Provenance, licenses, and pinned revisions are recorded in
+  `data-raw/SOURCES.md`; `data-raw/fetch_datasets.py` fetches the pinned
+  revisions (the primary set is gated — free HF account required). A
+  probability-only firing path evaluated with the larger corpus was rejected
+  (it false-fires on innocent prose); the structural-intent gate stays.
+- **`dataset-monitor` scheduled workflow** — weekly GitHub Actions job
+  (`scripts/check_dataset_revisions.py`) that compares the pinned training-data
+  revisions against Hugging Face and opens/updates a tracking issue when a
+  source changes, complementing Dependabot's coverage of Python dependencies.
 - **New `semantic_intent` rule** — a local, **no-egress** n-gram linear
   classifier (pure Python; no model download, no new runtime dependency) that
   catches *keyword-less* injection rephrasings the regex rules miss: role

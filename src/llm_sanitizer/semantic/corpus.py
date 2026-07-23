@@ -29,6 +29,9 @@ below.
 
 from __future__ import annotations
 
+import json
+from pathlib import Path
+
 # --------------------------------------------------------------------------- #
 # Positives — keyword-less / rephrased injection intent                        #
 # --------------------------------------------------------------------------- #
@@ -226,6 +229,66 @@ NEGATIVES: list[str] = [
 
 
 def labeled_examples() -> list[tuple[str, int]]:
-    """Return the full corpus as ``(text, label)`` pairs — 1 = injection intent,
-    0 = benign. Used by both the trainer and the corpus-integrity tests."""
+    """Return the hand-curated corpus as ``(text, label)`` pairs — 1 = injection
+    intent, 0 = benign. Used by the trainer and the corpus-integrity tests."""
     return [(t, 1) for t in POSITIVES] + [(t, 0) for t in NEGATIVES]
+
+
+# --------------------------------------------------------------------------- #
+# Optional third-party training data (train-time only; see data-raw/SOURCES.md) #
+# --------------------------------------------------------------------------- #
+
+# Rows longer than this are skipped: the classifier scores sentence-length spans,
+# and the handful of multi-KB rows in the repo dataset are whole-file blobs whose
+# single label would be noise at span granularity.
+_MAX_EXTERNAL_CHARS = 2000
+
+# How each git-ignored data-raw file is consumed. prodnull is domain-matched
+# (repo snippets) so both classes are used; deepset's negatives are chat queries
+# (a different distribution from what we scan), so only its positives augment.
+_EXTERNAL_FILES: dict[str, str] = {
+    "prompt-injection-repo-dataset.train.jsonl": "both",
+    "deepset-prompt-injections.train.jsonl": "positives_only",
+}
+
+
+def load_external_examples(data_raw_dir: str | Path | None = None) -> list[tuple[str, int]]:
+    """Load optional third-party labeled data from ``data-raw/`` if present.
+
+    Returns ``(text, label)`` pairs (deduped, deterministic order). Returns an
+    empty list when the directory or files are absent — so the trainer degrades
+    to the curated-corpus-only behavior and nothing at *runtime* depends on this
+    (inference never calls it). See ``data-raw/README.md`` for how to fetch.
+    """
+    base = Path(data_raw_dir) if data_raw_dir is not None else (
+        Path(__file__).resolve().parents[3] / "data-raw"
+    )
+    seen: set[str] = set()
+    out: list[tuple[str, int]] = []
+    for fname, policy in sorted(_EXTERNAL_FILES.items()):
+        path = base / fname
+        if not path.exists():
+            continue
+        rows: list[tuple[str, int]] = []
+        with path.open(encoding="utf-8") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    text = str(obj["text"]).strip()
+                    label = int(obj["label"])
+                except (ValueError, KeyError, TypeError):
+                    continue
+                if label not in (0, 1) or not text or len(text) > _MAX_EXTERNAL_CHARS:
+                    continue
+                if policy == "positives_only" and label != 1:
+                    continue
+                if text in seen:
+                    continue
+                seen.add(text)
+                rows.append((text, label))
+        # Sort within a file for a stable, source-order-independent corpus.
+        out.extend(sorted(rows))
+    return out

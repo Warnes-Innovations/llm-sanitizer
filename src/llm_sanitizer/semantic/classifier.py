@@ -27,8 +27,9 @@ from llm_sanitizer.semantic.features import INTENT_FEATURES, featurize
 _MODEL_PATH = Path(__file__).with_name("model.json")
 
 # Current model-file schema version. Bumped if the on-disk format changes so an
-# inference/artifact mismatch fails loudly rather than scoring on garbage.
-_SCHEMA_VERSION = 1
+# inference/artifact mismatch fails loudly rather than scoring on garbage. v2 =
+# the enriched-corpus model (curated + domain-matched public datasets).
+_SCHEMA_VERSION = 2
 
 
 @dataclass(frozen=True)
@@ -110,9 +111,16 @@ def predict(text: str) -> Prediction:
     intent = sorted(feats & INTENT_FEATURES)
     contributions.sort(key=lambda kv: kv[1], reverse=True)
     # Gate: BOTH the probability threshold AND a structural intent feature must
-    # be present (defense-in-depth precision gate — see Prediction.intent_features).
+    # be present (defense-in-depth precision gate). A probability-only "broad"
+    # path was tried when the corpus grew (train-time hybrid policy) and
+    # REJECTED: a linear char-n-gram model assigns high scores to some plainly
+    # innocent prose (measured 0.975 on "This is a perfectly normal piece of
+    # text…"), so no threshold alone is safe. Broad semantic recall without the
+    # structural gate is approach B's job (GitHub issue #8).
+    # Must match scripts/train_semantic_intent.py::_gated_fires exactly.
+    fired = prob >= model.threshold and bool(intent)
     return Prediction(
-        fired=prob >= model.threshold and bool(intent),
+        fired=fired,
         probability=prob,
         top_features=contributions[:5],
         intent_features=intent,

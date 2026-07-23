@@ -1,0 +1,55 @@
+# Copyright (C) 2026 Gregory R. Warnes
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Scheduled monitor for the semantic_intent training-data sources.
+#
+# Python package dependencies are handled by Dependabot (.github/dependabot.yml).
+# This complements that by watching the Hugging Face DATASET revisions the
+# vendored model.json was trained against (data-raw/pinned-revisions.json) and
+# opening a tracking issue when a source updates, so the classifier can be
+# retrained. See issue #9.
+
+name: dataset-monitor
+
+on:
+  schedule:
+    # Weekly, Mondays 07:00 UTC.
+    - cron: "0 7 * * 1"
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  issues: write
+
+jobs:
+  check-revisions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Check pinned dataset revisions
+        id: check
+        run: python scripts/check_dataset_revisions.py
+
+      - name: Open an issue if a source updated
+        if: steps.check.outputs.changed == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SUMMARY: ${{ steps.check.outputs.summary }}
+        run: |
+          title="Training-data source updated — retrain semantic_intent"
+          # Avoid duplicates: reuse an existing open issue with this title.
+          existing=$(gh issue list --state open --search "$title in:title" \
+            --json number --jq '.[0].number' || echo "")
+          if [ -n "$existing" ]; then
+            gh issue comment "$existing" --body "$SUMMARY"
+          else
+            gh issue create --title "$title" \
+              --label "dependencies" \
+              --body "$SUMMARY" || \
+            gh issue create --title "$title" --body "$SUMMARY"
+          fi

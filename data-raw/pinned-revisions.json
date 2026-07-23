@@ -1,0 +1,7 @@
+{
+  "_comment": "Hugging Face dataset revisions the semantic_intent classifier was last trained against. The scheduled workflow .github/workflows/dataset-monitor.yml compares these to the live revisions and opens an issue when a source updates. Bump a sha here when you retrain against a newer revision.",
+  "datasets": {
+    "prodnull/prompt-injection-repo-dataset": "6c56b897ee4a328fb4f41f4b0d334f5d2db4482a",
+    "deepset/prompt-injections": "4f61ecb038e9c3fb77e21034b22511b523772cdd"
+  }
+}

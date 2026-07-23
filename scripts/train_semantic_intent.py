@@ -29,8 +29,11 @@ from pathlib import Path
 # Allow running as a plain script (python scripts/train_semantic_intent.py).
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 
-from llm_sanitizer.semantic.corpus import labeled_examples  # noqa: E402
-from llm_sanitizer.semantic.features import featurize  # noqa: E402
+from llm_sanitizer.semantic.corpus import (  # noqa: E402
+    labeled_examples,
+    load_external_examples,
+)
+from llm_sanitizer.semantic.features import INTENT_FEATURES, featurize  # noqa: E402
 
 # --- Hyperparameters (tuned for precision-first on this corpus) ------------- #
 _EPOCHS = 400
@@ -38,7 +41,24 @@ _LR = 0.5
 _L2 = 0.002          # ridge penalty — keeps weights small, aids generalization
 _MIN_DF = 2          # drop features seen in <2 docs (noise / overfit control)
 _WEIGHT_PRUNE = 0.02  # drop |weight| below this from the vendored model
-_THRESHOLD = 0.5     # LR decision boundary; validated against the FP corpus
+
+# The hand-curated corpus encodes specific families we must keep catching (the
+# committee gap sentences). The ~5.8k external rows would otherwise dilute it
+# ~38:1, so curated examples are replicated this many times during training to
+# preserve their signal while the external data adds breadth.
+_CURATED_WEIGHT = 20
+
+# Gated firing policy (must match classifier.predict):
+#   fire iff  prob >= _THRESHOLD  AND  a structural intent feature is present.
+# A probability-only "broad" path (hybrid hi/lo thresholds) was tried when the
+# external corpus landed and REJECTED: the linear char-n-gram model scores some
+# plainly innocent prose above ANY usable threshold (measured 0.975 on "This is
+# a perfectly normal piece of text…"), so probability alone cannot be made safe.
+# The gate is what keeps clean documents at zero false positives; broad
+# semantic recall without it is approach B's job (GitHub issue #8). The gated
+# policy's measured cost is low recall on non-structural external injections —
+# an accepted, documented tradeoff.
+_THRESHOLD = 0.5
 _MODEL_PATH = Path(__file__).resolve().parent.parent / "src" / "llm_sanitizer" / "semantic" / "model.json"
 
 
@@ -107,13 +127,24 @@ def _score(intercept: float, weights: dict[str, float], feats: set[str]) -> floa
     return _sigmoid(intercept + sum(weights.get(f, 0.0) for f in feats))
 
 
+def _gated_fires(
+    feats: set[str], intercept: float, weights: dict[str, float],
+    threshold: float = _THRESHOLD,
+) -> bool:
+    """The runtime firing policy: prob >= threshold AND a structural intent
+    feature present. Must match ``classifier.predict`` exactly."""
+    p = _score(intercept, weights, feats)
+    return p >= threshold and bool(feats & INTENT_FEATURES)
+
+
 def _metrics(
     docs: list[set[str]], labels: list[int], intercept: float,
-    weights: dict[str, float], threshold: float,
+    weights: dict[str, float],
 ) -> dict[str, float]:
+    """Precision/recall under the gated firing policy."""
     tp = fp = tn = fn = 0
     for feats, y in zip(docs, labels):
-        pred = 1 if _score(intercept, weights, feats) >= threshold else 0
+        pred = 1 if _gated_fires(feats, intercept, weights) else 0
         if pred == 1 and y == 1:
             tp += 1
         elif pred == 1 and y == 0:
@@ -129,34 +160,33 @@ def _metrics(
             "tp": tp, "fp": fp, "tn": tn, "fn": fn}
 
 
-def _cross_validate(
-    docs: list[set[str]], labels: list[int], k: int = 5,
-) -> dict[str, float]:
-    """Deterministic stratified k-fold CV for an HONEST precision/recall estimate
-    (train metrics alone would be optimistic). Folds are assigned round-robin
-    within each class, so no randomness — reproducible."""
-    pos_idx = [i for i, y in enumerate(labels) if y == 1]
-    neg_idx = [i for i, y in enumerate(labels) if y == 0]
-    fold_of = {}
-    for rank, i in enumerate(pos_idx):
-        fold_of[i] = rank % k
-    for rank, i in enumerate(neg_idx):
-        fold_of[i] = rank % k
+def _heldout_eval(
+    curated: list[tuple[str, int]], external: list[tuple[str, int]],
+) -> None:
+    """Honest held-out estimate under the gated policy. The curated corpus is
+    small and encodes families we must keep, so it stays fully in TRAIN
+    (replicated ×_CURATED_WEIGHT); a deterministic stratified 20% of the
+    EXTERNAL data is held out. Note the gated recall on external injections is
+    EXPECTED to be low (most lack a structural feature) — the number to watch
+    is precision (FP), which the gate exists to protect. No randomness."""
+    ext_test: set[int] = set()
+    for cls in (0, 1):
+        idxs = [i for i, (_, y) in enumerate(external) if y == cls]
+        ext_test |= {i for rank, i in enumerate(idxs) if rank % 5 == 0}
+    ext_tr = [external[i] for i in range(len(external)) if i not in ext_test]
+    ext_te = [external[i] for i in sorted(ext_test)]
 
-    agg = {"precision": 0.0, "recall": 0.0, "f1": 0.0, "fp": 0, "fn": 0}
-    for fold in range(k):
-        tr = [i for i in range(len(labels)) if fold_of[i] != fold]
-        te = [i for i in range(len(labels)) if fold_of[i] == fold]
-        tr_docs = [docs[i] for i in tr]
-        tr_labels = [labels[i] for i in tr]
-        vocab = _build_vocab(tr_docs, _MIN_DF)
-        b, w = _train(tr_docs, tr_labels, vocab)
-        m = _metrics([docs[i] for i in te], [labels[i] for i in te], b, w, _THRESHOLD)
-        for key in ("precision", "recall", "f1"):
-            agg[key] += m[key] / k
-        agg["fp"] += m["fp"]
-        agg["fn"] += m["fn"]
-    return agg
+    train_ex = curated * _CURATED_WEIGHT + ext_tr
+    docs = [featurize(t) for t, _ in train_ex]
+    labels = [y for _, y in train_ex]
+    b, w = _train(docs, labels, _build_vocab(docs, _MIN_DF))
+
+    te_docs = [featurize(t) for t, _ in ext_te]
+    te_labels = [y for _, y in ext_te]
+    m = _metrics(te_docs, te_labels, b, w)
+    print(f"held-out eval (gated, {len(ext_te)} external examples): "
+          f"precision={m['precision']:.3f} recall={m['recall']:.3f} "
+          f"(FP={m['fp']} FN={m['fn']})")
 
 
 def main() -> int:
@@ -165,30 +195,35 @@ def main() -> int:
                     help="report metrics without writing model.json")
     args = ap.parse_args()
 
-    examples = labeled_examples()
-    texts = [t for t, _ in examples]
+    curated = labeled_examples()
+    external = load_external_examples()
+
+    print(f"corpus: curated={len(curated)} (×{_CURATED_WEIGHT}), "
+          f"external={len(external)} "
+          f"({sum(y for _, y in external)} pos / "
+          f"{sum(1 for _, y in external if y == 0)} neg)")
+
+    if external:
+        _heldout_eval(curated, external)
+    else:
+        print("held-out eval: skipped (no external data in data-raw/; "
+              "training on curated corpus only)")
+
+    # Final model on the full corpus: curated up-weighted by replication so its
+    # families survive the external data's volume, plus all external rows.
+    examples = curated * _CURATED_WEIGHT + external
+    docs = [featurize(t) for t, _ in examples]
     labels = [y for _, y in examples]
-    docs = [featurize(t) for t in texts]
-
-    print(f"corpus: {len(labels)} examples "
-          f"({sum(labels)} positive / {len(labels) - sum(labels)} negative)")
-
-    cv = _cross_validate(docs, labels)
-    print(f"5-fold CV (honest):  precision={cv['precision']:.3f}  "
-          f"recall={cv['recall']:.3f}  f1={cv['f1']:.3f}  "
-          f"(FP={cv['fp']}, FN={cv['fn']})")
-
-    # Final model on the full corpus.
     vocab = _build_vocab(docs, _MIN_DF)
     intercept, weights = _train(docs, labels, vocab)
     weights = {f: round(w, 6) for f, w in weights.items() if abs(w) >= _WEIGHT_PRUNE}
-    fit = _metrics(docs, labels, intercept, weights, _THRESHOLD)
-    print(f"final fit (full):    precision={fit['precision']:.3f}  "
-          f"recall={fit['recall']:.3f}  (FP={fit['fp']}, FN={fit['fn']})  "
+    fit = _metrics(docs, labels, intercept, weights)
+    print(f"final fit (full, gated): precision={fit['precision']:.3f} "
+          f"recall={fit['recall']:.3f} (FP={fit['fp']}, FN={fit['fn']}) "
           f"features={len(weights)}")
 
     model = {
-        "version": 1,
+        "version": 2,
         "intercept": round(intercept, 6),
         "threshold": _THRESHOLD,
         "weights": dict(sorted(weights.items())),  # sorted → stable diffs

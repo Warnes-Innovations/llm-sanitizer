@@ -13,7 +13,7 @@ optionally produces redacted output.
 
 ### Detection
 
-Ten pluggable detection rules covering:
+Twelve pluggable detection rules covering:
 - Instruction override phrases ("ignore previous instructions…")
 - Zero-width character encoding (hidden text via invisible Unicode)
 - HTML/markdown hidden content (white-on-white, display:none)
@@ -24,6 +24,11 @@ Ten pluggable detection rules covering:
 - Base64-encoded instructions
 - Unicode homoglyph substitution (Cyrillic lookalikes)
 - Agent-specific config patterns in unexpected locations
+- Character-splitting obfuscation (`i g n o r e`, `ignore___all`) —
+  reconstructed and re-scanned
+- **Semantic-intent injection** — a local, no-egress n-gram classifier that
+  catches *keyword-less* rephrasings (role reassignment, verbatim/echo
+  exfiltration, supersede-prior-guidance) the pattern rules miss
 
 ### Classification
 
@@ -156,6 +161,21 @@ output:
 ## Documentation
 
 - [Design Specification](https://github.com/Warnes-Innovations/llm-sanitizer/blob/main/docs/DESIGN_SPEC.md)
+
+## Credits — semantic-intent training data
+
+The `semantic_intent` classifier is trained on a hand-curated corpus plus,
+optionally, third-party labeled datasets (used at **train time only** — only the
+trained weights ship; the datasets are not redistributed). With thanks to:
+
+- **[prodnull/prompt-injection-repo-dataset](https://huggingface.co/datasets/prodnull/prompt-injection-repo-dataset)**
+  (Apache-2.0) — injection embedded in repository files, with domain-matched hard
+  negatives.
+- **[deepset/prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections)**
+  (Apache-2.0) — classic prompt-injection set (positives used for augmentation).
+
+See [`data-raw/SOURCES.md`](data-raw/SOURCES.md) for full provenance, licenses,
+and pinned revisions.
 
 ## License
 
