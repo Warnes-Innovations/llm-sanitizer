@@ -39,7 +39,11 @@ from llm_sanitizer.rules import BaseRule
 TYPE_MISMATCH = "type_mismatch"
 CORRUPT_FILE = "corrupt_file"
 UNSCANNABLE_BINARY = "unscannable_binary"
+UNSCANNABLE_MEDIA = "unscannable_media"
 ARCHIVE_UNSUPPORTED = "archive_unsupported"
+INPUT_TOO_LARGE = "input_too_large"
+RESCAN_INCOMPLETE = "rescan_incomplete"
+SCAN_TIMEOUT = "scan_timeout"
 
 
 class TypeMismatchRule(BaseRule):
@@ -89,6 +93,24 @@ class UnscannableBinaryRule(BaseRule):
         return []
 
 
+class UnscannableMediaRule(BaseRule):
+    rule_id = UNSCANNABLE_MEDIA
+    rule_name = "Unscannable Media File"
+    category = "integrity"
+    default_risk = RiskLevel.medium
+    description = (
+        "A file whose magic bytes identify it as recognized media "
+        "(image/audio/video) yielded no scannable text. Media carries no "
+        "text to inject, so it is a MEDIUM (verify) rather than the CRITICAL "
+        "of a wholly-unknown unscannable binary — the real risk is code that "
+        "*executes* such a file (a disguised payload), which the supply-chain "
+        "code auditor flags separately."
+    )
+
+    def detect(self, content: str, source: str = "") -> list[Finding]:
+        return []
+
+
 class ArchiveUnsupportedRule(BaseRule):
     rule_id = ARCHIVE_UNSUPPORTED
     rule_name = "Unsupported Archive Format"
@@ -103,11 +125,47 @@ class ArchiveUnsupportedRule(BaseRule):
         return []
 
 
+class InputTooLargeRule(BaseRule):
+    rule_id = INPUT_TOO_LARGE
+    rule_name = "Input Too Large to Scan"
+    category = "integrity"
+    default_risk = RiskLevel.critical
+    description = (
+        "A file or content unit exceeds the configured maximum scan size "
+        "(max_scan_bytes) and was NOT scanned. Fail-closed: oversized untrusted "
+        "input is surfaced rather than silently skipped or allowed to pin CPU."
+    )
+
+    def detect(self, content: str, source: str = "") -> list[Finding]:
+        return []
+
+
 _RULE_NAMES: dict[str, str] = {
     TYPE_MISMATCH: TypeMismatchRule.rule_name,
     CORRUPT_FILE: CorruptFileRule.rule_name,
     UNSCANNABLE_BINARY: UnscannableBinaryRule.rule_name,
+    UNSCANNABLE_MEDIA: UnscannableMediaRule.rule_name,
     ARCHIVE_UNSUPPORTED: ArchiveUnsupportedRule.rule_name,
+    INPUT_TOO_LARGE: InputTooLargeRule.rule_name,
+    RESCAN_INCOMPLETE: "Re-scan Budget Exhausted",
+    SCAN_TIMEOUT: "Scan Time Limit Reached",
+}
+
+# Per-rule risk. Most integrity failures are CRITICAL (fail-closed); recognized
+# media that merely can't be scanned as text is downgraded to MEDIUM.
+_RULE_RISKS: dict[str, RiskLevel] = {
+    TYPE_MISMATCH: TypeMismatchRule.default_risk,
+    CORRUPT_FILE: CorruptFileRule.default_risk,
+    UNSCANNABLE_BINARY: UnscannableBinaryRule.default_risk,
+    UNSCANNABLE_MEDIA: UnscannableMediaRule.default_risk,
+    ARCHIVE_UNSUPPORTED: ArchiveUnsupportedRule.default_risk,
+    INPUT_TOO_LARGE: InputTooLargeRule.default_risk,
+    # MEDIUM: some obfuscated content could not be fully re-scanned, so a hidden
+    # injection may have been missed — surfaced rather than silently dropped.
+    RESCAN_INCOMPLETE: RiskLevel.medium,
+    # HIGH: scanning hit the wall-clock deadline and stopped early; the unit was
+    # only partially scanned.
+    SCAN_TIMEOUT: RiskLevel.high,
 }
 
 
@@ -118,9 +176,10 @@ def make_integrity_finding(
     *,
     finding_id: int = 1,
 ) -> Finding:
-    """Build a CRITICAL file-integrity finding.
+    """Build a file-integrity finding at the rule's canonical risk.
 
-    Used by the scanner when a file can't be trusted or safely scanned. The
+    Used by the scanner when a file can't be trusted or safely scanned. Most
+    such rules are CRITICAL (fail-closed); ``unscannable_media`` is MEDIUM. The
     finding carries no line/column (there is no text location — the whole file
     is the problem); *matched* records the offending source path for context.
     """
@@ -128,7 +187,7 @@ def make_integrity_finding(
         id=finding_id,
         rule=rule_id,
         rule_name=_RULE_NAMES.get(rule_id, rule_id),
-        risk=RiskLevel.critical,
+        risk=_RULE_RISKS.get(rule_id, RiskLevel.critical),
         location=Location(line=0, column=0, end_line=0, end_column=0),
         matched=source,
         context=FindingContext(),

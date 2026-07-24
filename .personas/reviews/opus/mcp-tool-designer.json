@@ -1,0 +1,181 @@
+{
+  "persona": "MCP Tool Designer",
+  "target": "/Users/warnes/src/llm-sanitizer",
+  "scope": "MCP server (src/llm_sanitizer/server.py) — tool spec clarity, MCP conventions, result-schema consistency, error handling, config flexibility, versioning/stability, observability.",
+  "review_date": "2026-07-21",
+  "method": "Read server.py, models.py, redactor.py, formatters/json_format.py, config.py, scanner.py; cross-checked emitted schema against live MCP calls to redact, scan_text.",
+  "evidence_note": "The prior-run claim 'redact() returns plain text on success but JSON on error' is CONFIRMED — verified in source AND by calling the live tool. Exact returns quoted below.",
+  "verified_return_shapes": {
+    "scan_text": {
+      "success": "format_json(result)  -> ScanResult JSON string, NO 'status' field  (server.py:39)",
+      "error": "n/a (no try/except; scan of inline text does not raise a handled error path)",
+      "live": "{\"result\":\"{ \\\"version\\\": \\\"0.1.0\\\", ... \\\"summary\\\":{...}, \\\"findings\\\":[...] }\"}  — emitted version is 0.1.0"
+    },
+    "scan_file": {
+      "success": "format_json(result)  (server.py:86)",
+      "error": "json.dumps({\"status\": \"error\", \"message\": ...})  (server.py:77, 79, 82-84)"
+    },
+    "scan_url": {
+      "success": "format_json(result)  (server.py:110)",
+      "error": "json.dumps({\"status\": \"error\", \"message\": ...})  (server.py:107)"
+    },
+    "scan_dir": {
+      "success": "format_json(result)  (server.py:148)",
+      "error": "json.dumps({\"status\": \"error\", \"message\": ...})  (server.py:144, 146)"
+    },
+    "redact": {
+      "success": "return clean   -> BARE TEXT, not JSON  (server.py:179)",
+      "error": "return json.dumps({\"status\": \"error\", \"message\": str(exc)})  (server.py:181)",
+      "live_success": "{\"result\":\"Hello world, this is clean text.\"}",
+      "live_error": "{\"result\":\"{\\\"status\\\": \\\"error\\\", \\\"message\\\": \\\"Unknown redaction mode: 'bogus_mode'. Use 'strip', 'comment', or 'highlight'.\\\"}\"}"
+    },
+    "redact_file": {
+      "success": "json.dumps({\"status\":\"ok\",\"source\",\"output_path\",\"findings_redacted\"})  (server.py:241-246)",
+      "error": "json.dumps({\"status\":\"error\",\"message\"})  (server.py:221-224, 247-248)"
+    },
+    "redact_url": {
+      "success": "json.dumps({\"status\":\"ok\",\"source\",\"output_path\",\"findings_redacted\"})  (server.py:279-284)",
+      "error": "json.dumps({\"status\":\"error\",\"message\"})  (server.py:285-286)"
+    },
+    "redact_dir": {
+      "success": "json.dumps({\"status\":\"ok\",\"source\",\"output_dir\",\"files_written\"})  — NO findings count  (server.py:373-378)",
+      "error": "json.dumps({\"status\":\"error\",\"message\"})  (server.py:380, 382)"
+    },
+    "list_rules": {
+      "success": "json.dumps([{id,name,category,default_risk,description}, ...])  (server.py:404-413)"
+    }
+  },
+  "findings": [
+    {
+      "id": "MCP-1",
+      "title": "redact() is schema-polymorphic: bare text on success, JSON error object on failure — and collides with legitimate JSON content",
+      "location": "src/llm_sanitizer/server.py:179 (success) vs :181 (error)",
+      "severity": "high",
+      "status": "verified",
+      "observed_return": "SUCCESS -> return clean (plain redacted text). ERROR -> return json.dumps({\"status\":\"error\",\"message\":...}). Confirmed live: success gave {\"result\":\"Hello world, this is clean text.\"}; invalid mode gave {\"result\":\"{\\\"status\\\":\\\"error\\\",...}\"}.",
+      "impact": "An agent consumer cannot reliably detect failure. The only discriminator is 'did it parse as JSON with status=error', but redacted CONTENT can itself legitimately be JSON — e.g. redacting a config file or an API response that contains {\"status\":\"error\",...}. A clean JSON document passed through redact() would be misread as a tool error, and a genuine error is indistinguishable from cleaned text that happens to look like prose. Every other tool returns JSON; redact alone breaks the pattern.",
+      "fix": "Return a uniform envelope: json.dumps({\"status\":\"ok\",\"content\":clean,\"findings_redacted\":result.summary.total_findings}). redact_content already returns (clean, result), so the count is free. COMPAT: BREAKING for any consumer that today reads the raw string as the cleaned text (flow-guard likely does). Mitigate by adding a structured field while keeping text available, or gate behind a new tool / version bump and announce in CHANGELOG before the next devel->main promotion.",
+      "compat_note": "Breaking for flow-guard if it consumes redact() output as literal text. Coordinate with the devel->main release ritual; do not ship silently."
+    },
+    {
+      "id": "MCP-2",
+      "title": "No uniform result envelope across tool families — three different success shapes",
+      "location": "server.py — scan_* (:39,86,110,148), redact (:179), redact_file/url/dir (:241,279,373)",
+      "severity": "medium",
+      "status": "verified",
+      "observed_return": "scan_* success = bare ScanResult JSON with NO 'status' key. redact success = bare text. redact_file/url/dir success = {\"status\":\"ok\",...}. All error paths = {\"status\":\"error\",\"message\"}. So a consumer needs three distinct success-detection strategies and cannot write one generic result handler.",
+      "impact": "Integration friction and error-prone consumer code: success detection differs per tool. Errors ARE consistent ({status:error,message}) but successes are not, so a consumer that keys on presence of 'status' will treat every scan SUCCESS as ambiguous (no status field at all).",
+      "fix": "Adopt one envelope for every tool: {\"status\":\"ok\"|\"error\", ...payload} (scan payload = the report; redact payload = content+count). COMPAT: BREAKING for scan_* consumers that read summary/findings at top level; stage behind a version bump.",
+      "compat_note": "Breaking for scan_* consumers reading top-level summary/findings; announce and bump."
+    },
+    {
+      "id": "MCP-3",
+      "title": "Tools return JSON as a serialized string (-> str), forcing consumers to double-parse; no MCP structured/typed output",
+      "location": "server.py — every @mcp.tool() is annotated '-> str' and returns json.dumps(...)/format_json(...) (e.g. :24-39, :404)",
+      "severity": "medium",
+      "status": "verified",
+      "observed_return": "Live scan_text delivered {\"result\":\"{\\n \\\"version\\\": ...}\"} — a JSON string nested inside the MCP result field. The consumer must JSON-parse twice and gets no schema/type information from the tool contract.",
+      "impact": "Extra parsing step, lost typing, larger token payloads (escaped JSON), and no machine-readable output schema for consumers to validate against. FastMCP supports returning structured objects / typed models; returning stringified JSON forgoes that.",
+      "fix": "Return the dict/pydantic model directly (e.g. result.model_dump_json_friendly()) and let FastMCP serialize as structured content, or declare an output schema. COMPAT: changes the delivered content shape; stage with the envelope change in MCP-1/MCP-2.",
+      "compat_note": "Ships together with the envelope redesign; single coordinated breaking change rather than several."
+    },
+    {
+      "id": "MCP-4",
+      "title": "Emitted 'version' field is hardcoded 0.1.0 while the package is 0.2.0 — stale version in every scan result",
+      "location": "src/llm_sanitizer/models.py:93 (ScanResult.version) and :129 (DirScanResult.version); package version pyproject.toml:3 and src/llm_sanitizer/__init__.py:6 = 0.2.0",
+      "severity": "medium",
+      "status": "verified",
+      "observed_return": "Live scan_text emitted \"version\": \"0.1.0\". CLAUDE.md itself warns the version 'has drifted before' across two files — this is a THIRD, independent hardcoded copy that is already wrong.",
+      "impact": "Any consumer that keys behavior or telemetry off the result 'version' sees 0.1.0 forever and cannot tell which server build produced a finding — defeats the versioning/stability story the release ritual depends on. Undermines the ability to gate on new-rule behavior by version.",
+      "fix": "Source the version from importlib.metadata.version('llm-sanitizer') (or import __version__) in the model default instead of a string literal. COMPAT: non-breaking; it corrects a value consumers should already treat as advisory. Aligns with the CLAUDE.md 'single-source the version' follow-up.",
+      "compat_note": "Non-breaking correction."
+    },
+    {
+      "id": "MCP-5",
+      "title": "Invalid 'sensitivity' silently coerced to medium and echoed back verbatim — misleading, can under-detect; violates the project's own boundary-validation rule",
+      "location": "src/llm_sanitizer/scanner.py:468 (min_risk = _SENSITIVITY_RISK_MAP.get(sensitivity, RiskLevel.medium)); echoed at :533 and models ScanResult.sensitivity",
+      "severity": "medium",
+      "status": "verified",
+      "observed_return": "A call with sensitivity=\"strict\" or \"critical\" (plausible agent guesses) hits the dict .get() default and runs at MEDIUM, then the result echoes back \"sensitivity\": \"<the invalid value>\" — actively asserting a setting that was not applied.",
+      "impact": "A consumer intending high sensitivity but passing an out-of-vocabulary token gets fewer findings than expected with zero signal, and the echoed field confirms the wrong value. This is exactly the red-flag 'silent fallback to weak detection' plus 'parameter ambiguity'. It also violates CLAUDE.md's 'validate JSON/params at every CLI/MCP input boundary' rule.",
+      "fix": "Validate sensitivity in the MCP wrappers (reject with {status:error, message:'sensitivity must be low|medium|high'}) OR raise/normalize in Scanner.scan and record the effective value used. Same treatment for 'mode' (redactor already validates mode — good) and 'binary_mode'. COMPAT: non-breaking for valid callers; turns silent misbehavior into an actionable error.",
+      "compat_note": "Non-breaking for well-formed calls."
+    },
+    {
+      "id": "MCP-6",
+      "title": "list_rules reports ALL registered rules as 'active' regardless of config, and omits enabled/effective-sensitivity state",
+      "location": "server.py:388-413 calls get_all_rules() (rules/__init__.py:139-154 returns the full _RULE_REGISTRY); Scanner actually filters via config.is_rule_enabled (scanner.py:446-448)",
+      "severity": "medium",
+      "status": "verified",
+      "observed_return": "list_rules returns {id,name,category,default_risk,description} for every registered rule. It does not consult SanitizerConfig, so a rule disabled in .llm-sanitizer.yml still appears, and there is no 'enabled' or effective-sensitivity field. The docstring says 'List active detection rules and their configuration' — but neither 'active' nor 'configuration' is reflected.",
+      "impact": "Observability gap: a consumer cannot use list_rules to learn what will actually run, nor to debug why an expected finding did/didn't fire. Misleading given the docstring promise.",
+      "fix": "Build the list from a configured Scanner (Scanner()._rules) and include enabled + effective sensitivity per rule; or add an 'enabled' boolean and 'effective_sensitivity'. COMPAT: additive fields are non-breaking; if a rule currently shown disappears when disabled, that is the correct behavior but note it.",
+      "compat_note": "Additive fields non-breaking; filtering out disabled rules is a behavior change to flag."
+    },
+    {
+      "id": "MCP-7",
+      "title": "redact_* success schema is inconsistent within its own family",
+      "location": "server.py:245 & :283 (findings_redacted) vs :373-378 (files_written, no count)",
+      "severity": "low",
+      "status": "verified",
+      "observed_return": "redact_file/redact_url success => {status,source,output_path,findings_redacted}. redact_dir success => {status,source,output_dir,files_written} with NO findings count and a differently-named location key (output_dir vs output_path).",
+      "impact": "A consumer handling 'a redaction happened' must special-case each tool: different key for the destination, and no way to learn how many findings a directory redaction removed. Matches red-flag 'inconsistent result format'.",
+      "fix": "Standardize keys: use 'output' (or keep both output_path/output_dir but also include a common 'destination'), and include findings_redacted for redact_dir (sum across files). COMPAT: additive (adding findings_redacted, adding a common destination alias) is non-breaking; renaming existing keys is breaking, so prefer adding.",
+      "compat_note": "Prefer additive keys to avoid breaking existing readers."
+    },
+    {
+      "id": "MCP-8",
+      "title": "RedactResult model is dead and does not match the dicts the server actually emits",
+      "location": "src/llm_sanitizer/models.py:109-116 (RedactResult with findings_count) vs server hand-built dicts using findings_redacted (server.py:245,283)",
+      "severity": "low",
+      "status": "verified",
+      "observed_return": "RedactResult defines {status, source, output_path, findings_count, files_written} but is never imported/used by server.py (grep: only defined in models.py). The server hand-rolls dicts with a different key name (findings_redacted) and different field sets per tool.",
+      "impact": "No single source of truth for the redaction result schema; the model that looks authoritative is stale and would mislead a maintainer or a consumer generating types from it.",
+      "fix": "Either delete RedactResult or make the redact_* tools construct and return it (renaming findings_redacted -> findings_count consistently). COMPAT: aligning on the model is the right long-term fix; couple any key rename with MCP-1/2/7.",
+      "compat_note": "Key rename is breaking; bundle with the envelope work."
+    },
+    {
+      "id": "MCP-9",
+      "title": "No per-call configurability via MCP; config only via .llm-sanitizer.yml discovered from the SERVER's cwd",
+      "location": "MCP tool signatures expose only sensitivity/mode/binary_mode/glob (server.py). Config is loaded by walking up from os.getcwd() (config.py:143-149).",
+      "severity": "low",
+      "status": "verified",
+      "observed_return": "Consumers cannot select rules, choose output format, set policy, or set max_scan_bytes per call. The only config channel is a YAML file found relative to the server process cwd — which for 'uv run llm-sanitizer' / uvx is not a path a consumer like flow-guard controls.",
+      "impact": "Red-flag 'no way to redact selectively' partially holds: a consumer that wants to redact only secrets vs injections, or disable a noisy rule, has no per-call lever and no reliable file-based lever either. Reduces the 80%-case flexibility the persona expects.",
+      "fix": "Add optional per-call params (e.g. rules_disabled: list[str], or a config_path override) to the scan/redact tools, or an env var for the config path so consumers can point the server at their config deterministically. COMPAT: additive optional params are non-breaking.",
+      "compat_note": "Additive optional parameters; non-breaking."
+    },
+    {
+      "id": "MCP-10",
+      "title": "binary_mode not validated at the MCP boundary",
+      "location": "server.py:43,113,184,289 (binary_mode passed straight through to readers/scanner)",
+      "severity": "low",
+      "status": "inferred",
+      "observed_return": "The valid set is {extract, text, skip} per docstrings, but the wrappers pass any string through. I did not exercise an invalid value live; downstream code branches on binary_mode != 'text' / 'skip', so an unrecognized value would be treated as the 'extract'-ish default rather than rejected.",
+      "impact": "A typo'd binary_mode (e.g. 'raw') is silently reinterpreted rather than reported — same class as MCP-5. Low impact but violates the boundary-validation rule.",
+      "fix": "Validate binary_mode (and glob is free-form, leave it) in the wrappers; return {status:error,message} on an unknown value. COMPAT: non-breaking for valid callers.",
+      "compat_note": "Non-breaking."
+    }
+  ],
+  "positives": [
+    "Tool names are self-explanatory and follow MCP snake_case conventions (scan_text/scan_file/scan_url/scan_dir, redact/redact_file/redact_url/redact_dir, list_rules).",
+    "Findings are richly observable: each Finding carries rule id, rule_name, risk, precise Location, matched text, and an explanation (models.py:49-67) — a consumer can understand WHY a finding fired.",
+    "Error messages are actionable where present, e.g. the redaction-mode error names the valid modes (redactor.py:89).",
+    "Fails closed on oversized input: content > max_scan_bytes returns a CRITICAL input_too_large finding rather than hanging (scanner.py:475-488) — the persona's performance-cliff concern is handled and documented.",
+    "Content-based (not extension-based) binary/archive detection and zip-bomb guards are strong and documented.",
+    "No consumer-specific coupling — behavior does not branch on who is calling.",
+    "redact/redact_content iterate to a stable fixpoint so layered (zero-width) obfuscation is fully neutralized (redactor.py:135-172)."
+  ],
+  "red_flag_checklist": {
+    "tool_parameter_ambiguity": "FOUND — MCP-5: invalid sensitivity (e.g. 'strict') is silently coerced to medium and echoed back as if applied; valid set not enforced.",
+    "breaking_change_on_rule_addition": "PARTIAL/inferred — adding a rule adds findings; consumers keying on specific rule ids or counts can break, and the stale emitted version (MCP-4) gives them no version signal to gate on. No explicit deprecation/versioning of the finding schema.",
+    "error_messages_dont_help": "NOT FOUND — handled error paths return descriptive {status:error,message}; mode error even lists valid modes.",
+    "performance_cliff": "NOT FOUND — max_scan_bytes fail-closed with a CRITICAL finding; archive bombs guarded; limits documented.",
+    "inconsistent_result_format": "FOUND — MCP-1 (redact bare text vs JSON), MCP-2 (no uniform envelope), MCP-7 (redact_dir omits findings count / uses output_dir vs output_path). NOTE the persona's specific example (scan_text {findings} vs scan_file {results}) is NOT the case here — scan_file returns the same ScanResult shape.",
+    "silent_fallback_to_weak_detection": "FOUND — MCP-5 (invalid sensitivity -> medium, no warning) and MCP-6 (disabling a rule proceeds silently and list_rules still advertises it as active).",
+    "no_way_to_redact_selectively": "FOUND (partial) — MCP-9: no per-call rule selection; cannot redact only secrets vs injections, and file-based config is not reachable from a uvx-launched server's cwd.",
+    "tight_coupling_to_consumer": "NOT FOUND — no consumer-specific behavior.",
+    "no_debug_output": "PARTIAL — individual findings are well-explained (good), but there is no way to inspect EFFECTIVE config or which rules actually ran (MCP-6), so 'why did/didn't this fire' is only partly answerable."
+  },
+  "most_important_issue": "MCP-1: redact() returns bare text on success but a JSON error object on failure (server.py:179 vs :181, confirmed live). It is the one schema decision that can silently corrupt a consumer's control flow — cleaned content that happens to be JSON is indistinguishable from an error, and vice versa — and it is the lone tool that breaks the otherwise-JSON contract."
+}

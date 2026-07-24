@@ -77,7 +77,9 @@ class TestScanResult:
             findings=[],
         )
         assert result.source == "test.md"
-        assert result.version == "0.1.0"
+        from llm_sanitizer import __version__
+
+        assert result.version == __version__  # single-sourced (committee M9)
         assert result.scan_timestamp != ""
 
     def test_json_friendly_max_risk_is_string(self) -> None:
@@ -101,7 +103,7 @@ class TestRulesRegistry:
     def test_all_rules_registered(self) -> None:
         from llm_sanitizer.rules import get_all_rules
         rules = get_all_rules()
-        assert len(rules) == 10
+        assert len(rules) == 12
 
     def test_rule_ids_are_unique(self) -> None:
         from llm_sanitizer.rules import get_all_rules
@@ -116,7 +118,7 @@ class TestRulesRegistry:
         expected = {
             "instruction_override", "zero_width", "hidden_content", "role_play",
             "system_prompt", "data_exfil", "comment_directive", "base64_encoded",
-            "homoglyph", "agent_config",
+            "homoglyph", "agent_config", "char_split", "semantic_intent",
         }
         assert ids == expected
 

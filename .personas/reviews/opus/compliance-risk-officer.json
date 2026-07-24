@@ -1,0 +1,141 @@
+{
+  "persona": "Compliance & Risk Officer",
+  "model": "opus",
+  "repo": "/Users/warnes/src/llm-sanitizer",
+  "review_date": "2026-07-21",
+  "scope": "Governance/risk/compliance posture of the llm-sanitizer OSS library, CLI, and stdio MCP server. Evaluates data handling, transparency, audit trails, vendor/dependency risk, applicable frameworks, incident response, and license posture.",
+  "context_framing": {
+    "what_this_project_is": "An open-source (AGPL-3.0-or-later) developer security tool distributed as a Python package: a CLI, a Python API, and a stdio MCP server. It is NOT an operated SaaS. It processes content in-process and returns findings; it does not run a network listener, retain scanned content, or emit telemetry (verified below).",
+    "who_carries_the_regulatory_obligation": "Because the library neither retains nor transmits user content (the only egress is an explicit, SSRF-guarded scan_url fetch the caller requests), the bulk of GDPR/CCPA/HIPAA/SOC2 data-processor obligations fall on the DEPLOYER (e.g. flow-guard), not on this library. Most gaps below therefore block B2B/regulated ADOPTION or a vendor security questionnaire; they do NOT gate an open-source release. This distinction is applied per-finding.",
+    "verification_legend": "verified = I read the file / ran the check; inferred = follows from what I read; assumed = not confirmed."
+  },
+  "findings": [
+    {
+      "id": "CR-1",
+      "title": "No SECURITY.md / no coordinated vulnerability-disclosure policy",
+      "location": "repo root, .github/ (searched; absent)",
+      "severity": "MEDIUM",
+      "severity_condition": "B2B/regulated-adoption gap and open-source-hygiene gap. NOT release-gating — the package builds and functions without it.",
+      "evidence": "verified: `find . -iname 'SECURITY*'` (excluding .venv/.git) returned nothing; `.github/` contains only instructions/, obo_sessions/, prompts/, workflows/, copilot-instructions.md — no SECURITY.md. A security-focused tool with no way for a researcher to report a vuln in the scanner itself is a notable credibility and process gap; a vendor questionnaire will ask for a disclosure policy.",
+      "fix": "Add SECURITY.md with a reporting contact (greg@warnes-innovations.com is already public), supported-version statement, and expected response SLA. Optionally enable GitHub private vulnerability reporting.",
+      "effort": "low"
+    },
+    {
+      "id": "CR-2",
+      "title": "No automated dependency / SAST scanning in CI for a security tool",
+      "location": ".github/workflows/ (only publish.yml); no .github/dependabot.yml; no CodeQL workflow",
+      "severity": "MEDIUM",
+      "severity_condition": "B2B-adoption + supply-chain-posture gap. NOT release-gating. For a tool whose value proposition is security, absence of dependency-CVE and static analysis in CI undermines the posture story a procurement team expects.",
+      "evidence": "verified: `.github/workflows/` contains only `publish.yml` (PyPI Trusted Publishing). `ls .github/` shows no dependabot config, no CodeQL. No pip-audit/osv-scanner step anywhere. uv.lock IS committed (good — reproducible builds), but nothing checks it against advisories.",
+      "fix": "Add a scheduled `pip-audit`/`osv-scanner` job over uv.lock and a CodeQL workflow (Python). Enable Dependabot alerts + version updates. These directly answer common vendor-questionnaire line items.",
+      "effort": "low-medium"
+    },
+    {
+      "id": "CR-3",
+      "title": "No audit-trail / logging capability — scans leave no record (privacy-positive, SOC2-negative)",
+      "location": "src/llm_sanitizer/*.py (no logging/telemetry present)",
+      "severity": "MEDIUM",
+      "severity_condition": "B2B/SOC2-adoption gap ONLY. This is a genuine tension, not an unqualified defect: the absence is a privacy WIN (no scanned content is logged, retained, or transmitted) but a forensic/SOC2 GAP (no record of what was scanned, when, or what verdict was returned).",
+      "evidence": "verified: grepping all 30 tracked `src/llm_sanitizer/*.py` files for `logging|logger|telemetry|analytics` returned zero matches. The server (server.py) calls Scanner/redactor and returns JSON; nothing is persisted server-side. redactor writes cleaned output only to the caller-specified path. No telemetry/analytics/phone-home exists.",
+      "fix": "Document the no-retention property explicitly (see CR-4). Separately, offer an OPT-IN structured audit log (who/when/source-hash/verdict, NOT content) so regulated deployers can satisfy SOC2 CC7/forensic requirements without forcing content retention on everyone. Default off preserves the privacy posture.",
+      "effort": "medium"
+    },
+    {
+      "id": "CR-4",
+      "title": "No documented data-handling / privacy statement — the strongest compliance selling point is undocumented",
+      "location": "README.md, docs/DESIGN_SPEC.md (component-level Data Flow diagram exists; no privacy/DPA-oriented statement)",
+      "severity": "MEDIUM",
+      "severity_condition": "B2B/regulated-adoption gap. NOT release-gating. A vendor questionnaire asks 'do you retain/transmit our data, and where does it go?' — the honest, favorable answer (in-memory only; no persistence; sole egress is an explicit SSRF-guarded URL fetch) is true but written nowhere for a procurement reviewer.",
+      "evidence": "verified: DESIGN_SPEC.md has a component-level Data Flow diagram (line ~312) and a note that a *future* sandbox could limit egress (line ~977), but no privacy/retention statement. `grep -niE 'privacy|retention|GDPR|HIPAA|SOC ?2|PII'` over DESIGN_SPEC.md found no privacy/framework coverage. url_reader.py docstring documents the SSRF boundary well — but only in source, not in a compliance-facing doc.",
+      "fix": "Add a short 'Data Handling & Privacy' section (README or docs/): content is processed in-memory and not persisted; no telemetry; the only outbound network call is scan_url/redact_url, which is SSRF-guarded (blocks loopback/private/link-local/cloud-metadata) and size-capped. This converts an existing technical fact into an auditable claim.",
+      "effort": "low"
+    },
+    {
+      "id": "CR-5",
+      "title": "Large untrusted-document parser surface via markitdown — parser CVEs ARE reachable (unlike the MCP transport)",
+      "location": "pyproject.toml dependencies: markitdown[pdf,docx,pptx,xlsx,xls]>=0.1 (+ optional py7zr, libarchive-c)",
+      "severity": "MEDIUM",
+      "severity_condition": "Ongoing supply-chain risk, condition-dependent. Reachable-by-design: the tool's core purpose is extracting text from UNTRUSTED binary documents, so a memory-safety/parser CVE in markitdown or its extraction backends (pdf/office parsers) is directly reachable via scan_file/scan_dir. Contrast CR-6.",
+      "evidence": "verified: markitdown with per-format extras is a CORE dependency (pyproject lines 35-60). The maintainer deliberately excluded markitdown[all] (azure-doc-intelligence, audio, youtube) to shrink surface — good — but the retained pdf/docx/pptx/xlsx parsers still process attacker-controlled bytes. Mitigations already present: zip-bomb/ratio guards, archive depth/entry/size caps, 25 MiB input cap, content-not-extension type detection (all verified in README/CHANGELOG/scanner). I did NOT run pip-audit, so I claim NO specific CVE — only that this dependency class is the reachable attack surface.",
+      "fix": "Add pip-audit/osv-scanner (see CR-2) focused on the extraction stack; document the parser surface in the data-handling section; consider the DESIGN_SPEC's own future item — OS-level sandboxing (bubblewrap/seccomp/container) — for the extraction subprocess in high-assurance deployments.",
+      "effort": "medium (scanning: low; sandboxing: high)"
+    },
+    {
+      "id": "CR-6",
+      "title": "MCP transport CVEs are NOT reachable — server is stdio-only (positive / context note)",
+      "location": "src/llm_sanitizer/server.py:419-421 (main() -> mcp.run())",
+      "severity": "INFO",
+      "severity_condition": "Positive posture note; no action required. Included per rigor requirement to assess CVE reachability against how the dependency is invoked.",
+      "evidence": "verified: server.py main() calls `mcp.run()` with no transport argument, which is FastMCP's stdio default. There is no SSE/streamable-HTTP listener, no bound port, no HTTP server. Therefore any advisory affecting the `mcp` package's HTTP/SSE transports is NOT reachable in this deployment. The MCP server runs as a local child process of the host (this repo's .mcp.json uses `uv run llm-sanitizer`; consumers pin `uvx --from git+...@main`).",
+      "fix": "No change needed. If a networked transport is ever added, re-evaluate transport-layer advisories and add auth.",
+      "effort": "none"
+    },
+    {
+      "id": "CR-7",
+      "title": "No security incident-response / escalation procedure for a package consumers pin at @main",
+      "location": "CLAUDE.md (release ritual documented), repo root (no incident-response doc)",
+      "severity": "LOW",
+      "severity_condition": "B2B/operational-adoption gap. NOT release-gating. CLAUDE.md thoroughly documents the devel->main promotion/release ritual, but there is no documented procedure for a SECURITY incident (a scanner-bypass discovered in a released version, a compromised dependency, a bad release that silently weakens downstream protection).",
+      "evidence": "verified: CLAUDE.md covers branch model, promotion, versioning, and cache-refresh caveats, but contains no incident-response/rollback-for-security path. Consumers (flow-guard) pin a MOVING ref (@main) with uvx caching, so a security regression's propagation timing is nondeterministic — CLAUDE.md itself notes consumers may serve a cached build until `uvx --refresh`. That amplifies the need for a documented 'security release' fast-path.",
+      "fix": "Add an incident-response section (in SECURITY.md or CLAUDE.md): triage owner, how to cut an emergency patch release, how to notify pinned consumers, and the `uvx --refresh` / `uv cache clean` step required for them to actually pick it up.",
+      "effort": "low"
+    },
+    {
+      "id": "CR-8",
+      "title": "License posture is well-handled — AGPL is itself a B2B adoption consideration (already mitigated)",
+      "location": "LICENSE, pyproject.toml (license + per-dependency license notes), SPDX headers in source",
+      "severity": "LOW",
+      "severity_condition": "B2B-adoption consideration, already mitigated. Not a defect. Some enterprises prohibit AGPL in their stack; that is a known adoption filter, not a compliance failure.",
+      "evidence": "verified: LICENSE is full AGPL-3.0; pyproject declares `AGPL-3.0-or-later` (OSI classifier present); source files carry SPDX `AGPL-3.0-or-later` headers; optional-dependency license compatibility is explicitly reasoned in pyproject (py7zr LGPL-3.0 dynamically imported = AGPL-compatible; libarchive-c wraps BSD libarchive). README offers commercial licensing (greg@warnes-innovations.com), which is the correct mitigation for AGPL-averse enterprises.",
+      "fix": "None required. Optionally add a short LICENSING.md clarifying that the AGPL network-copyleft clause does not encumber a consumer who merely runs the CLI/MCP locally, to preempt procurement's most common AGPL objection.",
+      "effort": "low"
+    }
+  ],
+  "red_flag_checklist": [
+    {
+      "red_flag": "Audit logs that cannot be produced on demand (no retention / SARIF gitignored)",
+      "status": "FOUND (with context)",
+      "note": "No logging exists at all (verified). But the specific example — SARIF gitignored with no retention — is N/A here: SARIF is an on-demand OUTPUT the caller redirects to a file (README merge/scan examples); .gitignore does not sweep SARIF. Retention of scan results is the deployer's responsibility. The real finding is CR-3: no built-in audit trail, which is a SOC2-adoption gap and simultaneously a privacy positive."
+    },
+    {
+      "red_flag": "Undocumented data flows",
+      "status": "PARTIAL",
+      "note": "A component-level Data Flow diagram exists in DESIGN_SPEC.md (verified), so flows are documented technically. What is missing is a compliance-/DPA-facing data-handling statement (CR-4)."
+    },
+    {
+      "red_flag": "No incident response procedure",
+      "status": "FOUND",
+      "note": "CR-7. Release ritual is documented; security incident response is not."
+    },
+    {
+      "red_flag": "Known gaps with no mitigation timeline",
+      "status": "PARTIALLY ADDRESSED",
+      "note": "DESIGN_SPEC discloses future-work gaps (process-level sandboxing, TUI) honestly — good. They lack owners/timelines, but for an OSS roadmap that is acceptable; not escalated."
+    },
+    {
+      "red_flag": "Third-party agent definitions with no vendor risk record",
+      "status": "N/A",
+      "note": "This library does not ingest or execute community-sourced agent definitions; it scans content. That red flag applies to a consumer like flow-guard, not to llm-sanitizer."
+    },
+    {
+      "red_flag": "PII in agent-generated outputs with no access control",
+      "status": "N/A",
+      "note": "The tool does not generate agent outputs. It may INGEST content containing PII (documents/emails), but processes it in-memory without persistence or egress (verified), so no output-side PII exposure is created here. PII handling of scanned material is the deployer's obligation."
+    }
+  ],
+  "positives": [
+    "No telemetry, analytics, or phone-home anywhere in tracked source (verified by grep over all 30 src files).",
+    "No content persistence: scanning is in-memory; redaction writes only to the caller-specified path.",
+    "Sole network egress (scan_url/redact_url) is behind a documented SSRF trust boundary blocking loopback/private/link-local/cloud-metadata, with a 10 MiB response cap and manual redirect validation (url_reader.py, verified).",
+    "stdio-only MCP transport — no network listener, so MCP HTTP/SSE transport advisories are not reachable (CR-6).",
+    "Reproducible builds: uv.lock committed; PyPI publish via OIDC Trusted Publishing (no long-lived token).",
+    "Defense-in-depth against hostile inputs already present: zip-bomb/ratio guards, archive depth/entry/size caps, 25 MiB scan cap, content-not-extension type detection, fail-closed on unprocessable binaries.",
+    "License hygiene: full AGPL LICENSE, SPDX headers, per-dependency license-compatibility reasoning, commercial-license option."
+  ],
+  "summary": {
+    "headline": "Strong technical privacy posture (no retention, no telemetry, stdio-only, SSRF-guarded egress) that is largely UNDOCUMENTED for a compliance reviewer, plus standard OSS-security-hygiene gaps (no SECURITY.md, no dependency/SAST scanning, no incident-response doc). None of these gate the open-source release; they gate B2B/regulated adoption and a vendor security questionnaire.",
+    "most_important_issue": "CR-4 — the project's best compliance asset (in-memory processing, zero retention, zero telemetry, single SSRF-guarded egress) is true in the code but written nowhere a procurement team can cite. Documenting it (a short Data Handling & Privacy section) is low-effort and converts a hidden strength into an auditable claim; pair it with SECURITY.md (CR-1) and CI dependency scanning (CR-2) to clear the common vendor-questionnaire bar.",
+    "release_gating_findings": "None. All findings are open-source hygiene or B2B/regulated-adoption gaps, explicitly conditioned per finding.",
+    "verification_note": "I did not run pip-audit/osv-scanner, so no specific dependency CVE is asserted (CR-5 identifies the reachable dependency CLASS only). MCP transport reachability (CR-6) was verified against server.py invocation, not assumed."
+  }
+}

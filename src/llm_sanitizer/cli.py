@@ -200,11 +200,22 @@ def _add_archive_args(parser: argparse.ArgumentParser) -> None:
             "unsupported (CRITICAL) rather than expanded. Default: all."
         ),
     )
+    parser.add_argument(
+        "--max-scan-bytes",
+        type=int,
+        default=None,
+        metavar="BYTES",
+        help=(
+            "Max bytes of text a single unit (file, extracted member, or inline "
+            "content) may be scanned. Larger input is refused with a CRITICAL "
+            "input_too_large finding (default: 26214400 = 25MB)"
+        ),
+    )
 
 
 def _config_with_archive_overrides(args: argparse.Namespace) -> object:
-    """Load config and apply any --archive-* / --unprocessable-binary-policy CLI
-    overrides on top of it."""
+    """Load config and apply any --archive-* / --unprocessable-binary-policy /
+    --max-scan-bytes CLI overrides on top of it."""
     from llm_sanitizer.config import load_config
 
     config = load_config()
@@ -218,6 +229,8 @@ def _config_with_archive_overrides(args: argparse.Namespace) -> object:
         ]
     if getattr(args, "unprocessable_binary_policy", None) is not None:
         config.unprocessable_binary_policy = args.unprocessable_binary_policy
+    if getattr(args, "max_scan_bytes", None) is not None:
+        config.max_scan_bytes = args.max_scan_bytes
     return config
 
 
@@ -280,7 +293,7 @@ def main() -> None:
 def _cmd_scan(args: argparse.Namespace) -> None:
     from llm_sanitizer.config import SanitizerConfig
     from llm_sanitizer.formatters import format_output
-    from llm_sanitizer.models import RiskLevel, ScanResult
+    from llm_sanitizer.models import DirScanResult, RiskLevel, ScanResult
     from llm_sanitizer.scanner import ExtractorUnavailableError, Scanner
 
     config = _config_with_archive_overrides(args)
@@ -335,8 +348,11 @@ def _cmd_scan(args: argparse.Namespace) -> None:
 
     print(format_output(result, fmt=args.format))
 
-    # Exit code logic
-    if args.exit_code_threshold and isinstance(result, ScanResult):
+    # Exit code logic. Both ScanResult and DirScanResult expose .summary.max_risk
+    # (DirScanResult is a SIBLING type, not a subclass) — a directory scan must
+    # gate the exit code too, or `scan <dir> --exit-code-threshold` fails open and
+    # a directory full of injections exits 0 (committee round-2 HIGH).
+    if args.exit_code_threshold and isinstance(result, (ScanResult, DirScanResult)):
         threshold = RiskLevel.from_str(args.exit_code_threshold)
         if result.summary.max_risk is not None and result.summary.max_risk >= threshold:
             sys.exit(1)
@@ -541,11 +557,11 @@ def _cmd_merge(args: argparse.Namespace) -> None:
         sensitivities.add(result.sensitivity)
         results.append(result.model_copy(update={"source": current_path}))
 
+    from llm_sanitizer.scanner import _build_summary
+
     all_findings = [f for r in results for f in r.findings]
-    max_risk: RiskLevel | None = None
-    for f in all_findings:
-        if max_risk is None or f.risk > max_risk:
-            max_risk = f.risk
+    summary = _build_summary(all_findings)
+    max_risk = summary.max_risk
 
     # Manifest entries can legitimately have been scanned under different
     # --sensitivity settings (a cache accumulated across runs) — report that
@@ -558,8 +574,9 @@ def _cmd_merge(args: argparse.Namespace) -> None:
         sensitivity=sensitivity,
         files_scanned=len(results),
         files_skipped_binary=args.skipped_binary,
-        total_findings=len(all_findings),
-        max_risk=max_risk,
+        summary=summary,
+        total_findings=summary.total_findings,
+        max_risk=summary.max_risk,
         results=results,
     )
 

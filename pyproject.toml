@@ -1,6 +1,6 @@
 [project]
 name = "llm-sanitizer"
-version = "0.1.3"
+version = "0.3.0"
 description = "CLI + MCP server for detecting, classifying, and redacting embedded LLM agent instructions in documents, source code, and web pages."
 readme = {file = "README.md", content-type = "text/markdown"}
 authors = [{name = "Gregory R. Warnes", email = "greg@warnes-innovations.com"}]
@@ -42,6 +42,21 @@ dependencies = [
 	"filetype>=1.2",
 	# Pure-Python (BSD) PDF parser for Tier-2 bounded structural validation.
 	"pypdf>=4.0",
+	# Binary document text extraction. A CORE dependency, not optional: the
+	# file-scanning path (scan_file/scan_dir/redact_file) — and the downstream
+	# flow-guard sanitization protocol that relies on it — cannot scan binary
+	# documents without an extractor, and a server that silently can't scan a
+	# PDF fails closed in a way that surprises callers (unscannable_binary /
+	# status:"error" on every binary). Keeping it in base deps means the MCP
+	# server can never launch unable to scan binaries.
+	#
+	# The per-format extras are REQUIRED: base markitdown parses no format at
+	# all (it raises MissingDependencyException, which surfaces as a critical
+	# unscannable_binary finding). Pin exactly the document types the protocol
+	# handles — PDF, DOCX, PPTX, XLSX/XLS — and deliberately exclude the
+	# markitdown[all] bloat (azure-doc-intelligence, audio transcription,
+	# youtube) that has no place in a security scanner.
+	"markitdown[pdf,docx,pptx,xlsx,xls]>=0.1",
 ]
 
 [dependency-groups]
@@ -60,7 +75,12 @@ dev = [
 ]
 
 [project.optional-dependencies]
-binary = ["markitdown>=0.1"]
+# markitdown is now a CORE dependency (see [project] dependencies above), so
+# binary document scanning works out of the box. This extra is retained as a
+# no-op for backward compatibility: `pip install llm-sanitizer[binary]` and any
+# docs/scripts/protocol text that still reference the [binary] extra keep
+# resolving without error.
+binary = []
 # 7z archive extraction. py7zr is LGPL-3.0 (dynamically imported, AGPL-compatible).
 7z = ["py7zr>=0.20"]
 # RAR (and general libarchive-backed) extraction. libarchive-c wraps the
@@ -115,5 +135,5 @@ strict = true
 # import errors when the module is absent (these imports are lazy, guarded by
 # try/except ImportError).
 [[tool.mypy.overrides]]
-module = ["py7zr", "markitdown", "pypdf"]
+module = ["py7zr", "markitdown", "pypdf", "filetype", "libarchive"]
 ignore_missing_imports = true

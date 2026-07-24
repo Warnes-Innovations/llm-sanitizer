@@ -5,10 +5,16 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from typing import Any
 
-from llm_sanitizer.models import DirScanResult, RiskLevel, ScanResult
+from llm_sanitizer.models import (
+    DirScanResult,
+    RiskLevel,
+    ScanResult,
+    _package_version,
+)
 
 _SARIF_VERSION = "2.1.0"
 _SARIF_SCHEMA = "https://raw.githubusercontent.com/oasis-tcs/sarif-spec/master/Schemata/sarif-schema-2.1.0.json"
@@ -66,9 +72,13 @@ def _findings_to_results(results_list: list[ScanResult]) -> tuple[list[dict[str,
                     }
                 ],
                 "partialFingerprints": {
-                    "primaryLocationLineHash": str(
-                        hash(f"{scan_result.source}:{finding.location.line}:{finding.matched}")
-                    ),
+                    # Stable across runs: SARIF fingerprints let Code Scanning
+                    # dedupe the same finding between runs. Python's built-in
+                    # hash() is per-process salted (PYTHONHASHSEED), so it changed
+                    # every run and resurrected dismissed alerts (committee MED-1).
+                    "primaryLocationLineHash": hashlib.sha256(
+                        f"{scan_result.source}:{finding.location.line}:{finding.matched}".encode()
+                    ).hexdigest(),
                 },
                 "properties": {
                     "matched": finding.matched[:200],
@@ -96,7 +106,7 @@ def format_sarif(result: ScanResult | DirScanResult) -> str:
                 "tool": {
                     "driver": {
                         "name": "llm-sanitizer",
-                        "version": "0.1.0",
+                        "version": _package_version(),
                         "informationUri": "https://github.com/Warnes-Innovations/llm-sanitizer",
                         "rules": rules,
                     }

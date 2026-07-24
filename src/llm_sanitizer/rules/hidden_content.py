@@ -9,25 +9,34 @@ import re
 
 from llm_sanitizer.models import Finding, RiskLevel
 from llm_sanitizer.rules import BaseRule, register_rule
+from llm_sanitizer.rules._rescan import deadline_exceeded, scan_deobfuscated
 
-# CSS that hides content from human view but not from LLM text extraction.
-# `opacity:` is handled separately below (_classify_opacity), not as a
-# static pattern here — a fixed regex only catches exact-zero values, and
-# near-zero (e.g. `opacity:0.01`) is just as invisible in practice.
-_CSS_HIDDEN_PATTERNS = [
-    (re.compile(r'display\s*:\s*none', re.IGNORECASE), RiskLevel.critical, "CSS display:none"),
-    (re.compile(r'visibility\s*:\s*hidden', re.IGNORECASE), RiskLevel.critical, "CSS visibility:hidden"),
-    (re.compile(r'font-size\s*:\s*0', re.IGNORECASE), RiskLevel.high, "CSS font-size:0"),
-    (re.compile(r'<span[^>]+style\s*=\s*["\'][^"\']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^"\']*["\']', re.IGNORECASE | re.DOTALL), RiskLevel.critical, "Hidden span element"),
-    (re.compile(r'<div[^>]+style\s*=\s*["\'][^"\']*(?:display\s*:\s*none|visibility\s*:\s*hidden)[^"\']*["\']', re.IGNORECASE | re.DOTALL), RiskLevel.critical, "Hidden div element"),
+# CAMOUFLAGE patterns: text that is rendered but made imperceptible to a human
+# reader while remaining in the machine-extracted text — with essentially no
+# legitimate purpose. This rule deliberately does NOT detect *structural* hiding
+# (`display:none`, `visibility:hidden`, the `hidden` attribute, off-screen
+# `.sr-only`): those remove content from the human view AND are ubiquitous,
+# legitimate responsive/accessibility formatting, and any injection inside them
+# is already caught by the injection rules scanning the raw markup. Flagging
+# them would flood consumers with false positives on normal HTML.
+#
+# `color:` ≈ background and near-zero `opacity:` are handled by dedicated logic
+# in detect() (they need cascade/value parsing, not a static regex). The regex
+# patterns here cover the two remaining literal camouflage tells. Each entry is
+# (pattern, label).
+_CAMOUFLAGE_PATTERNS = [
+    (re.compile(r'font-size\s*:\s*0', re.IGNORECASE), "CSS font-size:0"),
+    # Unicode tag characters (U+E0000 block) — an invisible smuggling channel
+    # with no legitimate use outside emoji tag sequences.
+    (re.compile(r'[\U000e0000-\U000e007f]+'), "Unicode tag characters (steganographic)"),
 ]
 
-# Markdown/HTML invisible patterns
-_INVISIBLE_PATTERNS = [
-    (re.compile(r'<\s*(?:span|div|p)[^>]*hidden[^>]*>', re.IGNORECASE), RiskLevel.high, "HTML hidden attribute"),
-    # Unicode tag characters (U+E0000 block) sometimes used for steganography
-    (re.compile(r'[\U000e0000-\U000e007f]+'), RiskLevel.critical, "Unicode tag characters (steganographic)"),
-]
+# Near-zero `opacity:0` is dominated by benign fade-in transitions/animations;
+# skip a near-zero opacity when the same rule block declares a transition or
+# animation over opacity (its start state), the main legitimate use.
+_TRANSITION_RE = re.compile(
+    r'(?:transition|animation)\b[^;{}]*\b(?:opacity|all)\b', re.IGNORECASE
+)
 
 # --- Text-color visibility analysis -----------------------------------------
 #
@@ -282,9 +291,43 @@ class HiddenContentRule(BaseRule):
         lines = content.splitlines()
         fid = 1
 
-        def emit(line_idx: int, m: re.Match[str], risk: RiskLevel, label: str) -> None:
+        # This rule flags CAMOUFLAGE — text rendered but made imperceptible to a
+        # human (color matching background, near-zero opacity, zero font-size,
+        # invisible tag characters) while remaining in the extracted text. Unlike
+        # base64/homoglyph, that camouflage has NO legitimate purpose, so its mere
+        # presence is a finding: MEDIUM on its own. When the camouflaged region's
+        # line also trips an injection rule — an injection was deliberately hidden
+        # — it escalates to CRITICAL. Structural hiding (display:none, etc.) is
+        # not detected here at all (see _CAMOUFLAGE_PATTERNS note).
+        concealed_cache: dict[int, list[str]] = {}
+
+        def concealed_rules(line_idx: int) -> list[str]:
+            if line_idx not in concealed_cache:
+                revealed = scan_deobfuscated(lines[line_idx], source)
+                concealed_cache[line_idx] = sorted(
+                    {f.rule for f in revealed if f.rule != self.rule_id}
+                )
+            return concealed_cache[line_idx]
+
+        def emit(line_idx: int, m: re.Match[str], label: str) -> None:
             nonlocal fid
+            rules = concealed_rules(line_idx)
             before, line_text, after = self._build_context(lines, line_idx)
+            if rules:
+                risk = RiskLevel.critical
+                explanation = (
+                    f"Injection concealed by camouflage ({label}): the "
+                    f"imperceptible text is flagged by {', '.join(rules)}. Hiding "
+                    "an injection from human readers is a strong malicious signal."
+                )
+            else:
+                risk = RiskLevel.medium
+                explanation = (
+                    f"Camouflaged content ({label}): text is rendered but made "
+                    "imperceptible to a human reader while remaining in the "
+                    "extracted text — a technique with no legitimate purpose. No "
+                    "injection was detected in it."
+                )
             findings.append(
                 self._make_finding(
                     finding_id=fid,
@@ -299,10 +342,7 @@ class HiddenContentRule(BaseRule):
                     before=before,
                     line_text=line_text,
                     after=after,
-                    explanation=(
-                        f"Detected hidden content pattern: {label}. "
-                        "This content is invisible to human readers but visible to LLMs."
-                    ),
+                    explanation=explanation,
                 )
             )
             fid += 1
@@ -312,21 +352,78 @@ class HiddenContentRule(BaseRule):
         # under-reports, and redaction (which removes exactly the reported
         # spans) then needs one full scan/redact round trip per hidden span
         # to converge on such files.
-        for pattern, risk, label in _CSS_HIDDEN_PATTERNS + _INVISIBLE_PATTERNS:
+        # H1: memoize the per-line rule-block text and its background lookup.
+        # A minified line can carry thousands of `color:` decls that all resolve
+        # to the SAME enclosing block; recomputing _rule_block_text and the
+        # background regex search for each was O(n²) per line (measured: a 1 MB
+        # one-line stylesheet took ~40 min). Compute once per line index.
+        block_cache: dict[int, str] = {}
+
+        def block_of(idx: int) -> str:
+            if idx not in block_cache:
+                block_cache[idx] = _rule_block_text(lines, idx)
+            return block_cache[idx]
+
+        # Per line: (background_declared, background_rgb_or_None).
+        bg_cache: dict[int, tuple[bool, tuple[int, int, int] | None]] = {}
+
+        def bg_of(idx: int) -> tuple[bool, tuple[int, int, int] | None]:
+            if idx not in bg_cache:
+                m = _BACKGROUND_DECL_RE.search(block_of(idx))
+                if m:
+                    parsed = _parse_css_color(m.group(1))
+                    bg_cache[idx] = (True, parsed[:3] if parsed else None)
+                else:
+                    bg_cache[idx] = (False, None)
+            return bg_cache[idx]
+
+        # Deadline checks (committee HIGH): a minified single line can hold
+        # thousands of matches; without an intra-loop check this one detect()
+        # call runs uninterruptibly past max_scan_seconds.
+        for pattern, label in _CAMOUFLAGE_PATTERNS:
             for line_idx, line in enumerate(lines):
+                if deadline_exceeded():
+                    return findings
                 for m in pattern.finditer(line):
-                    emit(line_idx, m, risk, label)
+                    if deadline_exceeded():
+                        return findings
+                    emit(line_idx, m, label)
 
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                return findings
             for m in _TEXT_COLOR_DECL_RE.finditer(line):
-                color_label = _classify_text_color(m.group(1), lines, line_idx)
-                if color_label is not None:
-                    emit(line_idx, m, RiskLevel.critical, color_label)
+                # Per-match check: a single minified line can hold tens of
+                # thousands of `color:` decls, so a per-LINE check alone leaves
+                # this loop uninterruptible (committee HIGH residual).
+                if deadline_exceeded():
+                    return findings
+                color = _parse_css_color(m.group(1))
+                if color is None:
+                    continue
+                r, g, b, alpha = color
+                if alpha < _NEAR_ZERO_ALPHA:
+                    emit(line_idx, m, _TEXT_TRANSPARENT_LABEL)
+                    continue
+                declared, bg_rgb = bg_of(line_idx)
+                if declared:
+                    if bg_rgb is not None and bg_rgb == (r, g, b):
+                        emit(line_idx, m, _TEXT_MATCHES_BG_LABEL)
+                    # explicit, different/unparsable background — presumed visible
+                elif (r, g, b) == (255, 255, 255):
+                    emit(line_idx, m, _WHITE_NO_BG_LABEL)
 
         for line_idx, line in enumerate(lines):
+            if deadline_exceeded():
+                return findings
             for m in _OPACITY_DECL_RE.finditer(line):
+                if deadline_exceeded():
+                    return findings
                 opacity = _parse_opacity(m.group(1))
                 if opacity is not None and opacity < _NEAR_ZERO_ALPHA:
-                    emit(line_idx, m, RiskLevel.high, _NEAR_ZERO_OPACITY_LABEL)
+                    # Skip a fade-in transition/animation start state (benign).
+                    if _TRANSITION_RE.search(block_of(line_idx)):
+                        continue
+                    emit(line_idx, m, _NEAR_ZERO_OPACITY_LABEL)
 
         return findings

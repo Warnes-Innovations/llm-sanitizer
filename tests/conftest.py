@@ -7,7 +7,17 @@ from __future__ import annotations
 
 import pytest
 
+from llm_sanitizer.rules import _rescan
 from tests.helpers.mock_llm import MockProtectedLLM, SandboxIOAdapter
+
+
+@pytest.fixture(autouse=True)
+def _fresh_rescan_budget() -> None:
+    """Reset the de-obfuscation re-scan work budget before every test. Tests
+    that call rule.detect() directly (no scanner) otherwise accumulate the
+    ContextVar budget across the session; this gives each test a clean slate."""
+    _rescan._scanned_bytes.set(0)
+    _rescan._scanner_managed.set(False)
 
 
 @pytest.fixture()

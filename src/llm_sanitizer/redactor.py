@@ -8,23 +8,66 @@ from __future__ import annotations
 from llm_sanitizer.models import Finding, ScanResult
 
 
-def _strip_finding(content: str, finding: Finding) -> str:
-    """Remove the matched text from content."""
-    return content.replace(finding.matched_raw, "", 1)
+def _replacement_text(finding: Finding, mode: str) -> str:
+    """The text that replaces a finding's matched span for a given mode."""
+    if mode == "strip":
+        return ""
+    if mode == "comment":
+        return (
+            f"[REDACTED: LLM instruction removed "
+            f"({finding.rule}, {finding.risk.name})]"
+        )
+    return _highlight_marker(finding)
 
 
-def _comment_finding(content: str, finding: Finding) -> str:
-    """Replace the matched text with a redaction marker."""
-    marker = (
-        f"[REDACTED: LLM instruction removed ({finding.rule}, {finding.risk.name})]"
-    )
-    return content.replace(finding.matched_raw, marker, 1)
+def _highlight_marker(finding: Finding) -> str:
+    """Visible warning marker wrapping the matched text."""
+    return f"\u26a0\ufe0f[LLM-INSTRUCTION: {finding.matched}]\u26a0\ufe0f"
 
 
-def _highlight_finding(content: str, finding: Finding) -> str:
-    """Wrap the matched text in visible warning markers."""
-    marker = f"\u26a0\ufe0f[LLM-INSTRUCTION: {finding.matched}]\u26a0\ufe0f"
-    return content.replace(finding.matched_raw, marker, 1)
+def _finding_offset(content: str, finding: Finding) -> int | None:
+    r"""Best-effort absolute start offset of ``finding.matched_raw`` in
+    ``content``, anchored at the finding's recorded (line, column).
+
+    Two line-numbering schemes are in use across the rules: line-oriented
+    rules index with ``content.splitlines()``, while whole-content rules
+    (comment_directive, agent_config, system_prompt) compute the line as
+    ``content[:start].count("\n")``. Both are tried, and each candidate is
+    accepted only if the slice at that offset actually equals ``matched_raw``.
+    Returns None when neither verifies (e.g. bare ``\r`` / Unicode line
+    separators that make the schemes disagree), so the caller can fall back
+    to occurrence-based replacement rather than edit the wrong span.
+    """
+    raw = finding.matched_raw
+    if not raw:
+        return None
+    line_idx = finding.location.line - 1
+    col_idx = finding.location.column - 1
+    if line_idx < 0 or col_idx < 0:
+        return None
+
+    # Scheme A \u2014 splitlines(keepends=True): the line-oriented rules index the
+    # separator-stripped lines, and keepends round-trips content exactly, so a
+    # prefix-length sum gives the absolute start of the line.
+    keep = content.splitlines(keepends=True)
+    if line_idx < len(keep):
+        start = sum(len(x) for x in keep[:line_idx]) + col_idx
+        if content[start:start + len(raw)] == raw:
+            return start
+
+    # Scheme B \u2014 newline-only counting: walk to the start of the line_idx-th
+    # "\n"-delimited line, matching the whole-content rules' own arithmetic.
+    cursor = 0
+    for _ in range(line_idx):
+        nxt = content.find("\n", cursor)
+        if nxt == -1:
+            return None
+        cursor = nxt + 1
+    start = cursor + col_idx
+    if content[start:start + len(raw)] == raw:
+        return start
+
+    return None
 
 
 def redact(
@@ -45,18 +88,46 @@ def redact(
     if mode not in ("strip", "comment", "highlight"):
         raise ValueError(f"Unknown redaction mode: {mode!r}. Use 'strip', 'comment', or 'highlight'.")
 
-    redacted = content
-    # Process findings in reverse order to preserve character offsets where possible.
-    # Since we're doing simple string replacement, order matters only when the same
-    # matched text appears multiple times — replace one at a time.
+    # Each finding is edited AT its recorded location, not at the first
+    # occurrence of its matched text anywhere in the document — a repeated
+    # match string (e.g. a benign copy in a code sample alongside a flagged
+    # copy) must not cause the wrong copy to be redacted. Coordinate-anchored
+    # edits are applied right-to-left so earlier offsets stay valid; findings
+    # whose location can't be verified against their matched text fall back to
+    # first-occurrence replacement (the original behavior).
+    anchored: list[tuple[int, int, str]] = []
+    unanchored: list[Finding] = []
     for finding in result.findings:
-        if finding.matched_raw and finding.matched_raw in redacted:
-            if mode == "strip":
-                redacted = _strip_finding(redacted, finding)
-            elif mode == "comment":
-                redacted = _comment_finding(redacted, finding)
-            elif mode == "highlight":
-                redacted = _highlight_finding(redacted, finding)
+        if not finding.matched_raw:
+            continue
+        offset = _finding_offset(content, finding)
+        if offset is None:
+            unanchored.append(finding)
+        else:
+            anchored.append((
+                offset,
+                offset + len(finding.matched_raw),
+                _replacement_text(finding, mode),
+            ))
+
+    redacted = content
+    # Apply from the end of the document backwards. Skip any edit whose span
+    # overlaps one already applied to its right (this also drops exact
+    # duplicates); the iterating redact_content re-scan picks up anything
+    # skipped this pass.
+    anchored.sort(key=lambda e: e[0], reverse=True)
+    prev_start = len(content)
+    for start, end, replacement in anchored:
+        if end > prev_start:
+            continue
+        redacted = redacted[:start] + replacement + redacted[end:]
+        prev_start = start
+
+    for finding in unanchored:
+        if finding.matched_raw in redacted:
+            redacted = redacted.replace(
+                finding.matched_raw, _replacement_text(finding, mode), 1
+            )
 
     return redacted
 
@@ -85,15 +156,22 @@ def redact_content(
     all_findings.extend(first_result.findings)
     current = redact(content, first_result, mode=mode)
 
-    for _ in range(max_passes - 1):
-        if current == content:
-            break
-        content = current
-        next_result = scan_text(current, source=source, sensitivity=sensitivity)
-        if not next_result.findings:
-            break
-        all_findings.extend(next_result.findings)
-        current = redact(current, next_result, mode=mode)
+    # Only "strip" benefits from re-scan-until-stable: removing one layer (e.g.
+    # zero-width splitters) can expose plain instruction text underneath.
+    # "comment"/"highlight" DELIBERATELY keep the matched text (as a marker), so
+    # re-scanning always re-detects it — iterating those modes never converges,
+    # nesting the marker max_passes deep and inflating the finding count
+    # (committee MED-2). Redact them in a single pass.
+    if mode == "strip":
+        for _ in range(max_passes - 1):
+            if current == content:
+                break
+            content = current
+            next_result = scan_text(current, source=source, sensitivity=sensitivity)
+            if not next_result.findings:
+                break
+            all_findings.extend(next_result.findings)
+            current = redact(current, next_result, mode=mode)
 
     combined = first_result.model_copy(
         update={"findings": all_findings, "summary": _build_summary(all_findings)}

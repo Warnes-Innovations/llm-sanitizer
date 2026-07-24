@@ -8,7 +8,13 @@ from __future__ import annotations
 import re
 
 from llm_sanitizer.models import Finding, RiskLevel
-from llm_sanitizer.rules import BaseRule, register_rule
+from llm_sanitizer.rules import (
+    BaseRule,
+    deadline_exceeded,
+    line_number_at,
+    newline_offsets,
+    register_rule,
+)
 
 # HTML comments containing AI/LLM directives
 _HTML_AI_COMMENT = re.compile(
@@ -62,11 +68,16 @@ class CommentDirectiveRule(BaseRule):
     def detect(self, content: str, source: str = "") -> list[Finding]:
         findings: list[Finding] = []
         lines = content.splitlines()
+        offsets = newline_offsets(content)
         fid = 1
 
         for pattern, risk, label in _PATTERNS:
+            if deadline_exceeded():
+                break
             for m in pattern.finditer(content):
-                line_no = content[: m.start()].count("\n")
+                if deadline_exceeded():
+                    break
+                line_no = line_number_at(offsets, m.start())
                 col = m.start() - (content.rfind("\n", 0, m.start()) + 1) + 1
                 before, line_text, after = self._build_context(lines, line_no)
                 findings.append(

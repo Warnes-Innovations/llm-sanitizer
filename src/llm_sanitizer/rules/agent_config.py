@@ -8,13 +8,29 @@ from __future__ import annotations
 import re
 
 from llm_sanitizer.models import Finding, RiskLevel
-from llm_sanitizer.rules import BaseRule, is_legitimate_file, register_rule
+from llm_sanitizer.rules import (
+    BaseRule,
+    deadline_exceeded,
+    is_legitimate_file,
+    line_number_at,
+    newline_offsets,
+    register_rule,
+)
 
-# YAML/JSON keys targeting AI agents
-_AGENT_KEY_PATTERN = re.compile(
+# Agent-SPECIFIC keys: strong signal on their own — they name an LLM/agent
+# directly and rarely appear in ordinary config.
+_AGENT_SPECIFIC_PATTERN = re.compile(
     r'^\s*["\']?(?:instructions?|system_prompt|agent_mode|ai_behavior|'
-    r'model|temperature|tools|context_window|max_tokens|top_p|'
-    r'stop_sequences?|agent_instructions?|ai_context|llm_config)["\']?\s*[:=]',
+    r'agent_instructions?|ai_context|llm_config)["\']?\s*[:=]',
+    re.IGNORECASE | re.MULTILINE,
+)
+# GENERIC LLM-adjacent keys that ALSO appear in ordinary ML/DevOps YAML
+# (training configs, dataset descriptors). On their own these flooded MEDIUM
+# false positives, so they are only flagged when an agent-SPECIFIC key also
+# occurs in the same content (corroboration).
+_GENERIC_KEY_PATTERN = re.compile(
+    r'^\s*["\']?(?:model|temperature|tools|context_window|max_tokens|top_p|'
+    r'stop_sequences?)["\']?\s*[:=]',
     re.IGNORECASE | re.MULTILINE,
 )
 
@@ -52,6 +68,7 @@ class AgentConfigRule(BaseRule):
     def detect(self, content: str, source: str = "") -> list[Finding]:
         findings: list[Finding] = []
         lines = content.splitlines()
+        offsets = newline_offsets(content)
         fid = 1
 
         legitimate = is_legitimate_file(source)
@@ -60,7 +77,7 @@ class AgentConfigRule(BaseRule):
         for fm_match in _FRONTMATTER_PATTERN.finditer(content):
             fm_content = fm_match.group(1)
             if _AGENT_CONFIG_KEYS_IN_FRONTMATTER.search(fm_content):
-                line_no = content[: fm_match.start()].count("\n")
+                line_no = line_number_at(offsets, fm_match.start())
                 risk = RiskLevel.info if legitimate else RiskLevel.medium
                 before, line_text, after = self._build_context(lines, line_no)
                 findings.append(
@@ -84,10 +101,22 @@ class AgentConfigRule(BaseRule):
                 )
                 fid += 1
 
-        # Check for individual agent configuration keys outside frontmatter
+        # Check for individual agent configuration keys outside frontmatter.
+        # Generic ML keys (model/temperature/…) only count when an agent-specific
+        # key co-occurs, so ordinary training/dataset YAML is not flagged.
         if not legitimate:
-            for m in _AGENT_KEY_PATTERN.finditer(content):
-                line_no = content[: m.start()].count("\n")
+            has_specific = _AGENT_SPECIFIC_PATTERN.search(content) is not None
+            patterns = [_AGENT_SPECIFIC_PATTERN]
+            if has_specific:
+                patterns.append(_GENERIC_KEY_PATTERN)
+            matches = sorted(
+                (m for p in patterns for m in p.finditer(content)),
+                key=lambda m: m.start(),
+            )
+            for m in matches:
+                if deadline_exceeded():
+                    break
+                line_no = line_number_at(offsets, m.start())
                 col = m.start() - (content.rfind("\n", 0, m.start()) + 1) + 1
                 before, line_text, after = self._build_context(lines, line_no)
                 findings.append(

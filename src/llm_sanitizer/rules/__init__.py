@@ -5,11 +5,28 @@
 
 from __future__ import annotations
 
+import bisect
 import fnmatch
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
 from llm_sanitizer.models import Finding, RiskLevel
+
+
+def newline_offsets(content: str) -> list[int]:
+    """Indices of every '\\n' in *content*, computed once (O(n)). Pair with
+    :func:`line_number_at` for O(log n) per-match line lookup — replacing the
+    ``content[:pos].count('\\n')`` idiom, which is O(n) per call and therefore
+    O(n²) when a rule has one match per line on a large input (a measured DoS
+    that the between-rules deadline could not interrupt)."""
+    return [i for i, ch in enumerate(content) if ch == "\n"]
+
+
+def line_number_at(offsets: list[int], pos: int) -> int:
+    """0-based count of newlines before *pos* (i.e. the line index), using the
+    precomputed *offsets* from :func:`newline_offsets`. Equivalent to
+    ``content[:pos].count('\\n')`` but O(log n)."""
+    return bisect.bisect_left(offsets, pos)
 
 # ---------------------------------------------------------------------------
 # Legitimate AI instruction file patterns
@@ -142,12 +159,14 @@ def get_all_rules() -> list[type[BaseRule]]:
     from llm_sanitizer.rules import (  # noqa: F401
         agent_config,
         base64_encoded,
+        char_split,
         comment_directive,
         data_exfil,
         hidden_content,
         homoglyph,
         instruction_override,
         role_play,
+        semantic_intent,
         system_prompt,
         zero_width,
     )
@@ -158,4 +177,12 @@ def get_rule_by_id(rule_id: str) -> type[BaseRule] | None:
     """Return the rule class for a given rule ID, or None."""
     get_all_rules()  # ensure all modules are imported
     return _RULE_REGISTRY.get(rule_id)
+
+
+# Re-export the scan deadline check so rules can import it from one place
+# alongside newline_offsets/line_number_at. Imported at module end to avoid a
+# circular import (_rescan late-imports this package inside a function).
+from llm_sanitizer.rules._rescan import (  # noqa: E402
+    deadline_exceeded as deadline_exceeded,
+)
 

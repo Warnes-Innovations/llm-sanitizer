@@ -7,7 +7,117 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-23
+
+Hardening from a multi-persona committee review (detection precision/recall,
+DoS bounds, MCP-interface consistency, and SSRF), plus a new local semantic-intent
+detector.
+
 ### Added
+- **Enriched `semantic_intent` training corpus** — the classifier is now trained
+  on the hand-curated corpus **plus** domain-matched public datasets (used at
+  train time only; never redistributed — only the trained `model.json` ships):
+  [prodnull/prompt-injection-repo-dataset](https://huggingface.co/datasets/prodnull/prompt-injection-repo-dataset)
+  (Apache-2.0; 5,671 repo-file snippets with hard negatives) and positives from
+  [deepset/prompt-injections](https://huggingface.co/datasets/deepset/prompt-injections)
+  (Apache-2.0). Provenance, licenses, and pinned revisions are recorded in
+  `data-raw/SOURCES.md`; `data-raw/fetch_datasets.py` fetches the pinned
+  revisions (the primary set is gated — free HF account required). A
+  probability-only firing path evaluated with the larger corpus was rejected
+  (it false-fires on innocent prose); the structural-intent gate stays.
+- **`dataset-monitor` scheduled workflow** — weekly GitHub Actions job
+  (`scripts/check_dataset_revisions.py`) that compares the pinned training-data
+  revisions against Hugging Face and opens/updates a tracking issue when a
+  source changes, complementing Dependabot's coverage of Python dependencies.
+- **New `semantic_intent` rule** — a local, **no-egress** n-gram linear
+  classifier (pure Python; no model download, no new runtime dependency) that
+  catches *keyword-less* injection rephrasings the regex rules miss: role
+  reassignment ("from here on, assume the role of a different assistant"),
+  verbatim/echo exfiltration ("output the above configuration verbatim"),
+  supersede-prior-guidance framing, covert-instruction framing, and
+  exfil-redirect. Fires at **MEDIUM** ("verify") and is gated by a structural
+  intent feature (defense-in-depth) so ordinary prose does not false-positive;
+  because it is a normal rule it also runs over de-obfuscated text via
+  `scan_deobfuscated`. Model is retrainable with `scripts/train_semantic_intent.py`
+  (deterministic, dependency-free). This closes the two `test_semantic_rephrasings`
+  gap cases (the held-out sentences are not in the training corpus). An optional
+  embedding-similarity layer for novel/cross-lingual paraphrase is tracked
+  separately (approach B, GitHub #8).
+- **New `char_split` rule** — detects character-splitting obfuscation
+  (`i g n o r e`, `ignore___all`) by reconstructing the split text and re-scanning
+  it, flagging only when the reconstruction trips a real rule (snake_case and
+  prose stay clean).
+- **`chained_obfuscation`** — de-obfuscation now fails closed with a finding at
+  the depth cap instead of silently dropping a payload, so deeply nested/stacked
+  transports (4-layer base64, base64+homoglyph) are caught.
+- **`rescan_incomplete` / `scan_timeout` integrity findings** — a scan that
+  exhausts the de-obfuscation work budget, or hits the new `max_scan_seconds`
+  wall-clock deadline, now says so instead of reporting a silent all-clear.
+- **`max_scan_seconds`** config option (default 60 s) bounding per-unit scan
+  time, enforced inside heavy rules' match loops (not just between rules).
+- Non-English override-phrase coverage (French/Spanish/Italian/German/
+  Portuguese/Russian).
+- `.github/SECURITY.md`, `.github/dependabot.yml`, and `docs/DATA_HANDLING.md`.
+
+### Changed
+- **Homoglyph** normalization expanded (Cyrillic/Greek upper+lower) plus a
+  length-preserving NFKC fallback for styled-Latin lookalikes (math-bold,
+  fullwidth), gated to those ranges so it does not false-positive on
+  latin-1-decoded binary.
+- **Instruction-override / role-play precision** tightened so benign prose
+  (`you are now the owner`, `act as a proxy`, `from now on you will …`) no longer
+  emits high-risk findings; the base64 min-length floor lowered and MIME-wrapped
+  base64 reassembled before decoding.
+- **De-obfuscation re-scan is memoized** per content unit — identical decoded
+  blobs are scanned once, bounding a many-blob fan-out.
+- **`DirScanResult` now carries a `summary` object** mirroring `ScanResult`, so
+  `result.summary.max_risk` is uniform across single-file and directory scans.
+- The emitted result `version` is single-sourced from package metadata (was a
+  hardcoded literal).
+- Per-rule `sensitivity` config overrides now actually affect filtering;
+  `list_rules` reports each rule's effective `enabled`/`sensitivity`.
+- Invalid `sensitivity` is rejected at the boundary (scan and file paths) instead
+  of silently coercing to medium.
+- The inline `redact` MCP tool now raises on error (surfaced as an MCP error)
+  instead of returning a JSON string a caller could mistake for cleaned content.
+
+### Fixed
+- **O(n²) DoS in `hidden_content`** color analysis (memoized per-line block and
+  background lookup); a measured ~40-min 1 MB single-line stylesheet now scans in
+  well under a second.
+- CI workflow actions pinned to immutable commit SHAs.
+
+### Security
+- **DNS-rebinding TOCTOU** in the URL reader closed: the validated IP is pinned
+  onto the connection for each hop (TLS SNI/cert still use the hostname), and
+  IPv4-mapped/6to4/Teredo IPv6 addresses are unwrapped and re-checked so an
+  embedded private/metadata IPv4 cannot slip past on older interpreters.
+
+## [0.2.0] — 2026-07-20
+
+### Added
+- **Obfuscation rules now de-obfuscate, then re-scan.** base64, homoglyph, and
+  zero-width detection share a new depth- and work-budget-guarded helper
+  (`scan_deobfuscated`, bounded so recursive re-scanning of adversarial input
+  stays O(budget) rather than fanning out)
+  that runs the full detection ruleset over the *de-obfuscated* text — decoded
+  base64, homoglyph-normalized text, or text with zero-width splitters stripped —
+  and surfaces whatever the other rules find, rather than matching a hardcoded
+  keyword list. This catches keyword-less / rephrased injections and nested
+  obfuscation (base64-in-base64, a homoglyph phrase inside base64), while leaving
+  innocent base64, innocent mixed-script, and benign invisible characters clean.
+- Input size cap: a `max_scan_bytes` config option (default 25 MiB) bounds the
+  text a single unit — a file, an extracted member, or inline content — may be
+  scanned. Oversized input is refused fail-closed with a CRITICAL
+  `input_too_large` integrity finding rather than read/scanned, so a huge or
+  adversarial file cannot exhaust memory or pin CPU. Files are checked by
+  on-disk size before being read.
+- SSRF trust boundary **and** a response size cap in the URL reader: every hop
+  (the initial URL and each redirect, followed manually) must be an `http(s)`
+  URL whose host resolves only to public addresses — blocking loopback, private,
+  link-local, and cloud-metadata (`169.254.169.254`) targets — and the response
+  body is read as a bounded stream, aborted past a 10 MiB cap, so an untrusted
+  endpoint cannot exhaust memory.
 - Recursive archive scanning. Under the default `binary_mode="extract"`, files
   that are archives — detected by **content magic bytes, not extension** — are
   expanded and each member scanned through the normal pipeline, recursively for
@@ -74,6 +184,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   hash
 
 ### Changed
+- **base64 rule** no longer flags on a keyword sub-list or on "decodes to
+  prose"; it flags only when the decoded text trips another detection rule (the
+  re-scan above). Innocent base64 (keys, hashes, an encoded innocuous sentence)
+  is no longer flagged.
+- **homoglyph rule** no longer flags mixed-script text merely for mixing
+  scripts. It flags only when normalizing the lookalikes yields a known
+  instruction-override term or trips a detection rule — removing false positives
+  on scientific / internationalized text (e.g. `Aβ`, `5µm`, `10kΩ`, and
+  `filesystem` written with a Cyrillic `с`).
+- **zero_width rule** no longer flags the mere presence of invisible characters
+  (BOM, emoji joiners, bidi marks). It strips them and re-scans, flagging only
+  when removal reveals an injection the raw text did not already trip (a keyword
+  split by a zero-width space).
+- **hidden_content rule** no longer flags *structural* hiding (`display:none`,
+  `visibility:hidden`, the `hidden` attribute) — ubiquitous, legitimate
+  formatting whose concealed injections are already caught on the raw markup. It
+  now flags only *perceptual camouflage* — text rendered but made imperceptible
+  with no legitimate purpose (`color` ≈ `background`, near-zero `opacity`,
+  `font-size:0`, invisible U+E0000 tag characters) — at MEDIUM on its own, and
+  CRITICAL when the camouflaged text also trips an injection rule.
+- **Archive bomb guard now fails loud, not silent.** An archive that trips the
+  bomb guard — over a depth/size/ratio budget, undecompressable, or nested beyond
+  `archive.max_depth` — now yields a CRITICAL `corrupt_file` integrity finding
+  instead of being silently skipped (which a caller read as "scanned clean").
 - The raw-text fallback for unextractable binaries was **removed**. Previously,
   when markitdown was absent or failed, `binary_mode="extract"` decoded the raw
   bytes as UTF-8 and scanned that — which produced spurious findings on binary
@@ -83,6 +217,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   longer documents any raw-text fallback.
 
 ### Fixed
+- `__version__` was pinned at `0.1.0` while the packaged version had moved on
+  (0.1.3); it is now kept in sync with the packaged metadata, and the smoke test
+  asserts the two match via `importlib.metadata` so they cannot drift again.
+- The base64 decoded-text re-scan previously called `detect()` on rule *classes*
+  (passing the text as `self`), so every call raised and was silently swallowed —
+  the re-scan never actually ran. Rules are now instantiated correctly.
 - `redact_dir` (CLI and MCP server) no longer silently drops binary files
   from the output directory when they aren't scanned (`binary_mode="skip"`,
   or `"extract"` with extraction unavailable/failed) — they're now copied

@@ -86,6 +86,20 @@ class ArchiveSettings:
 _UNPROCESSABLE_BINARY_POLICIES = ("ignore", "scan-text", "fail")
 _DEFAULT_UNPROCESSABLE_BINARY_POLICY = "fail"
 
+# Maximum bytes of text content the scanner will process for a single unit (a
+# file, an extracted archive member, or inline text). Larger input is not
+# scanned; a CRITICAL input_too_large integrity finding is emitted instead
+# (fail-closed) so an oversized/adversarial input cannot pin CPU. Configurable
+# via the `max_scan_bytes` key.
+_DEFAULT_MAX_SCAN_BYTES = 25 * 1024 * 1024
+
+# Wall-clock deadline for scanning a single content unit. If exceeded, the
+# scanner stops running further rules and emits a HIGH scan_timeout finding
+# rather than pinning a thread indefinitely on a pathological input (committee
+# M4). Generous by default so it only trips on genuinely adversarial content;
+# configurable via the `max_scan_seconds` key (0 or negative disables it).
+_DEFAULT_MAX_SCAN_SECONDS = 60.0
+
 
 @dataclass
 class SanitizerConfig:
@@ -97,6 +111,8 @@ class SanitizerConfig:
     # "fail" (default, fail-closed) | "scan-text" | "ignore" — see the constant
     # comment above. Governs only the "processed but empty" outcome.
     unprocessable_binary_policy: str = _DEFAULT_UNPROCESSABLE_BINARY_POLICY
+    max_scan_bytes: int = _DEFAULT_MAX_SCAN_BYTES
+    max_scan_seconds: float = _DEFAULT_MAX_SCAN_SECONDS
 
     def is_rule_enabled(self, rule_id: str) -> bool:
         """Return True if the rule is enabled (default: True for all rules)."""
@@ -178,6 +194,16 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
         # Unknown value → fail closed rather than trust a typo'd opt-out.
         policy_value = _DEFAULT_UNPROCESSABLE_BINARY_POLICY
 
+    max_scan_bytes = raw.get("max_scan_bytes", _DEFAULT_MAX_SCAN_BYTES)
+    if not isinstance(max_scan_bytes, int) or max_scan_bytes <= 0:
+        max_scan_bytes = _DEFAULT_MAX_SCAN_BYTES
+
+    max_scan_seconds = raw.get("max_scan_seconds", _DEFAULT_MAX_SCAN_SECONDS)
+    if not isinstance(max_scan_seconds, (int, float)) or isinstance(
+        max_scan_seconds, bool
+    ):
+        max_scan_seconds = _DEFAULT_MAX_SCAN_SECONDS
+
     return SanitizerConfig(
         sensitivity=sensitivity,
         rules=rules,
@@ -185,6 +211,8 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
         output=output,
         archive=archive,
         unprocessable_binary_policy=policy_value,
+        max_scan_bytes=max_scan_bytes,
+        max_scan_seconds=float(max_scan_seconds),
     )
 
 

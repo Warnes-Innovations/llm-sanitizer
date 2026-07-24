@@ -1,0 +1,99 @@
+{
+  "persona": "Security Engineer",
+  "model": "opus",
+  "repo": "llm-sanitizer",
+  "review_date": "2026-07-21",
+  "scope": "Threat model & attack surface, fail-closed design, credential/secret handling, SSRF/exfiltration in the URL reader, dependency & supply-chain security, control effectiveness. Verified against source under src/llm_sanitizer/ with targeted empirical tests (SSRF guard, XML entity expansion/XXE) and the full test suite (476 passed, 4 skipped, Python 3.13.6 / libexpat 2.6.3).",
+  "context_framing": "This is a defensive content scanner: it ingests attacker-controlled input (files, archives, URLs, web pages) and emits classified findings. It performs NO LLM calls and handles NO credentials of its own, so the persona's credential/Docker-env red flags are largely N/A. The dominant attack surface is (a) resource exhaustion / self-DoS on adversarial input and (b) SSRF via the URL reader. Both have substantial, mostly-effective controls already in place; findings below are residual gaps and defense-in-depth improvements, not missing baselines.",
+  "findings": [
+    {
+      "id": "SEC-1",
+      "title": "SSRF guard is resolve-then-validate, not connect-time-pinned (DNS-rebinding TOCTOU)",
+      "location": "src/llm_sanitizer/readers/url_reader.py:49-79 (_assert_safe_url), :104-135 (read_url)",
+      "severity": "MEDIUM",
+      "severity_condition": "Residual, already documented in-code (lines 52-57). Exploitation requires an attacker-controlled DNS name with a very short TTL returning a public A record on validation and a private/metadata record at connect time. Real but non-trivial; the common direct/redirect SSRF vectors ARE closed.",
+      "evidence": "_assert_safe_url() calls socket.getaddrinfo(host,...) and rejects the host if any resolved IP is private/loopback/link-local/reserved/multicast/unspecified. read_url() then does `with client.stream(\"GET\", current)` where httpx independently re-resolves the hostname. The IP validated at line 70 is NOT the IP connected at line 126 — two separate DNS lookups. The code documents this honestly: 'a determined DNS-rebinding attacker could in principle return a different IP at connect time (TOCTOU). Closing that fully requires pinning the validated IP for the connection.' Empirically verified the guard DOES block http://169.254.169.254, 127.0.0.1, localhost, [::1], 10.0.0.5, 192.168.1.1, 0.0.0.0, file://, gopher://, and decimal/octal/hex-encoded loopback (2130706433 / 0x7f000001 / 017700000001) — all BLOCKED. Redirect hops are re-validated (follow_redirects=False; _assert_safe_url called per hop at line 125).",
+      "impact": "A malicious page/email link scanned via scan_url/redact_url could, under DNS rebinding, cause the server to fetch a private/loopback/cloud-metadata endpoint (e.g. 169.254.169.254 IMDS), and the response body is returned into the scan pipeline — a potential read-side SSRF / metadata exfiltration channel.",
+      "fix": "Pin the validated address to the connection: resolve once in _assert_safe_url, then connect to that literal IP while sending the original Host header (and SNI) — e.g. a custom httpx transport / resolver map, or fetch via the pinned IP with `headers={'Host': host}`. Keep the existing per-hop re-validation (SEC control) intact and keep rejecting hosts that resolve to any blocked IP (fail-closed union). This does not regress the response-size cap or redirect guard.",
+      "effort": "medium"
+    },
+    {
+      "id": "SEC-2",
+      "title": "PyPI-publish workflow pins actions to mutable refs (branch/major-tag), not commit SHAs",
+      "location": ".github/workflows/publish.yml:29,32,38,55,61",
+      "severity": "MEDIUM",
+      "severity_condition": "Supply-chain integrity gap on the release pipeline that holds OIDC publish rights (id-token: write). Mitigated by `environment: pypi` (line 47-49), which can require approvals/branch protection, but the action refs themselves are mutable.",
+      "evidence": "The publish job uses `pypa/gh-action-pypi-publish@release/v1` (line 61) — a MUTABLE BRANCH ref — plus `actions/checkout@v6` (29), `astral-sh/setup-uv@v8.1.0` (32), `actions/upload-artifact@v7` (38), `actions/download-artifact@v8` (55) — floating major tags. A compromised upstream tag/branch (the XZ / tj-actions class of attack) would execute in a job with `id-token: write` and publish to PyPI. This is the supply-chain analog of the persona's 'floating image tags in Dockerfile' red flag. Positives verified: Trusted Publishing via OIDC (no long-lived PyPI token), and uv.lock is committed (475K, tracked) for reproducible installs.",
+      "impact": "A moved/compromised action ref could inject code into the build or the publish step and push a malicious llm-sanitizer release to PyPI — irreversible (a PyPI version is permanent even if yanked) and immediately consumed by downstream (flow-guard pins @main / a PyPI version).",
+      "fix": "Pin every action to a full 40-char commit SHA (with a comment noting the version), especially pypa/gh-action-pypi-publish. Optionally enable Dependabot for the actions ecosystem to bump the SHAs. Keep the `pypi` environment protection as the second layer (defense-in-depth). No functional regression.",
+      "effort": "low"
+    },
+    {
+      "id": "SEC-3",
+      "title": "Tier-2 office-document validation parses untrusted XML with stdlib ElementTree (not defusedxml); billion-laughs protection is delegated to the system libexpat version",
+      "location": "src/llm_sanitizer/readers/integrity_checks.py:35 (import), :237 (ElementTree.fromstring on zf.read(part))",
+      "severity": "LOW",
+      "severity_condition": "Defense-in-depth. On this environment (libexpat 2.6.3) the entity-amplification attack is blocked by expat itself and _validate_office catches the resulting ParseError → fails closed. The gap is that the SECURITY PROPERTY is owned by an external library's version, not by the code.",
+      "evidence": "integrity_checks.py:237 does `ElementTree.fromstring(zf.read(part))` on attacker-controlled OOXML/ODF parts. The part size is bounded (info.file_size <= max_bytes, line 230), but a billion-laughs payload is only a few KB and expands in-memory during parse, so that byte cap does not protect it. Empirically: (a) classic billion-laughs -> `ParseError: limit on input amplification factor ... breached` in 0.39s, peak RSS ~66MB — BLOCKED by libexpat 2.6.3, and _validate_office catches ElementTree.ParseError (line 238) returning a corrupt_file explanation (fail-closed). (b) External-entity XXE (`<!ENTITY xxe SYSTEM 'file://...'>`) -> `ParseError: undefined entity` — ElementTree does NOT resolve external entities, so XXE file-read/SSRF is NOT exploitable. The residual risk is a deployment on an OLDER libexpat (<2.4.0, e.g. some long-support distro Python builds) where the amplification guard is absent and the same input becomes a memory-exhaustion DoS.",
+      "impact": "On an older-libexpat host, a crafted .docx/.xlsx/.pptx/.odt part could exhaust memory during Tier-2 validation. Bounded to this one call site.",
+      "fix": "Use defusedxml (`from defusedxml.ElementTree import fromstring`) for the office-part parse, or explicitly set an expat amplification/entity limit, so the protection is owned by the code regardless of the system libexpat. defusedxml also forbids entity/DTD processing outright — belt-and-suspenders with the existing ParseError fail-closed handler. Adds a small pure-Python dependency; no behavioral regression on valid documents.",
+      "effort": "low"
+    },
+    {
+      "id": "SEC-4",
+      "title": "Nested-zip bomb inspector fully decompresses each candidate nested member into memory, contradicting its 'peek 4 bytes / without decompressing' comment",
+      "location": "src/llm_sanitizer/scanner.py:334-341 (comment says peek 4 bytes; line 341 `tmp.write(zf.read(i.filename))` reads the whole member)",
+      "severity": "LOW",
+      "severity_condition": "Bounded, not unbounded. The outer central-directory total_size check (scanner.py:315, `total_size > max_uncompressed -> return True`) runs before the loop, so each nested member read is capped at max_uncompressed (default 100MB). The concern is (a) the comment misstates behavior and (b) up to ~100MB is materialized per level for up to max_depth=3 levels during what is documented as a cheap directory-only scan.",
+      "evidence": "Lines 334-335 read only 4 bytes via `_entry.read(4)` (matching the comment), but line 341 then does `zf.read(i.filename)` — a full decompression of the member into memory, written to a temp file for recursive inspection. Bounding relies on declared central-directory sizes (i.file_size), which a crafted zip can under-report; however the same declared sizes gate every other check here, and Python's zipfile verifies CRC on read, limiting practical amplification. Fail-closed behavior on an unreadable nested entry IS correct and was deliberately fixed (scanner.py:353-361 returns True = 'treat as bomb' on OSError/RuntimeError, with a comment noting the prior fail-OPEN bug).",
+      "impact": "Modest transient memory use (up to max_uncompressed x nesting) during pre-extraction bomb screening of adversarial zip-of-zips; not a strong DoS given the existing caps.",
+      "fix": "Bound the nested read to the zip magic/header (stream a few KB) instead of `zf.read` of the full member for the magic re-check, and correct the comment to match. Do not lower max_uncompressed to 'fix' this — that would weaken the legitimate archive-member cap (interaction with iter_archive_members' max_total_bytes).",
+      "effort": "low"
+    },
+    {
+      "id": "SEC-5",
+      "title": "SARIF/JSON output embeds raw attacker-controlled matched excerpts (second-order injection surface for downstream consumers)",
+      "location": "src/llm_sanitizer/formatters/sarif_format.py:74 (`\"matched\": finding.matched[:200]`), also markdown/json formatters and redactor highlight mode (redactor.py:25)",
+      "severity": "LOW",
+      "severity_condition": "Inherent tension: a scanner MUST surface what it matched to be useful, so echoing the excerpt is by design. The risk is contextual — it only matters when the SARIF/report is committed to VCS or fed to another LLM agent (e.g. GitHub code-scanning triage), exactly the persona's 'SARIF files with malicious text committed to version control' red flag.",
+      "evidence": "sarif_format.py:74 emits the first 200 chars of the matched span verbatim into the SARIF artifact; the matched text is by definition attacker-controlled (that is what tripped a rule). If that SARIF is consumed by an LLM agent triaging findings, the embedded 'ignore previous instructions...' excerpt is now inside the agent's context — a second-order indirect-injection path the tool itself is meant to defend against.",
+      "impact": "A report/artifact produced by the scanner can carry live injection payloads to whatever (human or LLM) reads it. Truncation to 200 chars limits but does not neutralize this.",
+      "fix": "Consider a neutralized rendering of `matched` in machine-readable outputs meant for LLM consumption — e.g. escape/encode zero-width and control characters, wrap in an explicit 'UNTRUSTED SAMPLE' delimiter, or offer a redacted-excerpt mode. Document that SARIF/JSON output contains untrusted excerpts and should not be fed raw to an agent. No detection regression.",
+      "effort": "medium"
+    },
+    {
+      "id": "SEC-6",
+      "title": "URL fetch enforces a per-request timeout but no cumulative deadline across redirects",
+      "location": "src/llm_sanitizer/readers/url_reader.py:123 (timeout=30.0), :124 (loop of _MAX_REDIRECTS+1)",
+      "severity": "INFO",
+      "severity_condition": "Minor self-DoS / latency amplification. Bounded overall (max 6 hops x 30s), just larger than a single timeout implies.",
+      "evidence": "httpx.Client(timeout=30.0) applies per-request; the manual redirect loop runs up to _MAX_REDIRECTS+1 = 6 times, so a chain of slow-but-not-timing-out responders can hold a scan_url call up to ~180s. Response body is separately capped at 10 MiB (verified: Content-Length pre-check at :86-90 and streaming abort at :93-98).",
+      "impact": "A hostile redirect chain can tie up a worker longer than expected. Low impact for a local/CI scanner.",
+      "fix": "Track a cumulative wall-clock deadline across the redirect loop and abort when exceeded, in addition to the per-request timeout. No regression to the SSRF or size controls.",
+      "effort": "low"
+    }
+  ],
+  "red_flag_checklist": [
+    {"flag": "Secrets in environment variables without restriction (-e ANTHROPIC_API_KEY + skip-permissions)", "status": "N/A", "note": "The tool makes no LLM calls and handles no credentials of its own; there is no Docker packaging or env-var secret in this repo. Nothing to expose."},
+    {"flag": "Fail-open paths (scan error / missing key / tool failure -> proceed instead of block)", "status": "NOT FOUND", "note": "Consistently fail-closed and verified: unknown unprocessable_binary_policy value -> forced to 'fail' (config.py:185-187); processed-but-empty binary -> CRITICAL unscannable_binary (scanner.py:790-806); unreadable nested zip entry -> treated as bomb (scanner.py:353-361, a prior fail-OPEN explicitly fixed); oversized input -> CRITICAL input_too_large before reading (scanner.py:475-488, 749-758); integrity findings bypass the sensitivity filter so they can never be dropped (scanner.py:159-162, 522-525); missing archive backend for a present format -> fail-fast ExtractorUnavailableError, not silent skip (scanner.py:875-880)."},
+    {"flag": "Unverified field paths in hook commands (tool_response.content assumed present)", "status": "N/A", "note": "This repo is the scanner/MCP server; it defines no Claude Code hooks that parse tool_response fields."},
+    {"flag": "Hardcoded IP addresses in iptables/allowlist rules that can go stale", "status": "NOT FOUND", "note": "169.254.169.254 appears only as a DENY target in the SSRF blocklist (via is_link_local), which is correct and stable; there is no hardcoded ALLOW IP."},
+    {"flag": "Audit logs / artifacts that contain malicious finding excerpts", "status": "FOUND", "note": "See SEC-5: SARIF output embeds finding.matched[:200] verbatim. Inherent to a scanner but a real second-order concern when artifacts are committed or fed to an LLM."},
+    {"flag": "Human review steps described as optional or vague (no checklist = not a control)", "status": "N/A", "note": "Out of scope for this code review; the redaction/scan controls are automated, not human-in-the-loop."},
+    {"flag": "Missing authentication on internal services", "status": "N/A", "note": "No internal service/proxy is exposed; the MCP server runs over stdio."},
+    {"flag": "Floating image/action tags in build/release pipeline", "status": "FOUND", "note": "See SEC-2: publish.yml pins actions to a mutable branch ref (@release/v1) and floating major tags in a job with id-token: write PyPI publish rights."}
+  ],
+  "positives": [
+    "SSRF trust boundary is real and centralized: all web access routes through read_url; every hop (initial + each redirect) is re-validated via _assert_safe_url with follow_redirects=False. Empirically blocks metadata (169.254.169.254), loopback, private, IPv6 ::1, unspecified, and decimal/octal/hex-encoded loopback IPs, and non-http(s) schemes. (url_reader.py:31-79, 104-135)",
+    "Response body from untrusted endpoints is bounded to 10 MiB with BOTH a Content-Length pre-check and a streaming byte-count abort. (url_reader.py:82-101)",
+    "Archive-bomb defenses are layered and configurable: per-archive entry count, per-archive uncompressed size, compression-ratio guard with a min-size floor, nesting-depth cap, and cumulative-size cap across all nested levels — checked from the central directory without decompressing where possible, and fail-closed on unreadable nested entries. (scanner.py:244-364, config.py:67-79)",
+    "De-obfuscation re-scan is doubly bounded (depth AND cumulative-bytes work budget) via ContextVars (thread/async-safe), preventing O(branching**depth) fan-out from adversarial nested obfuscation. (rules/_rescan.py)",
+    "Fail-closed integrity findings are EXEMPT from the sensitivity min-risk filter, so an 'unscannable' signal can never be silently dropped at low sensitivity. (scanner.py:159-162)",
+    "input_too_large is enforced before content is read into memory (path.stat() pre-check) as well as on inline content. (scanner.py:475-488, 745-758)",
+    "Content-over-extension classification throughout (binary sniff, magic-byte archive/media detection, extension-vs-content mismatch -> CRITICAL type_mismatch) closes rename-based evasion in both directions, including appended-archive polyglots via tail-based zipfile.is_zipfile. (scanner.py:132-204, integrity_checks.py:84-156)",
+    "Redaction iterate-to-stable loop is bounded by max_passes=10 (no unbounded self-DoS). (redactor.py:135-172)",
+    "Supply chain: PyPI publish uses OIDC Trusted Publishing (no long-lived token) and uv.lock is committed for reproducible installs. markitdown pinned to a curated extras set, deliberately excluding markitdown[all] bloat. (publish.yml, pyproject.toml:35-60)",
+    "Full test suite green: 476 passed, 4 skipped (9.9s)."
+  ],
+  "summary": "llm-sanitizer has a mature, mostly-effective security posture for a tool whose entire job is ingesting hostile input: the SSRF guard, response cap, archive-bomb guards, re-scan work budget, fail-closed integrity findings, and content-over-extension classification are all present and verified working (476/476 tests pass; SSRF and XML-entity behavior confirmed empirically). It handles no credentials of its own and makes no LLM calls, so the classic credential/Docker-env red flags are N/A. The single most important issue is SEC-1: the URL reader validates DNS then lets httpx re-resolve at connect time, leaving a documented DNS-rebinding TOCTOU that a determined attacker could use to reach cloud-metadata/loopback despite the guard — it should be closed by pinning the validated IP to the connection. Secondary: SEC-2 (SHA-pin the PyPI-publish workflow's actions, which currently use a mutable @release/v1 ref while holding OIDC publish rights) and SEC-3 (parse untrusted office XML with defusedxml so billion-laughs protection is owned by the code, not the host's libexpat version — currently mitigated only because libexpat 2.6.3 happens to block it). No fail-open paths were found in the scanning core."
+}

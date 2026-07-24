@@ -1,0 +1,110 @@
+{
+  "persona": "Performance & Reliability Engineer",
+  "model": "opus-4.8",
+  "repo": "llm-sanitizer",
+  "branch": "devel",
+  "date": "2026-07-21",
+  "environment": {
+    "python": "3.13.6 (.venv)",
+    "platform": "darwin 25.5.0 x86_64",
+    "measurement_note": "Timings from throwaway scripts in tmp/; cProfile figures include profiler overhead and read high. Wall-clock timings are without the profiler."
+  },
+  "summary": "The scanner has strong, well-reasoned fail-closed bounds on the paths the design docs emphasize: the 25 MB max_scan_bytes gate rejects oversized units in 0.19 ms before any work (verified); the 4 MiB / depth-3 re-scan budget tames the base64 de-obfuscation fan-out that previously self-DoSed (verified: a 21 MB fan-out now completes in 31 s with findings capped, not the prior ~92 s explosion); archive-bomb guards read the central directory without decompressing; regexes scale linearly under adversarial input (no ReDoS); memory is stable across 2000 scans (1.5 KiB net); startup is ~40 ms. The one serious defect is a genuine O(n^2) blowup in the hidden_content color/opacity analysis on a single large line, which the re-scan budget does NOT cover because it is plain regex work, only bounded by the 25 MB line cap. Secondary issues: no per-scan/per-rule timeout (the 25 MB cap x ~0.5 MB/s throughput permits ~50 s of CPU pinning per unit), a hot per-character Python loop in homoglyph that costs ~45% of benign scan time, and no resource observability.",
+  "most_important_issue": "PERF-1",
+  "findings": [
+    {
+      "id": "PERF-1",
+      "title": "O(n^2) blowup in hidden_content color/opacity analysis on a single large (minified) line",
+      "severity": "high",
+      "location": "src/llm_sanitizer/rules/hidden_content.py:265 (_rule_block_text call), :266 (_BACKGROUND_DECL_RE.search per color match) inside _classify_text_color; also the opacity loop at :366-373 which re-runs _rule_block_text per opacity match; _rule_block_text at :210-247; color loop at :360-364",
+      "epistemic_status": "verified (measured)",
+      "measured_evidence": {
+        "direct_rule_detect_color_white": "n=100->50ms, 200->83ms, 400->299ms, 800->1077ms, 1600->4229ms (approx 4x per 2x n = quadratic); line is only 19 KB at n=1600",
+        "scanner_full_path_color_white": "Scanner.scan(): n=400->365ms, 800->1108ms, 1600->4090ms (reproduces the quadratic through the real entry point, not just direct rule calls)",
+        "isolation_block_search_only": "color:blue with a non-matching background at the END of the block (search scans full line every match, classify returns None so NO emit and NO recursion): n=400->50ms, 800->193ms, 1600->866ms, 3200->3236ms => the quadratic is the per-match full-line background search itself, independent of the concealed_rules recursion",
+        "cProfile_n800": "3200 re.Pattern.search calls = 0.810 s of 1.05 s total; emit path dominant",
+        "extrapolation": "quadratic fit from 3236ms@35KB => a 1 MB single-line minified CSS/HTML (~90k color decls) ~= 42 min; a 25 MB unit (max_scan_bytes) is effectively an unbounded hang"
+      },
+      "impact": "A single untrusted, completely ordinary-shaped input (minified/one-line HTML or CSS that declares many `color:` or `opacity:` values with no `background`/`fill` in the same block) pins one CPU core for minutes to hours. This is exactly the content class the scanner ingests (scan_file up to 25 MB; scan_url capped lower at 10 MB but still ~minutes). In a long-lived MCP server this is a single-request denial of service, and redact() (scan-then-redact, possibly multiple passes) compounds it. Critically, the 4 MiB re-scan budget does NOT protect this path: _rule_block_text and _BACKGROUND_DECL_RE.search are ordinary regex work, not scan_deobfuscated, so only max_scan_bytes (25 MB per line) bounds it, and 25 MB is far too large for an n^2 loop.",
+      "root_cause": "For every `color:` match, _classify_text_color calls _rule_block_text(lines, line_idx) and then _BACKGROUND_DECL_RE.search(block). On single-line input _rule_block_text returns the entire line, and when no background/fill is declared the search fails only after scanning the whole line (O(line)). With O(line) color matches on that line, total cost is O(line^2). The concealed_rules recursion (depth 3) adds a constant multiplier but is not the fundamental cause.",
+      "fix": "Memoize the block lookup and its background result per rule-block instead of recomputing per match. Concretely: have _rule_block_text return (block_text, start_idx, end_idx) or cache by line_idx; compute _BACKGROUND_DECL_RE.search(block) ONCE per distinct block and reuse the parsed background across all color/opacity matches whose line falls in that block. On single-line input every match shares one block => O(n) total. This is an independent dedup/caching fix; it does NOT touch and MUST NOT raise the 4 MiB re-scan budget (raising that reopens the decoded-fan-out self-DoS). Add a regression test: a 1 MB single line of `color:white;` must scan in well under a second.",
+      "budget_crosscheck": "Independent of the 4 MiB cumulative re-scan budget; the fix is pure memoization within the rule and preserves the budget unchanged."
+    },
+    {
+      "id": "PERF-2",
+      "title": "No per-scan or per-rule timeout / circuit breaker; 25 MB cap x ~0.5 MB/s throughput permits ~50 s CPU-pinning per unit",
+      "severity": "medium",
+      "location": "src/llm_sanitizer/scanner.py:455 scan() and :735 _scan_plain (no deadline anywhere); src/llm_sanitizer/config.py:94 _DEFAULT_MAX_SCAN_BYTES = 25*1024*1024",
+      "epistemic_status": "verified (measured throughput; absence of timeout verified by code read)",
+      "measured_evidence": {
+        "benign_multiline_throughput": "1 MB->2.36 s, 5 MB->10.85 s, 20 MB->43.45 s (linear, ~0.5 MB/s)",
+        "base64_heavy": "21 MB of innocuous base64 blobs -> 31.4 s (bounded by budget, findings capped at 0, no O(branching^depth) explosion)",
+        "projection": "25 MB unit at 0.5 MB/s ~= 50 s single-threaded, with no wall-clock timeout to interrupt it"
+      },
+      "impact": "In an MCP server a single large-but-benign unit blocks a worker for ~50 s (head-of-line blocking / tail latency). Archive expansion multiplies this across up to 1000 members x nesting depth 3. The only backstop is the size cap; there is no time backstop and no per-rule circuit breaker, so a single pathological rule (e.g. PERF-1) or a slow optional backend cannot be skipped.",
+      "fix": "Add an optional wall-clock deadline per content unit (scan of a file/member/inline) that fail-closes with an integrity finding (a new `scan_timeout` id, exempt from the sensitivity filter like the other integrity findings) rather than pinning a core. Consider lowering the default max_scan_bytes, or deriving it from measured throughput so the worst-case time is bounded to a target (e.g. a few seconds). Fixing PERF-1 and PERF-3 also shrinks this window. Do NOT raise the 4 MiB re-scan budget as part of this.",
+      "budget_crosscheck": "A timeout is orthogonal to the re-scan byte budget; it caps wall-clock, not re-scanned bytes. No change to the 4 MiB ceiling."
+    },
+    {
+      "id": "PERF-3",
+      "title": "Homoglyph per-character Python genexprs dominate benign scan time (~45%)",
+      "severity": "low",
+      "location": "src/llm_sanitizer/rules/homoglyph.py:70 _normalize_homoglyphs (genexpr + str.join over whole content), :76 _has_non_ascii_letter (per-char genexpr), invoked at :107, :111, :142-152 (Signal 2 normalizes the entire content and re-scans it twice)",
+      "epistemic_status": "verified (cProfile attribution)",
+      "measured_evidence": {
+        "cProfile_benign_1MB": "homoglyph.py:76 <genexpr> 0.649 s + homoglyph.py:70 <genexpr> 0.459 s = ~1.1 s of ~2.4 s wall-clock; accompanied by 1.05M isalpha, 814k ord, 1.05M dict.get calls",
+        "note": "profile total 3.96 s includes profiler overhead; wall-clock for the same 1 MB scan is ~2.36 s"
+      },
+      "impact": "Homoglyph's whole-content per-character Python loop is the single largest contributor to linear scan cost, so it directly sets the ~0.5 MB/s throughput that makes PERF-2's window large. Pure performance; no correctness effect.",
+      "fix": "Replace _normalize_homoglyphs with str.translate over a precomputed {ord(src): repl} table (C-level, ~10-20x faster than genexpr+join). Short-circuit _has_non_ascii_letter with `if text.isascii(): return False` before the per-char scan, and gate the Signal-2 whole-content normalize+re-scan on `not content.isascii()` (the vast majority of inputs are ASCII and never need it). Behavior-preserving. Raises throughput and shrinks PERF-2.",
+      "budget_crosscheck": "No interaction with the re-scan budget."
+    },
+    {
+      "id": "PERF-4",
+      "title": "No observability for resource-intensive operations",
+      "severity": "low",
+      "location": "whole package (scanner.py, rules/*, readers/*) — no logging/metrics module present",
+      "epistemic_status": "verified (code read: no logging import / metrics in scanner or rules)",
+      "measured_evidence": "grep of the package finds no per-unit timing, size, slow-rule, budget-exhaustion, or cap-hit logging; integrity findings surface caps to the RESULT but not to operator logs/metrics.",
+      "impact": "An operator running the MCP server cannot see which file or rule caused a latency spike, that a scan hit max_scan_bytes / the archive caps / the 4 MiB re-scan budget, or that a unit is running long. Diagnosing a PERF-1/PERF-2 incident in production is blind.",
+      "fix": "Emit structured debug logs for: unit size on entry, per-rule elapsed time when it exceeds a threshold, re-scan budget exhaustion (currently a silent `return []` in _rescan.py:90-92), archive cap hits, and extraction failures. Expose optional counters/timing hooks (scan time, bytes, rules triggered, budget-exhausted count) for metrics scraping."
+    }
+  ],
+  "red_flags": [
+    {
+      "flag": "Unbounded archive extraction (zip-bomb / 1M nested entries never caught by a size limit)",
+      "status": "NOT FOUND",
+      "evidence": "verified by code read: _is_archive_bomb (scanner.py:269) inspects the central directory WITHOUT decompressing and enforces max_entries=1000, max_uncompressed=100MB, compression ratio>100 (above a 10MB floor), nesting depth<=3, cumulative<=500MB; unreadable nested entries fail CLOSED (return True) at scanner.py:353-361; iter_archive_members (archive_reader.py) re-enforces entry-count and cumulative-byte caps during extraction and raises ArchiveError (=> CRITICAL corrupt_file). Not independently load-tested with a crafted bomb in this pass (inferred safe from the guards)."
+    },
+    {
+      "flag": "Regex ReDoS (exponential backtracking on adversarial input)",
+      "status": "NOT FOUND",
+      "evidence": "verified by measurement: adversarial near-miss inputs scale LINEARLY across all 18 data_exfil and all role_play patterns (200 KB filler -> 120 ms for the full exfil set; 100 KB -> ~53 ms). Pattern review shows no nested unbounded quantifier over overlapping classes; bounded lazy spans ([^.\\n]{0,60}?) and \\s+ with non-overlapping alternations. Rules run per-LINE, further limiting scope (though a single minified line can be up to 25 MB)."
+    },
+    {
+      "flag": "Re-scan loop explosion (nested base64/obfuscation infinite loop or unbounded fan-out)",
+      "status": "NOT FOUND",
+      "evidence": "verified: _rescan.py enforces _MAX_DEOBFUSCATION_DEPTH=3 AND a 4 MiB cumulative-bytes budget via ContextVars. Measured base64 fan-out is bounded (21 MB -> 31 s, findings capped, no O(branching^depth) blowup vs. the prior ~92 s self-DoS); nested single-chain base64 resolves fast (depth 1-3 detects the buried injection in <5 ms; depth 5 returns clean by the depth cap = a coverage trade-off, not a perf issue). NOTE: the SEPARATE hidden_content quadratic (PERF-1) is a re-scan-budget-INDEPENDENT blowup and is the real reliability gap."
+    },
+    {
+      "flag": "No timeout on file processing (adversarial file pins a scanner thread indefinitely)",
+      "status": "FOUND",
+      "evidence": "PERF-2: no wall-clock timeout exists anywhere. Bounded only by max_scan_bytes(25MB) x throughput(~0.5MB/s) ~= 50 s per unit in the benign case, and effectively unbounded via PERF-1 on a crafted minified line."
+    },
+    {
+      "flag": "Memory not released between scans (MCP server memory climbs per request)",
+      "status": "NOT FOUND",
+      "evidence": "verified by measurement: tracemalloc net delta after 2000 scans = 1.5 KiB (noise). Scanner holds only stateless rule instances; findings are returned, not retained; re-scan ContextVars reset per scan."
+    },
+    {
+      "flag": "No per-rule timeout / circuit-breaker to skip a pathologically slow rule",
+      "status": "FOUND",
+      "evidence": "PERF-2: rules run to completion with no per-rule deadline. hidden_content (PERF-1) is precisely the pathologically slow rule that a circuit breaker would contain; there is none."
+    },
+    {
+      "flag": "Startup time > 1s (per-invocation Python/dependency load cost)",
+      "status": "NOT FOUND",
+      "evidence": "verified by measurement: `import llm_sanitizer` ~40 ms; first `from llm_sanitizer.scanner import Scanner` ~143 ms (includes filetype); Scanner() ~13 ms; first scan ~1.7 ms. Well under 1 s; and the MCP server pays this once, not per request."
+    }
+  ]
+}

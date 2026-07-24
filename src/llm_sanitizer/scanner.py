@@ -8,8 +8,11 @@ from __future__ import annotations
 import fnmatch
 import os
 import tempfile
+import time
 import zipfile
 from pathlib import Path
+
+import filetype
 
 from llm_sanitizer.config import ArchiveSettings, SanitizerConfig, load_config
 from llm_sanitizer.models import (
@@ -32,11 +35,20 @@ from llm_sanitizer.readers.integrity_checks import (
     validate_structure,
 )
 from llm_sanitizer.rules import BaseRule, get_all_rules, is_legitimate_file
+from llm_sanitizer.rules._rescan import (
+    reset_rescan_budget,
+    rescan_budget_exhausted,
+    set_scan_deadline,
+)
 from llm_sanitizer.rules.integrity import (
     ARCHIVE_UNSUPPORTED,
     CORRUPT_FILE,
+    INPUT_TOO_LARGE,
+    RESCAN_INCOMPLETE,
+    SCAN_TIMEOUT,
     TYPE_MISMATCH,
     UNSCANNABLE_BINARY,
+    UNSCANNABLE_MEDIA,
     make_integrity_finding,
 )
 
@@ -130,6 +142,101 @@ def _is_binary(path: Path) -> bool:
             return b"\0" in fh.read(_BINARY_SNIFF_BYTES)
     except OSError:
         return False
+
+
+def _recognized_media_kind(path: Path) -> str | None:
+    """Return 'image'/'audio'/'video' if *path*'s MAGIC BYTES identify it as
+    recognized media, else None. Content is the source of truth — the extension
+    is never consulted (a disguised payload can't dodge this by renaming)."""
+    try:
+        kind = filetype.guess(str(path))
+    except (OSError, TypeError, ValueError):
+        return None
+    if kind is None:
+        return None
+    top = kind.mime.split("/", 1)[0]
+    return top if top in ("image", "audio", "video") else None
+
+
+# Integrity findings are structural "we could not safely scan this file"
+# signals. They must ALWAYS surface (fail-closed) and are therefore EXEMPT from
+# the sensitivity min-risk filter — otherwise a MEDIUM unscannable_media would
+# be dropped entirely at sensitivity="low" (min_risk=high) and the file would
+# pass silently, defeating the whole point of the finding.
+_INTEGRITY_RULE_IDS: frozenset[str] = frozenset(
+    {TYPE_MISMATCH, CORRUPT_FILE, UNSCANNABLE_BINARY, UNSCANNABLE_MEDIA,
+     ARCHIVE_UNSUPPORTED, INPUT_TOO_LARGE, RESCAN_INCOMPLETE, SCAN_TIMEOUT}
+)
+
+
+def _has_appended_archive(path: Path) -> bool:
+    """True if *path* is ALSO a valid archive — e.g. a media file with a zip
+    concatenated onto its tail (a polyglot). ``zipfile.is_zipfile`` reads the
+    end-of-central-directory record from the file's TAIL, so it catches an
+    appended zip that the head-based archive router (which sniffs the leading
+    magic bytes) never sees."""
+    try:
+        return zipfile.is_zipfile(path)
+    except (OSError, zipfile.BadZipFile):
+        return False
+
+
+def _unscannable_finding(path: Path, source: str, reason: str) -> Finding:
+    """Build the right unscannable finding for *path*. Recognized media is a
+    MEDIUM ``unscannable_media`` (no text to inject; the danger is *executing*
+    it, flagged by the code auditor). A media header with an APPENDED archive is
+    a polyglot — its hidden payload was never expanded — and anything else is a
+    wholly-unknown binary; both are CRITICAL ``unscannable_binary`` (fail
+    closed). This is only called on the clean "no extractable text" path; a
+    file that CRASHES the extractor is CRITICAL unconditionally at the call
+    site (a crash is the corrupt-file danger signal, not benign media)."""
+    kind = _recognized_media_kind(path)
+    if kind is not None and _has_appended_archive(path):
+        return make_integrity_finding(
+            UNSCANNABLE_BINARY,
+            source,
+            f"{reason} Despite a {kind}-media magic header the file is ALSO a "
+            "valid archive (polyglot); its appended archive was not expanded "
+            "and cannot be vouched for — fail closed.",
+        )
+    if kind is not None:
+        return make_integrity_finding(
+            UNSCANNABLE_MEDIA,
+            source,
+            f"Recognized {kind} media by magic bytes; {reason} Embedded metadata "
+            "text was scanned and is clean, so this is MEDIUM (verify) — code "
+            "that EXECUTES a media file is flagged separately by the code "
+            "auditor.",
+        )
+    return make_integrity_finding(UNSCANNABLE_BINARY, source, reason)
+
+
+def _extract_printable_strings(
+    path: Path, min_run: int = 6, max_bytes: int = 1024 * 1024
+) -> str:
+    """Extract runs of printable text embedded in a binary. Media metadata —
+    PNG ``tEXt``/``iTXt``, EXIF, XMP — is stored as literal text, so injection
+    hidden there is invisible to markitdown (which yields no *document* text)
+    but recoverable this way. Reads a bounded prefix and joins runs of
+    ``>= min_run`` printable ASCII chars; compressed pixel/audio data does not
+    form long printable runs, so this surfaces injected metadata without the
+    false positives of scanning raw compressed bytes as text."""
+    try:
+        data = path.read_bytes()[:max_bytes]
+    except OSError:
+        return ""
+    runs: list[str] = []
+    cur = bytearray()
+    for b in data:
+        if 32 <= b < 127 or b in (9, 10, 13):
+            cur.append(b)
+        else:
+            if len(cur) >= min_run:
+                runs.append(cur.decode("ascii", "replace"))
+            cur.clear()
+    if len(cur) >= min_run:
+        runs.append(cur.decode("ascii", "replace"))
+    return "\n".join(runs)
 
 
 # markitdown's ZipConverter extracts every entry of a .zip (recursively, for
@@ -251,9 +358,14 @@ def _is_archive_bomb(
                             finally:
                                 Path(tmp_path).unlink(missing_ok=True)
                     except (OSError, RuntimeError):
-                        # If we can't read/decompress the nested entry, treat
-                        # as potential bomb (fail-open for safety).
-                        continue
+                        # If we can't read/decompress the nested entry, treat it
+                        # as a potential bomb and FAIL CLOSED — return True so
+                        # the caller skips extraction. (Previously this
+                        # `continue`d and the function fell through to
+                        # `return False` = "not a bomb, extract" — a fail-OPEN
+                        # bug that let a crafted unreadable nested entry bypass
+                        # the guard.)
+                        return True
     except (OSError, zipfile.BadZipFile):
         return False
     return False
@@ -360,8 +472,35 @@ class Scanner:
             source: Source path/URL for context and legitimate-file classification.
             sensitivity: "low" | "medium" | "high"
         """
-        min_risk = _SENSITIVITY_RISK_MAP.get(sensitivity, RiskLevel.medium)
+        # M6: validate at the boundary instead of silently coercing an unknown
+        # value to "medium" and echoing the invalid value back in the result
+        # (which asserted a setting that was never applied).
+        if sensitivity not in _SENSITIVITY_RISK_MAP:
+            raise ValueError(
+                f"invalid sensitivity {sensitivity!r}; expected one of "
+                f"{', '.join(sorted(_SENSITIVITY_RISK_MAP))}"
+            )
+        min_risk = _SENSITIVITY_RISK_MAP[sensitivity]
         findings: list[Finding] = []
+
+        # Refuse oversized content (fail-closed). Scanning it would pin CPU (the
+        # ruleset, incl. the recursive de-obfuscation re-scan, is roughly linear
+        # in size), and an untrusted unit we cannot afford to scan must be
+        # surfaced, not silently allowed through.
+        if len(content) > self._config.max_scan_bytes:
+            return self._result_from_findings(
+                source,
+                sensitivity,
+                [
+                    make_integrity_finding(
+                        INPUT_TOO_LARGE,
+                        source,
+                        f"content is {len(content):,} bytes, over the "
+                        f"{self._config.max_scan_bytes:,}-byte max_scan_bytes "
+                        "limit; not scanned.",
+                    )
+                ],
+            )
 
         # Check if this is a legitimate file and add an info-level finding if so
         if is_legitimate_file(source):
@@ -382,17 +521,83 @@ class Scanner:
                 )
             )
 
-        # Run all enabled rules
+        # Run all enabled rules. Reset the de-obfuscation re-scan budget once
+        # here so every rule (and every nested re-scan they trigger) shares one
+        # bounded work allowance for this content unit (see _rescan).
+        reset_rescan_budget()
         finding_id = len(findings) + 1
-        for rule in self._rules:
-            rule_findings = rule.detect(content, source)
-            for f in rule_findings:
-                # Re-number finding IDs sequentially across all rules
-                findings.append(f.model_copy(update={"id": finding_id}))
-                finding_id += 1
+        # M4: bound total wall-clock per content unit. The deadline is checked
+        # between rules AND, via set_scan_deadline, INSIDE the long per-match
+        # loops of heavy rules (hidden_content/char_split/base64) which each run
+        # in one otherwise-uninterruptible detect() call. 0/negative disables.
+        deadline = (
+            time.monotonic() + self._config.max_scan_seconds
+            if self._config.max_scan_seconds > 0
+            else None
+        )
+        set_scan_deadline(deadline)
+        timed_out = False
+        try:
+            for rule in self._rules:
+                if deadline is not None and time.monotonic() > deadline:
+                    timed_out = True
+                    break
+                rule_findings = rule.detect(content, source)
+                for f in rule_findings:
+                    # Re-number finding IDs sequentially across all rules
+                    findings.append(f.model_copy(update={"id": finding_id}))
+                    finding_id += 1
+                # A rule may have self-interrupted on the deadline mid-loop.
+                if deadline is not None and time.monotonic() > deadline:
+                    timed_out = True
+                    break
+        finally:
+            set_scan_deadline(None)
 
-        # Filter by sensitivity threshold
-        filtered = [f for f in findings if f.risk >= min_risk]
+        # M2/M4: report each incompleteness independently — a scan can both hit
+        # the deadline AND exhaust the re-scan budget, and previously the timeout
+        # branch masked the budget-exhaustion finding.
+        if timed_out:
+            findings.append(
+                make_integrity_finding(
+                    SCAN_TIMEOUT,
+                    source,
+                    f"scanning exceeded the {self._config.max_scan_seconds:g}s "
+                    "time limit and stopped early; this unit was only partially "
+                    "scanned. Treat as potentially unscanned.",
+                    finding_id=finding_id,
+                )
+            )
+            finding_id += 1
+        if rescan_budget_exhausted():
+            # M2: some obfuscated content could not be fully re-scanned within
+            # the de-obfuscation work budget, so a hidden injection may have been
+            # missed. Surface it rather than reporting a silent all-clear.
+            findings.append(
+                make_integrity_finding(
+                    RESCAN_INCOMPLETE,
+                    source,
+                    "the de-obfuscation re-scan budget was exhausted; some "
+                    "obfuscated content was not fully re-scanned and a hidden "
+                    "injection may have been missed.",
+                    finding_id=finding_id,
+                )
+            )
+            finding_id += 1
+
+        # Filter by sensitivity threshold. M7: honor a per-rule `sensitivity`
+        # override from config (previously dead — the documented key had no
+        # effect); a rule without an override uses the scan's global sensitivity.
+        def _min_risk_for(rule_id: str) -> RiskLevel:
+            rule_cfg = self._config.rules.get(rule_id)
+            if rule_cfg is not None and rule_cfg.sensitivity:
+                return _SENSITIVITY_RISK_MAP.get(rule_cfg.sensitivity, min_risk)
+            return min_risk
+
+        filtered = [
+            f for f in findings
+            if f.risk >= _min_risk_for(f.rule) or f.rule in _INTEGRITY_RULE_IDS
+        ]
 
         # Re-number after filtering
         for i, f in enumerate(filtered, start=1):
@@ -528,7 +733,20 @@ class Scanner:
 
         # --- Bomb guard (same defense as the pre-extract zip-bomb check) --
         if _is_archive_bomb(path, depth=depth, settings=settings):
-            return []  # silently skipped, matching the existing bomb defense
+            # Fail closed AND loud: an archive that trips the bomb guard (over a
+            # depth/size/ratio budget, or undecompressable) is not expanded, but
+            # we surface a CRITICAL integrity finding rather than returning []
+            # — which a caller would read as "scanned clean". Integrity findings
+            # bypass the sensitivity filter (see _INTEGRITY_RULE_IDS).
+            return [
+                make_integrity_finding(
+                    CORRUPT_FILE,
+                    source,
+                    f"Archive '{magic}' tripped the archive-bomb guard (exceeds a "
+                    "depth/size/ratio budget, or could not be decompressed). "
+                    "Not expanded.",
+                )
+            ]
 
         # --- Format disabled by configuration ----------------------------
         if magic not in settings.formats:
@@ -543,7 +761,18 @@ class Scanner:
 
         # --- Too deeply nested → bomb guard ------------------------------
         if depth >= settings.max_depth:
-            return []  # silently stop recursing, matching the bomb defense
+            # Same fail-closed-and-loud principle: an archive nested at or beyond
+            # the configured max depth is not expanded, and we say so with a
+            # CRITICAL finding instead of silently returning [].
+            return [
+                make_integrity_finding(
+                    CORRUPT_FILE,
+                    source,
+                    f"Archive nesting reached the configured maximum depth "
+                    f"({settings.max_depth}); this member is not expanded "
+                    "(bomb guard).",
+                )
+            ]
 
         # --- Expand and recursively scan members -------------------------
         return self._extract_and_scan(
@@ -586,6 +815,23 @@ class Scanner:
         CRITICAL unscannable_binary finding for a failed/empty extraction.
 
         Lets ExtractorUnavailableError propagate (fail fast) — never caught."""
+        # Refuse oversized files by their on-disk size BEFORE reading, so a huge
+        # file is never loaded into memory. Fail-closed with an integrity finding.
+        try:
+            size = path.stat().st_size
+        except OSError:
+            size = None  # missing/unreadable — let the read below raise as before
+        if size is not None and size > self._config.max_scan_bytes:
+            return [
+                make_integrity_finding(
+                    INPUT_TOO_LARGE,
+                    source,
+                    f"file is {size:,} bytes, over the "
+                    f"{self._config.max_scan_bytes:,}-byte max_scan_bytes limit; "
+                    "not scanned.",
+                )
+            ]
+
         # Text content is always scanned as text, regardless of binary_mode.
         # An OSError here (e.g. a missing file) propagates: directory scans
         # catch it per-file (skip), and the CLI/MCP surface it as an error —
@@ -605,12 +851,15 @@ class Scanner:
         try:
             text = _extract_binary_text(path)
         except _ExtractionFailedError as exc:
-            # markitdown ran but failed on this file → fail closed.
+            # A file that CRASHES the extractor is treated as corrupt →
+            # unconditionally CRITICAL. A crash is a danger signal (the
+            # corrupt_file philosophy), NOT benign media; the media downgrade
+            # applies only to the clean "no extractable text" path below.
             return [
                 make_integrity_finding(
                     UNSCANNABLE_BINARY,
                     source,
-                    f"Binary extraction failed (corrupt or unreadable): {exc}",
+                    f"binary extraction failed (corrupt or unreadable): {exc}",
                 )
             ]
         if not text.strip():
@@ -621,16 +870,40 @@ class Scanner:
             if policy == "scan-text":
                 raw = path.read_text(encoding="utf-8", errors="replace")
                 return self.scan(raw, source=source, sensitivity=sensitivity).findings
-            # "fail" (default) — fail closed.
-            return [
-                make_integrity_finding(
-                    UNSCANNABLE_BINARY,
-                    source,
-                    "Binary was processed but yielded no extractable text; it "
-                    "cannot be scanned (unprocessable_binary_policy='fail').",
-                )
-            ]
+            # "fail" (default) — fail closed. Recognized media downgrades to
+            # MEDIUM only if its embedded metadata text is also clean.
+            return self._media_or_unscannable(
+                path,
+                source,
+                sensitivity,
+                "processed but yielded no extractable text; it cannot be "
+                "scanned (unprocessable_binary_policy='fail').",
+            )
         return self.scan(text, source=source, sensitivity=sensitivity).findings
+
+    def _media_or_unscannable(
+        self, path: Path, source: str, sensitivity: str, reason: str
+    ) -> list[Finding]:
+        """Decide the finding for a binary that yielded no document text under
+        the fail-closed policy. Recognized media (clean magic, no appended
+        archive) is downgraded to MEDIUM ``unscannable_media`` ONLY if its
+        embedded metadata text is also clean — a tEXt/EXIF/XMP chunk carrying
+        an injection surfaces at its own (high/critical) risk instead. Polyglots
+        and wholly-unknown binaries stay CRITICAL (via _unscannable_finding)."""
+        kind = _recognized_media_kind(path)
+        if kind is not None and not _has_appended_archive(path):
+            meta = _extract_printable_strings(path)
+            if meta:
+                found = [
+                    f
+                    for f in self.scan(
+                        meta, source=source, sensitivity=sensitivity
+                    ).findings
+                    if f.rule != "agent_config"  # drop the legit-file info note
+                ]
+                if found:
+                    return found
+        return [_unscannable_finding(path, source, reason)]
 
     def _extract_and_scan(
         self,
@@ -689,8 +962,20 @@ class Scanner:
         """Build a ScanResult from pre-computed findings (from archive
         expansion), applying the sensitivity threshold and re-numbering IDs the
         same way :meth:`scan` does."""
-        min_risk = _SENSITIVITY_RISK_MAP.get(sensitivity, RiskLevel.medium)
-        filtered = [f for f in findings if f.risk >= min_risk]
+        # M6 (MED-1): validate here too — this is the scan_file/scan_dir/archive
+        # path, which does not go through scan()'s guard. Without this an invalid
+        # sensitivity silently coerced to medium and was echoed back on the file
+        # path (the exact bug scan() now rejects).
+        if sensitivity not in _SENSITIVITY_RISK_MAP:
+            raise ValueError(
+                f"invalid sensitivity {sensitivity!r}; expected one of "
+                f"{', '.join(sorted(_SENSITIVITY_RISK_MAP))}"
+            )
+        min_risk = _SENSITIVITY_RISK_MAP[sensitivity]
+        filtered = [
+            f for f in findings
+            if f.risk >= min_risk or f.rule in _INTEGRITY_RULE_IDS
+        ]
         renumbered = [
             f.model_copy(update={"id": i}) for i, f in enumerate(filtered, start=1)
         ]
@@ -715,6 +1000,14 @@ class Scanner:
         Recognized archives are expanded and their members scanned recursively
         (see scan_file).
         """
+        # M6/MED-1: validate up front so an EMPTY or all-skipped directory (which
+        # scans no files and so never reaches scan_file's guard) still rejects an
+        # invalid sensitivity instead of echoing it back.
+        if sensitivity not in _SENSITIVITY_RISK_MAP:
+            raise ValueError(
+                f"invalid sensitivity {sensitivity!r}; expected one of "
+                f"{', '.join(sorted(_SENSITIVITY_RISK_MAP))}"
+            )
         root = Path(path)
         results: list[ScanResult] = []
         files_skipped_binary = 0
@@ -734,18 +1027,16 @@ class Scanner:
             results.append(result)
 
         all_findings = [f for r in results for f in r.findings]
-        max_risk: RiskLevel | None = None
-        for f in all_findings:
-            if max_risk is None or f.risk > max_risk:
-                max_risk = f.risk
+        summary = _build_summary(all_findings)
 
         return DirScanResult(
             source=path,
             sensitivity=sensitivity,
             files_scanned=len(results),
             files_skipped_binary=files_skipped_binary,
-            total_findings=len(all_findings),
-            max_risk=max_risk,
+            summary=summary,
+            total_findings=summary.total_findings,
+            max_risk=summary.max_risk,
             results=results,
         )
 

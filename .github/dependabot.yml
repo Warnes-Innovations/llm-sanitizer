@@ -1,0 +1,26 @@
+# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Dependabot keeps dependencies and CI actions patched (committee CR-2 / SEC-2).
+# The security ecosystem for our parsing dependencies (pypdf, markitdown's tree)
+# has a high CVE velocity, so we track them weekly rather than relying on manual
+# review.
+version: 2
+updates:
+  # Python runtime + dev dependencies (pyproject.toml / uv.lock).
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 10
+    groups:
+      python-dependencies:
+        patterns:
+          - "*"
+
+  # GitHub Actions used by the workflows — surfaces new versions and, together
+  # with SHA-pinning, flags when a pinned action should move.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
