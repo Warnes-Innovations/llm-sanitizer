@@ -40,13 +40,6 @@ _FRONTMATTER_PATTERN = re.compile(
     re.DOTALL | re.MULTILINE,
 )
 
-# Agent-specific config file patterns in unexpected locations
-_AGENT_CONFIG_FILENAME_PATTERN = re.compile(
-    r'(?:\.cursorrules|\.clinerules|\.windsurfrules|codex\.md|'
-    r'AGENTS\.md|CLAUDE\.md|\.copilot-codegeneration-instructions\.md)',
-    re.IGNORECASE,
-)
-
 _AGENT_CONFIG_KEYS_IN_FRONTMATTER = re.compile(
     r'(?:^|\n)\s*["\']?(?:instructions?|system_prompt|agent_mode|ai_behavior|'
     r'tools|model|temperature)["\']?\s*:',
