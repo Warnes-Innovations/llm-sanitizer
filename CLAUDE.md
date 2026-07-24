@@ -133,3 +133,44 @@ the mere presence of the obfuscation.
     CRITICAL when the camouflaged text also trips an injection rule.
   The durable tell is `perceived-by-human` vs `emitted-by-extractor`: flag the
   delta, not the specific CSS trick.
+
+# BEGIN managed-by-agent-config
+## MANDATORY: Read project instructions first
+
+At the start of every task, read `.github/copilot-instructions.md` in full.
+
+## Answer Self-Test (MANDATORY — run before sending every response)
+
+1. If the reader sees only my first sentence, do they do the right next thing?
+2. Which claims did I verify, which did I infer, which did I assume — and can the reader tell the difference?
+3. What single claim, if wrong, sinks this answer — and did I re-derive it, or just recognize it?
+4. What did I do because the words said so that the person wouldn't actually want?
+5. If this is wrong, do they find out from me, now — or from the failure, later?
+
+If any answer is uncomfortable, the response isn't ready.
+Full rationale and procedures: `/Users/warnes/src/agent-config/docs/OPERATING_MANUAL.md`
+
+## Available Skills
+
+User-level shared skills live in `/Users/warnes/src/agent-config/.github/skills/`.
+Examples include review workflows such as `duckflow` and Codex bridge skills such as `flush-codex`.
+
+To read a skill: `read_file` on `SKILL.md` inside the relevant directory.
+
+## Available Slash Command Prompts
+
+Prompt files live in `/Users/warnes/src/agent-config/prompts/`.
+Examples include workflow prompts such as `/duckflow` and `/flush`.
+When the user invokes a slash command, read the corresponding `.prompt.md` file.
+
+## MCP Tools available in Cline
+
+- Prefer the 'oboe-mcp' MCP tools for OBO session state.
+- Do not edit .github/obo_sessions/*.json directly or use 'obo_helper.py' when 'oboe-mcp' can perform the operation. Fall back to 'oboe-cli' when the MCP server is unavailable.
+- **oboe-mcp**: `obo_list_sessions`, `obo_create`, `obo_session_status`, `obo_next`, `obo_list_items`, `obo_get_item`, `obo_mark_blocked`, `obo_mark_complete`, `obo_mark_in_progress`, `obo_mark_skip`, `obo_set_approval`, `obo_complete_session`, `obo_create_child_session`, `obo_complete_child_session`, `obo_merge_items`, `obo_update_field`
+- **oboe-cli fallback** (when MCP unavailable): all session-scoped commands take `--session SESSION [--base-dir DIR]`
+  - sessions/status/next/complete-session/list/show/in-progress/block/complete/skip/approve/update/merge/create-child/complete-child
+  - `create` and `merge` require `--input-file items.json` (items as a JSON array)
+  - Example: `oboe-cli --base-dir . --session SESSION.json complete ITEM_ID "resolution text"`
+- **markitdown**: Convert documents/URLs to Markdown for reading.
+# END managed-by-agent-config
