@@ -1,0 +1,55 @@
+# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Test + type-check CI on every push/PR (committee CR-2 / DevOps D2: nothing ran
+# pytest/mypy in CI before). Actions are pinned to immutable commit SHAs
+# (committee M5/SEC-2); Dependabot's github-actions ecosystem proposes bumps.
+name: CI
+
+on:
+  push:
+    branches: [devel, main]
+  pull_request:
+    branches: [devel, main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: test (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python: ["3.11", "3.13"]  # min supported + current
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          python-version: ${{ matrix.python }}
+
+      - name: Sync dependencies
+        run: uv sync --group test --group dev
+
+      - name: Run tests
+        run: uv run pytest -q -p no:cacheprovider
+
+  typecheck:
+    name: mypy
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9  # v9.0.0
+        with:
+          python-version: "3.13"
+
+      - name: Sync dependencies
+        run: uv sync --group test --group dev
+
+      - name: Run mypy (strict, per pyproject)
+        run: uv run mypy src/

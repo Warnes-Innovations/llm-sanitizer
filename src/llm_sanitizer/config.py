@@ -17,20 +17,6 @@ except ImportError:
     _YAML_AVAILABLE = False
 
 
-_DEFAULT_RULES = [
-    "instruction_override",
-    "zero_width",
-    "hidden_content",
-    "role_play",
-    "system_prompt",
-    "data_exfil",
-    "comment_directive",
-    "base64_encoded",
-    "homoglyph",
-    "agent_config",
-]
-
-
 @dataclass
 class RuleSettings:
     enabled: bool = True
