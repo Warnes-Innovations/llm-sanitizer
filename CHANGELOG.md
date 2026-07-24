@@ -7,8 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.3.0] — 2026-07-23
+
 Hardening from a multi-persona committee review (detection precision/recall,
-DoS bounds, MCP-interface consistency, and SSRF).
+DoS bounds, MCP-interface consistency, and SSRF), plus a new local semantic-intent
+detector.
 
 ### Added
 - **Enriched `semantic_intent` training corpus** — the classifier is now trained
