@@ -1,0 +1,37 @@
+# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# CodeQL static security analysis (committee CR-2 / DevOps: no code scanning ran
+# before). Python is interpreted, so no build step is needed. Actions pinned to
+# immutable commit SHAs (committee M5/SEC-2).
+name: CodeQL
+
+on:
+  push:
+    branches: [devel, main]
+  pull_request:
+    branches: [devel, main]
+  schedule:
+    - cron: "27 3 * * 1"  # weekly, Monday 03:27 UTC
+
+jobs:
+  analyze:
+    name: analyze (python)
+    runs-on: ubuntu-latest
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1  # v7.0.1
+
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@4187e74d05793876e9989daffde9c3e66b4acd07  # v3
+        with:
+          languages: python
+          queries: security-and-quality
+
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@4187e74d05793876e9989daffde9c3e66b4acd07  # v3
+        with:
+          category: "/language:python"
