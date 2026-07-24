@@ -28,6 +28,9 @@ def _package_version() -> str:
         except PackageNotFoundError:
             pass
     except Exception:
+        # Intentional broad catch (CodeQL py/empty-except, reviewed): resolving
+        # the version must NEVER break scanning. Any metadata/import failure
+        # falls through to the __version__ fallback below.
         pass
     try:
         from llm_sanitizer import __version__

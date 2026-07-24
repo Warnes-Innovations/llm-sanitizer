@@ -61,6 +61,9 @@ def _try_decode_base64(s: str) -> str | None:
         if len(sample) > 0 and printable / len(sample) > 0.8:
             return text
     except Exception:
+        # Intentional broad catch (CodeQL py/empty-except, reviewed): a blob that
+        # isn't valid/decodable base64 is the common case, not an error — treat
+        # any decode/parse failure as "not base64" and return None.
         pass
     return None
 
