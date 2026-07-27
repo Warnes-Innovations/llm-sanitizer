@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`llm-sanitizer --version`** — the entry point now prints the package version
+  and exits without starting the MCP server when passed `--version`.
+
 ### Changed
 
 - **`chained_obfuscation` now fires CRITICAL (was HIGH)** at the de-obfuscation
