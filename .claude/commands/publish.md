@@ -1,0 +1,1 @@
+/Users/warnes/src/llm-sanitizer/.github/prompts/publish.prompt.md
