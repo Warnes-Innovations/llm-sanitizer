@@ -168,3 +168,24 @@ class TestIpv4MappedIpv6:
         from llm_sanitizer.readers.url_reader import _ip_is_blocked
 
         assert not _ip_is_blocked("::ffff:93.184.216.34")  # example.com (public)
+
+
+class TestPinConcurrencyGuard:
+    """The process-global getaddrinfo pin must fail LOUDLY on concurrent/nested
+    entry rather than clobber another pin's saved resolver and race silently."""
+
+    def test_nested_or_concurrent_pin_raises_and_releases(self) -> None:
+        from llm_sanitizer.readers.url_reader import _pin_host_to_ips
+
+        with _pin_host_to_ips("a.example", ["203.0.113.1"]):
+            with pytest.raises(RuntimeError, match="concurrent"):
+                with _pin_host_to_ips("b.example", ["203.0.113.2"]):
+                    pass
+        # After the outer context exits, the guard lock is released — a fresh
+        # pin succeeds (no leaked lock).
+        with _pin_host_to_ips("c.example", ["203.0.113.3"]):
+            import socket
+
+            assert {i[4][0] for i in socket.getaddrinfo("c.example", 443)} == {
+                "203.0.113.3"
+            }

@@ -20,9 +20,17 @@ from __future__ import annotations
 import contextlib
 import ipaddress
 import socket
+import threading
 from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urljoin, urlparse
+
+# Guards the process-global getaddrinfo patch in _pin_host_to_ips: because the
+# patch is process-wide, two concurrent pins would clobber each other's saved
+# original and restore the wrong resolver. Acquired non-blocking so a concurrent
+# caller fails LOUDLY (RuntimeError) rather than racing silently. The durable fix
+# is a connection-level resolver on the httpx transport (tracked in issue #11).
+_pin_lock = threading.Lock()
 
 _ALLOWED_SCHEMES = ("http", "https")
 _MAX_REDIRECTS = 5
@@ -121,8 +129,16 @@ def _pin_host_to_ips(host: str, ips: list[str]) -> Iterator[None]:
     normally.
 
     Caveat: this patches a process-global for the duration of the request; it is
-    intended for the scanner's serial URL fetches, not high-concurrency use.
+    intended for the scanner's serial URL fetches, not high-concurrency use. A
+    concurrent call fails loudly via ``_pin_lock`` rather than racing silently.
     """
+    if not _pin_lock.acquire(blocking=False):
+        raise RuntimeError(
+            "concurrent URL scan detected: _pin_host_to_ips patches a "
+            "process-global socket.getaddrinfo and is not safe to nest/run "
+            "concurrently. Serialize read_url calls (the durable fix is a "
+            "connection-level resolver on the httpx transport)."
+        )
     real_getaddrinfo = socket.getaddrinfo
 
     def pinned(h: object, port: object, *args: object, **kwargs: object) -> list[Any]:
@@ -136,6 +152,7 @@ def _pin_host_to_ips(host: str, ips: list[str]) -> Iterator[None]:
         yield
     finally:
         socket.getaddrinfo = real_getaddrinfo
+        _pin_lock.release()
 
 
 def _read_capped(response: object) -> str:
