@@ -86,15 +86,20 @@ def _chained_obfuscation_finding(text: str) -> Finding:
     legitimate purpose and are the durable tell of an attempt to hide a payload
     from the scanner. Mechanism-independent: any mix of transports (base64 →
     base64, base64 → homoglyph, zero-width → base64, …) that reached this depth
-    counts. HIGH, not CRITICAL: the payload itself was never recovered, so we
-    flag the evasion structure rather than a confirmed injection.
+    counts. CRITICAL: while the payload itself was never recovered (we halted at
+    the safe-depth cap), ≥3 independently stacked transports have no legitimate
+    use and are a high-confidence evasion signal on their own — a maintainer
+    decision (OBO session_20260722_142455 item #7) to gate this at the same level
+    as a confirmed injection rather than merely flag it. A chain that DOES fully
+    decode into an injection still surfaces that injection's own finding via the
+    normal re-scan path.
     """
     snippet = text[:80]
     return Finding(
         id=1,
         rule="chained_obfuscation",
         rule_name="Chained Obfuscation",
-        risk=RiskLevel.high,
+        risk=RiskLevel.critical,
         location=Location(line=1, column=1, end_line=1, end_column=1),
         matched=snippet + ("..." if len(text) > 80 else ""),
         matched_raw=text,

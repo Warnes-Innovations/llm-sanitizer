@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`chained_obfuscation` now fires CRITICAL (was HIGH)** at the de-obfuscation
+  depth cap. Reaching the cap means ≥3 independently stacked transports (e.g.
+  base64→base64→base64→base64) that still would not decode — an evasion pattern
+  with no legitimate use, now gated at the same level as a confirmed injection.
+  Consumers that gate on severity (e.g. flow-guard) will treat these as blocking.
+  A chain that *does* fully decode into a payload still surfaces that payload's
+  own finding via re-scan. (OBO session_20260722_142455 item #7.)
+
 ## [0.3.0] — 2026-07-23
 
 Hardening from a multi-persona committee review (detection precision/recall,
