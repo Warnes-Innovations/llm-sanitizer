@@ -47,3 +47,10 @@ Thumbs.db
 
 # Locked deps
 # uv.lock is committed for reproducibility
+
+# Session recordings — local only; not published to this repo (may contain
+# transcripts from other projects + local dev tokens). See flush 2026-07-27.
+.specstory/
+
+# Claude Code per-machine settings
+.claude/settings.local.json
