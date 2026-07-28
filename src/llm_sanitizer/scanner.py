@@ -99,6 +99,50 @@ def _extract_binary_text(path: Path) -> str:
     except RuntimeError as exc:
         raise _ExtractionFailedError(str(exc)) from exc
 
+
+def _read_markup_text(path: Path) -> str | None:
+    """Extract the readable text of a presentation-markup document, or None if
+    *path* is not a format we extract (the common case — the caller then reads
+    and scans the content unchanged).
+
+    Sniffs the MAGIC BYTES, deliberately ahead of the binary/text decision. RTF
+    is ASCII and normally sniffs as text, where it would be rule-scanned as raw
+    control words (`\\fs21`, `\\pard`) rather than as the document a human
+    reads — both a precision problem and a real bypass, since RTF can encode any
+    character as a `\\'hh` hex escape (a payload can be plainly legible when
+    rendered while containing none of those letters literally). And a single
+    stray control byte flips it to "binary", where markitdown (which has no RTF
+    support) mis-decodes it into mojibake that scans clean. Deciding on the
+    magic first covers both.
+
+    Scoped deliberately narrowly — HTML/SVG/XML/Markdown/source are NEVER
+    extracted, because for those the markup itself is a legitimate injection
+    vector and stripping it would blind the scanner. See readers.markup_reader
+    for the full inclusion/exclusion rationale.
+
+    Failures are translated into the scanner's typed signals, never into a raw
+    fallback: falling back to the unparsed markup is precisely the bypass this
+    exists to close.
+    """
+    from llm_sanitizer.readers.markup_reader import (
+        MarkupExtractionError,
+        extract_markup_text,
+        sniff_rtf,
+    )
+
+    with open(path, "rb") as fh:
+        head = fh.read(64)
+    if not sniff_rtf(head):
+        return None
+
+    content = path.read_text(encoding="utf-8", errors="replace")
+    try:
+        return extract_markup_text(content)
+    except ImportError as exc:
+        raise ExtractorUnavailableError(str(exc)) from exc
+    except MarkupExtractionError as exc:
+        raise _ExtractionFailedError(str(exc)) from exc
+
 # Directories excluded from directory scans — VCS metadata and dependency
 # caches are not source content. ".git" in particular can hold gigabytes of
 # binary packed objects; scanning them means read_text(errors="replace")
@@ -396,6 +440,21 @@ def read_scannable_content(path: Path, binary_mode: str = "extract") -> str | No
     Raises ExtractorUnavailableError when markitdown is required but not
     installed (fail fast — a systemic coverage gap, not a per-file decision).
     """
+    # Presentation markup is decided on its magic bytes, ahead of the
+    # binary/text sniff (see _read_markup_text). "text"/"skip" are explicit
+    # overrides and keep their literal meaning.
+    if binary_mode == "extract":
+        try:
+            markup = _read_markup_text(path)
+        except _ExtractionFailedError:
+            # Declared-but-unparseable presentation markup. Same contract as a
+            # failed binary extraction: report "no scannable content" here and
+            # let the scan path emit the CRITICAL finding. Never fall back to
+            # the raw markup — that is the bypass this closes.
+            return None
+        if markup is not None:
+            return markup
+
     if not _is_binary(path):
         return path.read_text(encoding="utf-8", errors="replace")
 
@@ -836,6 +895,28 @@ class Scanner:
         # An OSError here (e.g. a missing file) propagates: directory scans
         # catch it per-file (skip), and the CLI/MCP surface it as an error —
         # a single-file scan of a nonexistent path must fail, not silently skip.
+        # Presentation markup is decided on its magic bytes, ahead of the
+        # binary/text sniff (see _read_markup_text).
+        if binary_mode == "extract":
+            try:
+                markup = _read_markup_text(path)
+            except _ExtractionFailedError as exc:
+                # Content that declares a presentation-markup format but cannot
+                # be parsed is treated as corrupt (the corrupt_file philosophy):
+                # scanning the raw markup instead would miss escape-encoded text,
+                # so fail closed rather than degrade.
+                return [
+                    make_integrity_finding(
+                        CORRUPT_FILE,
+                        source,
+                        f"markup extraction failed (corrupt or unreadable): {exc}",
+                    )
+                ]
+            if markup is not None:
+                return self.scan(
+                    markup, source=source, sensitivity=sensitivity
+                ).findings
+
         if not _is_binary(path):
             content = path.read_text(encoding="utf-8", errors="replace")
             return self.scan(content, source=source, sensitivity=sensitivity).findings

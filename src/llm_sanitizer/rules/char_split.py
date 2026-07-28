@@ -32,12 +32,24 @@ _SEP_CHARS = " \t_.·*|-"
 _INTERCHAR = re.compile(
     r"(?<![0-9A-Za-z])(?:[0-9A-Za-z][" + _SEP_CHARS + r"]){4,}[0-9A-Za-z](?![0-9A-Za-z])"
 )
-# Signal 2: a word char, a run of >=2 separators, another word char
-# ("ignore___all"). A single underscore (snake_case) is intentionally NOT a
-# signal, so legitimate identifiers are left alone. Anchored on the separator
-# run (single word chars either side, no greedy {2,} alnum quantifier) so it
-# cannot backtrack quadratically on a long separator-free run.
-_MULTISEP = re.compile(r"[0-9A-Za-z][" + _SEP_CHARS + r"]{2,}[0-9A-Za-z]")
+# Signal 2: a word char, a run of >=2 of the SAME separator, another word char
+# ("ignore___all", "ignore...all", "a|||b"). A single underscore (snake_case) is
+# intentionally NOT a signal, so legitimate identifiers are left alone.
+#
+# The repeated-SAME-separator requirement (\1+ rather than a bare {2,} over the
+# whole class) is load-bearing for precision: with a mixed run allowed, the
+# two-character sequence ". " — a period followed by a space, i.e. EVERY
+# sentence boundary in ordinary prose — matched, so any document with normal
+# punctuation "looked split", was reconstructed, and was re-scanned. Combined
+# with base64's former willingness to "decode" long dictionary words, that
+# recursed to the de-obfuscation depth cap and reported benign business prose as
+# CRITICAL. Deliberately repeating one separator is the actual obfuscation
+# pattern; mixed punctuation is just writing.
+#
+# Anchored on the separator run (single word chars either side, no greedy {2,}
+# alnum quantifier) so it cannot backtrack quadratically on a long
+# separator-free run; \1+ is a plain greedy repeat of one literal character.
+_MULTISEP = re.compile(r"[0-9A-Za-z]([" + _SEP_CHARS + r"])\1+[0-9A-Za-z]")
 
 # Tokenize into word / whitespace-run / punctuation-run pieces.
 _TOKEN = re.compile(r"[0-9A-Za-z]+|\s+|[^0-9A-Za-z\s]+")

@@ -1,6 +1,6 @@
 {
   "format_version": 1,
-  "last_updated": "2026-04-20T21:38:58.480153",
+  "last_updated": "2026-07-27T15:22:24.034744",
   "sessions": [
     {
       "file": "session_20260420_211325.json",
@@ -28,6 +28,48 @@
       "open": 2,
       "created": "2026-04-20",
       "parent_session_file": null,
+      "active_child_session": null
+    },
+    {
+      "file": "session_20260722_142455.json",
+      "title": "Committee-review design decisions & deferred follow-ups",
+      "status": "paused",
+      "pending": 0,
+      "in_progress": 0,
+      "deferred": 1,
+      "blocked": 1,
+      "actionable": 0,
+      "open": 2,
+      "created": "2026-07-22",
+      "parent_session_file": null,
+      "active_child_session": "session_20260724_124028.json"
+    },
+    {
+      "file": "session_20260722_164619.json",
+      "title": "Build local semantic-intent detection layer",
+      "status": "completed",
+      "pending": 0,
+      "in_progress": 0,
+      "deferred": 0,
+      "blocked": 0,
+      "actionable": 0,
+      "open": 0,
+      "created": "2026-07-22",
+      "parent_session_file": "session_20260722_142455.json",
+      "active_child_session": null
+    },
+    {
+      "file": "session_20260724_124028.json",
+      "title": "Unify MCP tool return envelope (breaking, H4)",
+      "status": "active",
+      "pending": 4,
+      "in_progress": 0,
+      "deferred": 0,
+      "blocked": 0,
+      "actionable": 4,
+      "open": 4,
+      "created": "2026-07-24",
+      "parent_session_file": "session_20260722_142455.json",
       "active_child_session": null
     }
   ]

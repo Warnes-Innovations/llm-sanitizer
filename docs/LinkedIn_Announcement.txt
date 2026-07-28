@@ -1,0 +1,64 @@
+🚨 New open-source release: 𝚕𝚕𝚖-𝚜𝚊𝚗𝚒𝚝𝚒𝚣𝚎𝚛
+
+LLM security is still lagging behind adoption. Prompt injection, hidden instructions in documents, and embedded agent directives are quickly becoming real attack vectors—not theoretical ones.
+
+I’ve been working on a small but focused tool to address this gap:
+
+👉 https://github.com/Warnes-Innovations/llm-sanitizer
+👉 https://pypi.org/project/llm-sanitizer/
+
+𝗪𝗵𝗮𝘁 𝗶𝘁 𝗱𝗼𝗲𝘀:
+
+• Detects and classifies embedded LLM instructions in:
+
+• documents
+• source code
+• web content
+• Redacts or neutralizes those instructions before they reach your model
+• Runs as:
+
+• a Python package (importable directly in your pipeline)
+• a CLI tool
+• an MCP-compatible server
+
+Conceptually, it sits as a 𝗽𝗿𝗲-𝗽𝗿𝗼𝗰𝗲𝘀𝘀𝗶𝗻𝗴 𝘀𝗲𝗰𝘂𝗿𝗶𝘁𝘆 𝗹𝗮𝘆𝗲𝗿—intercepting prompts before they ever hit your LLM.
+
+This is an initial effort to address the growing need for 𝑑𝑒𝑓𝑒𝑛𝑠𝑒-𝑖𝑛-𝑑𝑒𝑝𝑡ℎ in LLM pipelines, especially given how easy it is to smuggle instructions via seemingly benign inputs (markdown, HTML, comments, etc.).
+
+𝚕𝚕𝚖-𝚜𝚊𝚗𝚒𝚝𝚒𝚣𝚎𝚛 𝗲𝘅𝗽𝗹𝗶𝗰𝗶𝘁𝗹𝘆 𝘁𝗮𝗿𝗴𝗲𝘁𝘀 𝗲𝗺𝗯𝗲𝗱𝗱𝗲𝗱 𝗶𝗻𝘀𝘁𝗿𝘂𝗰𝘁𝗶𝗼𝗻 𝗽𝗮𝘆𝗹𝗼𝗮𝗱𝘀 𝗮𝗻𝗱 𝗽𝗿𝗼𝗺𝗽𝘁 𝗶𝗻𝗷𝗲𝗰𝘁𝗶𝗼𝗻 𝘃𝗲𝗰𝘁𝗼𝗿𝘀 𝗮𝗰𝗿𝗼𝘀𝘀 𝗮𝗿𝘁𝗶𝗳𝗮𝗰𝘁 𝘁𝘆𝗽𝗲𝘀
+
+─────────────
+
+𝗪𝗵𝘆 𝗜 𝗯𝘂𝗶𝗹𝘁 𝘁𝗵𝗶𝘀
+
+Most LLM applications today implicitly trust upstream content. That’s a risky assumption.
+
+If your system ingests:
+
+• scraped web pages
+• PDFs / documents
+• code repositories
+• user-uploaded files
+
+…then you already have a potential prompt injection surface.
+
+─────────────
+
+𝗪𝗵𝗮𝘁 𝗜’𝗱 𝗹𝗼𝘃𝗲 𝗳𝗲𝗲𝗱𝗯𝗮𝗰𝗸 𝗼𝗻
+
+This is an early release (v0.1.0), and I’m actively iterating. I’d especially value input on:
+
+• Detection strategy (regex vs. structural vs. model-assisted)
+• False positive / false negative tradeoffs
+• Integration patterns (pipelines, agents, MCP, etc.)
+• Real-world attack examples I should include
+
+─────────────
+
+If you’re building in the LLM / agent space, I’d really appreciate you kicking the tires and sharing thoughts—good or bad.
+
+Security here is still an open problem, and the ecosystem needs more experimentation.
+
+─────────────
+
+#LLM #AI #Security #PromptInjection #OpenSource #MLOps

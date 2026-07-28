@@ -906,7 +906,7 @@ wheels = [
 
 [[package]]
 name = "llm-sanitizer"
-version = "0.2.0"
+version = "0.4.0"
 source = { editable = "." }
 dependencies = [
     { name = "filetype" },
@@ -915,6 +915,7 @@ dependencies = [
     { name = "mcp" },
     { name = "pydantic" },
     { name = "pypdf" },
+    { name = "striprtf" },
 ]
 
 [package.optional-dependencies]
@@ -947,6 +948,7 @@ requires-dist = [
     { name = "py7zr", marker = "extra == '7z'", specifier = ">=0.20" },
     { name = "pydantic", specifier = ">=2.0" },
     { name = "pypdf", specifier = ">=4.0" },
+    { name = "striprtf", specifier = ">=0.0.26" },
 ]
 provides-extras = ["binary", "7z", "rar"]
 
@@ -2294,6 +2296,15 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/81/69/17425771797c36cded50b7fe44e850315d039f28b15901ab44839e70b593/starlette-1.0.0.tar.gz", hash = "sha256:6a4beaf1f81bb472fd19ea9b918b50dc3a77a6f2e190a12954b25e6ed5eea149", size = 2655289, upload-time = "2026-03-22T18:29:46.779Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/0b/c9/584bc9651441b4ba60cc4d557d8a547b5aff901af35bda3a4ee30c819b82/starlette-1.0.0-py3-none-any.whl", hash = "sha256:d3ec55e0bb321692d275455ddfd3df75fff145d009685eb40dc91fc66b03d38b", size = 72651, upload-time = "2026-03-22T18:29:45.111Z" },
+]
+
+[[package]]
+name = "striprtf"
+version = "0.0.32"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/86/f9/b3ecbd2e0abb9c29edd2913482f0c5df47a098221444ccd50cc5cd3f9b91/striprtf-0.0.32.tar.gz", hash = "sha256:7f375a375d99a2700842173168c90c9b545cb244241ffc5d868ed9f6baf9155f", size = 7571, upload-time = "2026-04-27T15:42:37.15Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/c3/cf/4157959aa36a567faab32a5fb078904b76654bdd86a3d7f8fba21ed89d84/striprtf-0.0.32-py3-none-any.whl", hash = "sha256:9f695fea9662cb4ffccf2b56286b3e77028c0a61e87258719584e681e0144869", size = 8044, upload-time = "2026-04-27T15:42:35.948Z" },
 ]
 
 [[package]]

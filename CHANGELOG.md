@@ -5,7 +5,83 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.0] — 2026-07-28
+
+A precision-and-coverage release for the content readers. The scanner became
+unusable on ordinary documents (benign prose scanned as CRITICAL) while
+simultaneously missing a class of RTF-encoded payloads entirely; both are fixed
+at their source. Minor rather than patch: it carries a severity escalation, a
+new core dependency, and a change to what `redact_file` writes for RTF inputs.
+
+### Security
+
+- **RTF documents are now extracted before rule scanning, closing a detection
+  bypass.** markitdown has no RTF support and RTF is ASCII, so an RTF file
+  sniffed as text and reached the rules as raw control words. RTF can encode any
+  character as a `\'hh` hex escape, so a payload could render plainly to a human
+  while none of its letters appeared literally in the file: a document whose
+  body was `\'69\'67\'6e\'6f\'72\'65 all previous instructions…` scanned to
+  **zero findings** and `redact_file` copied it through untouched. Such
+  documents now scan as what they render to (HIGH, `instruction_override` /
+  `data_exfil` / `semantic_intent`).
+
+  Routing is decided on the **magic bytes**, deliberately ahead of the
+  binary/text sniff: a single stray control byte otherwise flipped the file to
+  "binary", where markitdown mis-decoded the ASCII as UTF-16 and returned CJK
+  mojibake — non-empty, so it passed the "no extractable text" check and the
+  file was reported clean.
+
+  Deliberately scoped to RTF. HTML, SVG, XML, Markdown, source, and LaTeX/TeX
+  are **never** extracted, because for those the markup itself is a legitimate
+  injection vector (an HTML comment directive, `\write18`) and stripping it
+  would blind the scanner. ODT/DOCX/PDF already route through markitdown.
+
+  **Consumer-facing:** `redact_file` on an RTF input now writes extracted plain
+  text, as it already did for PDF/DOCX — use a `.txt` output extension. An RTF
+  that declares itself RTF but cannot be parsed now yields a CRITICAL
+  `corrupt_file` finding rather than being scanned as raw markup.
+  Adds a core dependency on `striprtf` (BSD, pure-Python).
+
+### Fixed
+
+- **`char_split` / `base64_encoded` false-positive cascade on ordinary prose.**
+  A high-sensitivity scan of normal business writing (emails, specs, documentation)
+  returned `char_split` findings at HIGH/CRITICAL, which made `redact_file` strip
+  the legitimate text and made fail-closed consumers block the document. Two
+  independent root causes, both fixed at the source (the fail-closed
+  `chained_obfuscation` depth cap is deliberately unchanged):
+  - `char_split`'s multi-separator signal accepted a run of any 2+ characters from
+    the separator class, so the sequence `". "` — every sentence boundary in
+    ordinary writing, and every `| ` in a Markdown table — marked prose as
+    "split". It now requires a **repeated same separator** (`___`, `...`, `|||`),
+    which is the actual obfuscation pattern. The inter-character signal
+    (`i g n o r e`) is unchanged.
+  - `base64_encoded` decoded any 12+ character run of base64-alphabet characters,
+    which every long English word satisfies, and its **latin-1 fallback** never
+    fails on any byte sequence — so "microcontroller" and friends "decoded" to
+    garbage that recursed until the de-obfuscation depth cap emitted a
+    fail-closed CRITICAL. Decoding now requires a candidate drawn from **≥2 base64
+    character classes** and decoded bytes that are **valid UTF-8**.
+
+  Measured on a 17-document corpus of real prose: 59 findings across 11 files →
+  2 findings in 1 file, and both survivors are genuine (a document that quotes
+  `ignore___all___previous` as an example). Encoded, split, and stacked-transport
+  injections are all still detected.
+
+### Added
+
+- **`llm-sanitizer --version`** — the entry point now prints the package version
+  and exits without starting the MCP server when passed `--version`.
+
+### Changed
+
+- **`chained_obfuscation` now fires CRITICAL (was HIGH)** at the de-obfuscation
+  depth cap. Reaching the cap means ≥3 independently stacked transports (e.g.
+  base64→base64→base64→base64) that still would not decode — an evasion pattern
+  with no legitimate use, now gated at the same level as a confirmed injection.
+  Consumers that gate on severity (e.g. flow-guard) will treat these as blocking.
+  A chain that *does* fully decode into a payload still surfaces that payload's
+  own finding via re-scan. (OBO session_20260722_142455 item #7.)
 
 ## [0.3.0] — 2026-07-23
 

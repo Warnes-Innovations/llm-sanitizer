@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from llm_sanitizer.server import redact_dir, redact_file, scan_dir, scan_file
+from llm_sanitizer.server import main, redact_dir, redact_file, scan_dir, scan_file
 
 
 class TestScanFileArchiveHandling:
@@ -180,3 +180,33 @@ class TestScanDirBinaryHandling:
         assert result["files_scanned"] == 2
         assert result["files_skipped_binary"] == 0
         assert result["max_risk"] == "critical"
+
+
+class TestMainVersionFlag:
+    """`llm-sanitizer --version` prints the version and exits WITHOUT starting
+    the (blocking) MCP server."""
+
+    def test_version_flag_prints_and_does_not_start_server(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        from llm_sanitizer import __version__
+
+        def _boom() -> None:  # pragma: no cover - must never be called
+            raise AssertionError("mcp.run() must not run for --version")
+
+        monkeypatch.setattr("llm_sanitizer.server.mcp.run", _boom)
+        monkeypatch.setattr("sys.argv", ["llm-sanitizer", "--version"])
+        main()
+        out = capsys.readouterr().out
+        assert __version__ in out
+        assert "llm-sanitizer" in out
+
+    def test_no_flag_starts_server(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        started = {"ran": False}
+        monkeypatch.setattr(
+            "llm_sanitizer.server.mcp.run",
+            lambda: started.__setitem__("ran", True),
+        )
+        monkeypatch.setattr("sys.argv", ["llm-sanitizer"])
+        main()
+        assert started["ran"] is True

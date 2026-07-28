@@ -431,6 +431,13 @@ def list_rules(category: str | None = None) -> str:
 
 def main() -> None:
     """Start the llm-sanitizer MCP server."""
+    import sys
+
+    if "--version" in sys.argv[1:]:
+        from llm_sanitizer import __version__
+
+        print(f"llm-sanitizer {__version__}")
+        return
     mcp.run()
 
 
