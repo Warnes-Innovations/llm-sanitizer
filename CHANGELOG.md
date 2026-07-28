@@ -5,6 +5,32 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.4.1] — 2026-07-28
+
+### Fixed
+
+- **The package could not be installed. 0.3.0 and 0.4.0 both died at import**
+  with `ModuleNotFoundError: No module named 'mcp.server.fastmcp'` on any fresh
+  install. The dependency was declared `mcp>=1.0` with no upper bound; when
+  `mcp` 2.0 removed `mcp.server.fastmcp`, every new resolve picked it up and
+  broke. Migrated to the `mcp` 2.x API (`mcp.server.mcpserver.MCPServer`
+  replaces `FastMCP`; the `.tool()` and `.run()` surfaces are unchanged) and
+  constrained the dependency to `mcp>=2.0,<3`.
+
+  **This requires `mcp` 2.x.** The 1.x and 2.x server APIs are mutually
+  exclusive — 1.x has `FastMCP` and no `MCPServer`, 2.x the reverse — so there
+  is no version of this package that works with both. Consumers pinning a git
+  ref or an old version need `uvx --refresh` (or `uv cache clean llm-sanitizer`).
+
+### Changed
+
+- **CI now installs the built wheel with no lockfile** and imports it, starts the
+  entry point, asserts all 9 MCP tools register, and runs a scan. Every previous
+  check ran against `uv.lock`, which pinned `mcp` 1.27 — so a wrong dependency
+  *declaration* was structurally invisible to CI while consumers, who resolve
+  from `pyproject.toml`, got a broken package. This job closes that gap: it
+  resolves exactly as a consumer does.
+
 ## [0.4.0] — 2026-07-28
 
 A precision-and-coverage release for the content readers. The scanner became
