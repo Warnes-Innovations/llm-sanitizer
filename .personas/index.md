@@ -18,6 +18,11 @@ Expert reviewers for evaluating the LLM injection detection and secret redaction
 - [Secrets & Pattern Coverage Reviewer](secrets-pattern-reviewer.md) — secret pattern completeness, accuracy, obfuscation bypass, alignment with gitleaks/Betterleaks standards
 - [Performance & Reliability Engineer](performance-reliability-engineer.md) — resource constraints, memory/CPU bounds, fail-closed limits, operational safety in MCP server deployments
 
+## Adoption & Release
+
+- [Harness Adopter / Developer Experience](harness-adopter-dx.md) — cold first-run success, failure recoverability, honest value proposition, cross-environment portability (added after the bastion-plan committee review to cover the adopter's-seat perspective)
+- [Release Engineer](release-engineer.md) — version single-sourcing, immutable-vs-moving pins, cross-carrier parity, fix propagation to pinned+cached consumers, publish integrity (added after the bastion-plan committee review)
+
 ## Usage
 
-Run `/committee-review` to have all 7 personas review the llm-sanitizer codebase and documentation in parallel.
+Run `/committee-review` to have all personas review the llm-sanitizer codebase and documentation in parallel.
