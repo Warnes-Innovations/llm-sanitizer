@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`char_split` / `base64_encoded` false-positive cascade on ordinary prose.**
+  A high-sensitivity scan of normal business writing (emails, specs, documentation)
+  returned `char_split` findings at HIGH/CRITICAL, which made `redact_file` strip
+  the legitimate text and made fail-closed consumers block the document. Two
+  independent root causes, both fixed at the source (the fail-closed
+  `chained_obfuscation` depth cap is deliberately unchanged):
+  - `char_split`'s multi-separator signal accepted a run of any 2+ characters from
+    the separator class, so the sequence `". "` — every sentence boundary in
+    ordinary writing, and every `| ` in a Markdown table — marked prose as
+    "split". It now requires a **repeated same separator** (`___`, `...`, `|||`),
+    which is the actual obfuscation pattern. The inter-character signal
+    (`i g n o r e`) is unchanged.
+  - `base64_encoded` decoded any 12+ character run of base64-alphabet characters,
+    which every long English word satisfies, and its **latin-1 fallback** never
+    fails on any byte sequence — so "microcontroller" and friends "decoded" to
+    garbage that recursed until the de-obfuscation depth cap emitted a
+    fail-closed CRITICAL. Decoding now requires a candidate drawn from **≥2 base64
+    character classes** and decoded bytes that are **valid UTF-8**.
+
+  Measured on a 17-document corpus of real prose: 59 findings across 11 files →
+  2 findings in 1 file, and both survivors are genuine (a document that quotes
+  `ignore___all___previous` as an example). Encoded, split, and stacked-transport
+  injections are all still detected.
+
 ### Added
 
 - **`llm-sanitizer --version`** — the entry point now prints the package version

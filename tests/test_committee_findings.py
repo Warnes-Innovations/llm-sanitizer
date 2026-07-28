@@ -257,7 +257,13 @@ class TestScanCompletenessSurfaced:
 
         from llm_sanitizer.config import SanitizerConfig
 
-        big = base64.b64encode(b"A" * (5 * 1024 * 1024)).decode()  # decodes to 5 MiB
+        # The payload must be REAL-looking base64: the candidate gate in
+        # base64_encoded skips runs drawn from a single character class, and
+        # b64encode(b"A" * n) is the uppercase-only string "QUFBQUFB…", which is
+        # now (correctly) never decoded. Encoding ordinary ASCII prose yields a
+        # mixed-class blob, which is what an actual oversized payload looks like.
+        plain = b"The quick brown fox jumps over the lazy dog. "
+        big = base64.b64encode(plain * (5 * 1024 * 1024 // len(plain))).decode()
         r = scan_text(big, config=SanitizerConfig(max_scan_seconds=0))
         assert any(f.rule == "rescan_incomplete" for f in r.findings)
 

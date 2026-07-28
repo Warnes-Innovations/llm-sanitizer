@@ -39,20 +39,51 @@ _B64_PATTERN = re.compile(
 _B64_FULL_LINE = re.compile(r'^[A-Za-z0-9+/]{16,}={0,2}$')
 
 
+def _looks_like_base64(s: str) -> bool:
+    """Candidate gate: does this run plausibly encode bytes, or is it a word?
+
+    ``_B64_PATTERN`` matches any run of >=12 base64-alphabet characters, which
+    every ordinary >=12-letter English word satisfies ("microcontroller",
+    "documentation", "transportation"). Requiring characters from at least TWO
+    of {lowercase, uppercase, digit, ``+/``} rejects single-class dictionary
+    words before any decode attempt, while genuine base64 of real bytes mixes
+    classes with overwhelming probability (a 12-char run staying inside one
+    class has probability ~(26/64)**12 ≈ 4e-6).
+
+    This is a precision floor, not a security boundary: a payload deliberately
+    crafted to encode as single-class base64 would be missed here, but it is
+    still subject to the depth-capped ``chained_obfuscation`` backstop and to
+    the other rules scanning the raw text.
+    """
+    body = s.rstrip("=")
+    classes = (
+        any(c.islower() for c in body)
+        + any(c.isupper() for c in body)
+        + any(c.isdigit() for c in body)
+        + any(c in "+/" for c in body)
+    )
+    return classes >= 2
+
+
 def _try_decode_base64(s: str) -> str | None:
     """Attempt to decode a base64 string. Return decoded text or None."""
+    if not _looks_like_base64(s):
+        return None
     # Pad if needed
     padded = s + "=" * ((-len(s)) % 4)
     try:
         decoded_bytes = base64.b64decode(padded)
-        # Try UTF-8 first, then latin-1
+        # UTF-8 ONLY — deliberately no latin-1 fallback. latin-1 decodes ANY
+        # byte sequence without error, so it made essentially every candidate
+        # "decode" to garbage that then recursed through scan_deobfuscated until
+        # it hit the depth cap and emitted a fail-closed chained_obfuscation
+        # CRITICAL — the false-positive cascade that made ordinary prose
+        # unscannable. A genuine hidden-text payload is UTF-8; bytes that are
+        # not valid UTF-8 are not recoverable text and must not be re-scanned.
         try:
             text = decoded_bytes.decode("utf-8")
         except UnicodeDecodeError:
-            try:
-                text = decoded_bytes.decode("latin-1")
-            except UnicodeDecodeError:
-                return None
+            return None
         # Must be mostly printable. Sample the first 64 KiB for the ratio so a
         # multi-MB decoded blob doesn't cost an O(n) per-char isprintable() pass
         # (the printable-ratio is representative from a prefix).
