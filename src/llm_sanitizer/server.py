@@ -9,9 +9,9 @@ import json
 import shutil
 from pathlib import Path
 
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 
-mcp = FastMCP(
+mcp = MCPServer(
     "llm-sanitizer",
     instructions="Scan documents, source code, and web pages for embedded LLM agent instructions. "
     "Classify findings by risk level and optionally redact them.",
@@ -176,7 +176,7 @@ def redact(content: str, mode: str = "strip", sensitivity: str = "medium") -> st
     """
     from llm_sanitizer.redactor import redact_content
 
-    # Let ValueError propagate: FastMCP returns it as an MCP error response,
+    # Let ValueError propagate: MCPServer returns it as an MCP error response,
     # which is distinguishable from a successful text return. Do NOT catch it
     # and return a look-alike JSON string.
     clean, _ = redact_content(

@@ -1,6 +1,6 @@
 [project]
 name = "llm-sanitizer"
-version = "0.4.0"
+version = "0.5.0"
 description = "CLI + MCP server for detecting, classifying, and redacting embedded LLM agent instructions in documents, source code, and web pages."
 readme = {file = "README.md", content-type = "text/markdown"}
 authors = [{name = "Gregory R. Warnes", email = "greg@warnes-innovations.com"}]
@@ -33,7 +33,15 @@ classifiers = [
 	"Typing :: Typed",
 ]
 dependencies = [
-	"mcp>=1.0",
+	# UPPER BOUND IS LOAD-BEARING. This was declared `mcp>=1.0` (unbounded), and
+	# when mcp 2.0 removed `mcp.server.fastmcp` every fresh install of
+	# llm-sanitizer — including 0.3.0 and 0.4.0 — died at import with
+	# ModuleNotFoundError. CI never caught it because every check ran against
+	# uv.lock, which pinned mcp 1.27; consumers resolve from THIS constraint, not
+	# from our lock. The wheel-install CI job (no lockfile) now guards that gap.
+	# We target the 2.x API (MCPServer); 1.x had FastMCP instead and the two are
+	# mutually exclusive, so this floor is a hard requirement, not a preference.
+	"mcp>=2.0,<3",
 	"httpx>=0.27",
 	"pydantic>=2.0",
 	# Pure-Python (MIT) magic-byte type detection for Tier-1 extension-vs-content
