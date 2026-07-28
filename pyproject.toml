@@ -57,6 +57,12 @@ dependencies = [
 	# markitdown[all] bloat (azure-doc-intelligence, audio transcription,
 	# youtube) that has no place in a security scanner.
 	"markitdown[pdf,docx,pptx,xlsx,xls]>=0.1",
+	# Pure-Python (BSD) RTF text extraction. markitdown does NOT handle RTF
+	# (it raises UnsupportedFormatException for '.rtf'), and RTF is ASCII, so
+	# it sniffs as text and would otherwise be rule-scanned as raw control
+	# words. A CORE dependency for the same reason as markitdown: the scanner
+	# must never be silently unable to read a format it is handed.
+	"striprtf>=0.0.26",
 ]
 
 [dependency-groups]
