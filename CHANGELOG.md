@@ -5,7 +5,12 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.4.1] — 2026-07-28
+## [0.5.0] — 2026-07-28
+
+Minor, not patch: although this repairs a package that could not be installed
+at all, it raises a **hard dependency floor to `mcp>=2.0`**, which is a real
+break for anyone pinning `mcp` 1.x. The version signals that, not the size of
+the change.
 
 ### Fixed
 
