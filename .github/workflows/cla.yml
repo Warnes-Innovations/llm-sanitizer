@@ -7,11 +7,13 @@
 # BEFORE ENABLING (not yet verified in this draft):
 #   1. DONE — pinned to contributor-assistant/github-action's latest release, v2.6.1
 #      (2024-09-26), commit ca4a40a7d1004f18d9960b404b97e5f30a505a08.
-#   2. Create a Personal Access Token (classic: `repo` scope, or fine-grained: contents+PRs write)
-#      and store it as the repo secret `CLA_SIGNATURES_TOKEN`. The bot uses it to commit signature
-#      records to the `cla-signatures` branch. The default GITHUB_TOKEN cannot push to a protected
-#      branch, hence a separate PAT.
+#   2. DONE — `CLA_SIGNATURES_TOKEN` repo secret created (fine-grained PAT scoped to
+#      this repo only: Contents + Pull requests, read/write).
 #   3. Confirm the `path-to-document` URL resolves to CLA.md on the default branch.
+#
+# Still open: CLA.md itself is a legal draft pending counsel review (see its own
+# header) — this workflow can run mechanically once merged, but the document it
+# asks contributors to sign should not be treated as final until that review lands.
 
 name: "CLA Assistant"
 
