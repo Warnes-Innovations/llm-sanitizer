@@ -48,6 +48,15 @@ node_types:
     explicit_only: true
   raw:
     explicit_only: true
+  incident:
+    maps_from:
+      type: incident
+  interface:
+    maps_from:
+      type: interface
+  release:
+    maps_from:
+      type: release
 
 predicates:
   # --- Implicit predicates emitted by the extractor. ---
@@ -121,3 +130,48 @@ predicates:
     subject_types: [claim, source, decision]
     object_types: [claim, source, decision]
     requires_evidence: true
+
+  # --- Added 2026-07-29 per wiki-schema committee review (see
+  # .personas/reviews/wiki-schema/committee-summary.md). ---
+  same_bug_class_as:
+    subject_types: [incident]
+    object_types: [incident]
+    requires_evidence: true
+    description: |
+      Links two incidents that share a root-cause bug class (e.g. an
+      unbounded-dependency incident recurring across two libraries).
+      Operationalizes CLAUDE.md's "Bug Class Propagation" rule as a
+      queryable graph edge instead of relying on CHANGELOG prose.
+  guards_against:
+    subject_types: [concept]
+    object_types: [concept]
+    requires_evidence: true
+    description: |
+      Connects a bounding mechanism (e.g. a per-rule scan deadline, a
+      recursion depth guard) to the resource-exhaustion hazard it bounds.
+      A graph query for hazard concepts with zero incoming guards_against
+      edges surfaces genuinely unguarded operations.
+  evades:
+    subject_types: [concept]
+    object_types: [concept]
+    requires_evidence: true
+    description: |
+      An obfuscation/evasion technique that currently defeats a detection
+      rule or control. Use status/supersedes on the edge (not this file)
+      to represent "used to evade, now fixed" without lying about current
+      exploitability.
+  breaks_compatibility_with:
+    subject_types: [decision, source]
+    object_types: [product]
+    requires_evidence: true
+    description: |
+      A rule-addition decision or fix that changed a finding's shape or
+      classification in a way a named downstream consumer (e.g.
+      flow-guard) depended on.
+  fixed_in:
+    subject_types: [concept, claim]
+    object_types: [release]
+    requires_evidence: true
+    description: |
+      Links a bug/gap/claim to the release that fixed it, so fix
+      propagation to pinned/cached consumers can be checked per release.

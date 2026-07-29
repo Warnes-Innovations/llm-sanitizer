@@ -51,6 +51,9 @@ This wiki uses these page types, each with a dedicated subdirectory:
 - `entity` (in `wiki/entities/`) — pages about specific things: people, papers, products, places, organizations.
 - `concept` (in `wiki/concepts/`) — pages about ideas, methods, frameworks, abstractions.
 - `synthesis` (in `wiki/synthesis/`) — cross-cutting analyses, comparisons, query answers filed back.
+- `incident` (in `wiki/incidents/`) — one page per production security/reliability defect: bug class, root cause, fail-mode before/after the fix, regression test added. Added 2026-07-29 per committee review (`.personas/reviews/wiki-schema/`) — Security Engineer and Performance/Reliability Engineer independently proposed this, both citing the CHANGELOG's recurring "same bug class as..." narration (py7zr 0.4.0→0.5.1) as evidence this needs a structured, queryable home instead of only living in prose.
+- `interface` (in `wiki/interfaces/`) — one page per MCP tool (`scan_text`, `scan_file`, `scan_dir`, `scan_url`, `redact*`, `list_rules`) tracking its current parameter/result schema, error taxonomy, and a version-by-version changelog of contract changes plus which known consumers are coupled to which fields. Added 2026-07-29 per committee review (MCP Tool Designer).
+- `release` (in `wiki/releases/`) — one page per version cut: promotion date, `devel` commit range promoted, CHANGELOG entries included, and a consumer "recheck" list (who pins this project, immutable vs. moving ref, whether a `uvx --refresh`/cache-clean is needed to pick up the fix). Added 2026-07-29 per committee review (Release Engineer), operationalizing the promotion ritual already described in `CLAUDE.md`.
 
 Add additional types here as the wiki evolves.
 
