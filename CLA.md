@@ -94,11 +94,22 @@ representations inaccurate in any respect.
 ## 8. Corporate Contributions
 
 If You are making Contributions as part of Your work for an employer, or Your employer otherwise
-holds rights in Your Contributions, Your employer must accept a **Corporate CLA** (a separate
-document, to be provided) in addition to, or in place of, this Individual CLA. Contact
-greg@warnes-innovations.com to arrange a Corporate CLA.
+holds rights in Your Contributions, Your employer must accept the **[Corporate
+CLA](CLA-CORPORATE.md)** in addition to, or in place of, this Individual CLA. Contact
+greg@warnes-innovations.com to arrange it.
+
+## 9. Amendments
+
+We may revise this Agreement from time to time. Our intended policy — **not yet verified against
+the CLA-assistant bot's actual re-signature behavior; treat as a draft policy target pending that
+verification** — is: a revision applies only prospectively, and Contributions already submitted
+remain governed by the version of this Agreement in effect when they were signed (identified by
+this file's git commit hash at that time, alongside the recorded signature on the `cla-signatures`
+branch). A material revision requires re-acceptance before further Contributions are covered;
+non-material corrections (formatting, typo fixes) do not.
 
 ---
 
-*This Agreement is governed by the laws of the jurisdiction in which Warnes Innovations LLC is
-organized, to be confirmed in the counsel-reviewed final version.*
+*This Agreement is governed by the laws of the State of Connecticut, without regard to its
+conflict-of-laws principles, matching Warnes Innovations LLC's (pending) state of organization.
+Counsel should confirm this clause once formation is complete.*

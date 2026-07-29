@@ -48,5 +48,11 @@ jobs:
           custom-notsigned-prcomment: "Thank you for your contribution. Before we can merge it, please read our [Contributor License Agreement](https://github.com/Warnes-Innovations/llm-sanitizer/blob/main/CLA.md) and sign it by posting the exact comment below in this pull request."
           custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"
           custom-allsigned-prcomment: "All contributors have signed the CLA. ✍️"
-          # Bots / first-party accounts that do not need to sign:
+          # Bots / first-party accounts that do not need to sign. Deliberately does
+          # NOT include copilot-swe-agent[bot] (GitHub's autonomous coding-agent
+          # feature) or any other AI-agent identity: whether an autonomous agent can
+          # meaningfully give a CLA sign-off is an open policy question, not something
+          # to settle with a silent default. The current fail-closed behavior — an
+          # AI-agent PR is blocked pending a sign-off it cannot meaningfully give — is
+          # intentional until that question is decided.
           allowlist: "dependabot[bot],github-actions[bot],Warnes*"

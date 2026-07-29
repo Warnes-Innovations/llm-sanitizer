@@ -31,12 +31,18 @@ below. A CI check rejects any pull request whose commits are not all signed off.
 ### License-back clause (the grant a bare DCO lacks)
 
 **By signing off a commit under the DCO and submitting it to this project, you additionally grant
-Warnes Innovations LLC a perpetual, worldwide, non-exclusive, royalty-free, irrevocable, and
-sublicensable license to use, reproduce, modify, distribute, and relicense your contribution under
-any terms — including the AGPL-3.0-or-later, other open-source licenses, and separate proprietary or
-commercial license terms.** You retain copyright in your contribution. This clause is what lets the
-project be offered commercially in addition to under the AGPL. It mirrors, and is reinforced by, the
-[Contributor License Agreement](CLA.md) in Gate 2.
+Warnes Innovations LLC a perpetual, worldwide, non-exclusive, no-charge, royalty-free, irrevocable
+copyright license to reproduce, prepare derivative works of, publicly display, publicly perform,
+sublicense, and distribute your Contribution and such derivative works. You further agree that
+Warnes Innovations LLC may license your Contribution, and derivative works thereof, under any
+license terms of its choosing, including the AGPL-3.0-or-later, other open-source licenses, and
+separate proprietary or commercial license terms.** You retain ownership of the copyright in your
+Contribution.
+
+This clause is deliberately identical in substance and wording to [`CLA.md`](CLA.md) Section 2 —
+not merely "mirrored" but the same grant stated twice, once here and once in the standalone
+agreement, so satisfying one gate does not grant materially different rights than the other. See
+"Why both DCO *and* CLA?" below for why the project requires both anyway.
 
 ## Gate 2 — Contributor License Agreement (CLA)
 
@@ -47,7 +53,8 @@ merged until the CLA check is green.
 
 - Contributing **as an individual** → the Individual CLA (the bot flow) is sufficient.
 - Contributing **on behalf of an employer**, or where your employer holds rights in your work →
-  a **Corporate CLA** is also required. Email <greg@warnes-innovations.com> to arrange one.
+  the **[Corporate CLA](CLA-CORPORATE.md)** is also required. Email
+  <greg@warnes-innovations.com> to arrange one.
 
 The CLA grants the same relicensing rights as the license-back clause, in a standalone, auditable
 agreement. We require both so the relicensing grant is unambiguous and recorded per-contributor.
