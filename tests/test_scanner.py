@@ -743,6 +743,35 @@ class TestArchiveMemberScanning:
         assert result.summary.max_risk is not None
         assert result.summary.max_risk >= RiskLevel.high
 
+    def test_injection_inside_7z_member_is_found(self, tmp_path: Path) -> None:
+        # Regression for the bug where SevenZipFile.readall() (removed in
+        # py7zr 1.0) made every valid .7z report CRITICAL corrupt_file instead
+        # of expanding it. A correct scan finds the payload *inside* the
+        # archive — anything else (an exception, or a corrupt_file finding)
+        # means extraction silently didn't happen.
+        py7zr = pytest.importorskip("py7zr")
+        payload = tmp_path / "inner.md"
+        payload.write_text(f"# notes\n\n{_INJECTION}\n", encoding="utf-8")
+        archive = tmp_path / "probe.7z"
+        with py7zr.SevenZipFile(archive, "w") as z:
+            z.write(payload, "inner.md")
+        result = Scanner().scan_file(archive)
+        assert result is not None
+        assert result.summary.max_risk is not None
+        assert result.summary.max_risk >= RiskLevel.high
+        assert "corrupt_file" not in result.summary.rules_triggered
+
+    def test_clean_7z_has_no_findings(self, tmp_path: Path) -> None:
+        py7zr = pytest.importorskip("py7zr")
+        payload = tmp_path / "clean.md"
+        payload.write_text("# Heading\n\nTotally benign content.", encoding="utf-8")
+        archive = tmp_path / "clean.7z"
+        with py7zr.SevenZipFile(archive, "w") as z:
+            z.write(payload, "clean.md")
+        result = Scanner().scan_file(archive)
+        assert result is not None
+        assert result.summary.total_findings == 0
+
 
 class TestArchiveIntegrityFindings:
     def test_text_file_renamed_zip_is_critical(self, tmp_path: Path) -> None:

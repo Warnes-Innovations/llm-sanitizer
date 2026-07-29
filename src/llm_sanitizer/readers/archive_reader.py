@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import bz2
 import gzip
+import io
 import lzma
 import tarfile
 import zipfile
@@ -320,19 +321,79 @@ def _iter_7z(
 ) -> Iterator[tuple[str, bytes]]:
     try:
         import py7zr
+        from py7zr.io import Py7zIO, WriterFactory
     except ImportError as exc:
         raise ArchiveToolUnavailable(
             "7z archive support requires the '7z' extra: "
             "pip install llm-sanitizer[7z]"
         ) from exc
+
+    # The ignore[misc] comments on both classes below silence mypy's
+    # "subclassing Any" complaint: the typecheck CI job does not install the
+    # [7z] extra (matching a base install), so py7zr resolves via
+    # ignore_missing_imports to Any. A dev env with py7zr actually installed
+    # resolves real types and doesn't need the ignore, but the CI job that
+    # gates this is the canonical check, so the ignore must stay for it.
+    class _BoundedMemberIO(Py7zIO):  # type: ignore[misc]
+        """In-memory per-member buffer sharing one cumulative byte budget.
+
+        ``SevenZipFile.readall()`` (removed in py7zr 1.0) decompressed every
+        member into memory first and could only be size-checked afterward.
+        This writer is handed to ``extract()`` instead, so a bomb is caught
+        mid-decompression — the moment the shared budget is exhausted — rather
+        than after the whole archive has already been expanded.
+        """
+
+        def __init__(self, budget: list[int]) -> None:
+            self._buffer = io.BytesIO()
+            self._budget = budget  # [bytes remaining], shared across members
+
+        def write(self, s: bytes | bytearray) -> int:
+            if len(s) > self._budget[0]:
+                raise ArchiveError(
+                    f"7z archive expands beyond the {max_total_bytes}-byte limit"
+                )
+            self._budget[0] -= len(s)
+            return self._buffer.write(s)
+
+        def read(self, size: int | None = None) -> bytes:
+            return self._buffer.read(size)
+
+        def seek(self, offset: int, whence: int = 0) -> int:
+            return self._buffer.seek(offset, whence)
+
+        def flush(self) -> None:
+            self._buffer.flush()
+
+        def size(self) -> int:
+            pos = self._buffer.tell()
+            self._buffer.seek(0, 2)
+            end = self._buffer.tell()
+            self._buffer.seek(pos)
+            return end
+
+        def getvalue(self) -> bytes:
+            return self._buffer.getvalue()
+
+    class _BoundedWriterFactory(WriterFactory):  # type: ignore[misc]
+        def __init__(self, max_bytes: int) -> None:
+            self._budget = [max_bytes]
+            self.products: dict[str, _BoundedMemberIO] = {}
+
+        def create(self, filename: str) -> Py7zIO:
+            product = _BoundedMemberIO(self._budget)
+            self.products[filename] = product
+            return product
+
     try:
         with py7zr.SevenZipFile(path, mode="r") as archive:
-            # Decompression-bomb pre-check (committee MED-3): readall()
-            # decompresses EVERY member into memory at once, so guard on the
-            # header-declared uncompressed size and entry count BEFORE calling
-            # it — mirroring the zip central-directory guard — instead of OOMing
-            # first and checking sizes after.
-            infos = archive.list()
+            # Decompression-bomb pre-check (committee MED-3): guard on the
+            # header-declared uncompressed size and entry count BEFORE
+            # extracting anything — mirroring the zip central-directory guard.
+            # Directory entries are excluded so this count matches what is
+            # actually yielded below (extract() below is also given only the
+            # non-directory names as targets).
+            infos = [fi for fi in archive.list() if not fi.is_directory]
             if len(infos) > max_entries:
                 raise ArchiveError(
                     f"7z archive has more than {max_entries} entries"
@@ -343,25 +404,27 @@ def _iter_7z(
                     f"7z archive declares {declared} uncompressed bytes, beyond "
                     f"the {max_total_bytes}-byte limit"
                 )
-            contents = archive.readall()
+            factory = _BoundedWriterFactory(max_total_bytes)
+            archive.extract(targets=[fi.filename for fi in infos], factory=factory)
     except ArchiveError:
         raise
-    except Exception as exc:  # py7zr raises a variety of internal errors
+    except (AttributeError, TypeError) as exc:
+        # py7zr's extraction API has moved out from under us before (readall()
+        # was removed in 1.0) — an AttributeError/TypeError here means OUR call
+        # doesn't match the installed py7zr's API, not that the archive itself
+        # is bad. Still fails closed (CRITICAL corrupt_file), but says so
+        # accurately instead of sending a reviewer hunting a file problem that
+        # doesn't exist.
+        raise ArchiveError(
+            f"internal error reading 7z archive (scanner/py7zr API mismatch, "
+            f"not necessarily a corrupt file): {exc}"
+        ) from exc
+    except Exception as exc:  # py7zr raises a variety of format/internal errors
         raise ArchiveError(f"corrupt or unreadable 7z archive: {exc}") from exc
 
-    total = 0
-    count = 0
-    for name, bio in contents.items():
-        count += 1
-        if count > max_entries:
-            raise ArchiveError(f"7z archive has more than {max_entries} entries")
-        data = bio.read()
-        total += len(data)
-        if total > max_total_bytes:
-            raise ArchiveError(
-                f"7z archive expands beyond the {max_total_bytes}-byte limit"
-            )
-        yield name, data
+    for fi in infos:
+        product = factory.products[fi.filename]
+        yield fi.filename, product.getvalue()
 
 
 def _iter_rar(
@@ -401,5 +464,15 @@ def _iter_rar(
                 yield entry.pathname, b"".join(parts)
     except ArchiveError:
         raise
+    except (AttributeError, TypeError) as exc:
+        # Same distinction as _iter_7z: an AttributeError/TypeError here means
+        # our call doesn't match the installed libarchive-c's API, not that
+        # the archive itself is bad. Verified against libarchive-c 5.3 at the
+        # time of writing — file_reader()/.isdir/.pathname/.get_blocks() are
+        # all still current, but this is the exact bug class that hit py7zr.
+        raise ArchiveError(
+            f"internal error reading rar archive (scanner/libarchive-c API "
+            f"mismatch, not necessarily a corrupt file): {exc}"
+        ) from exc
     except Exception as exc:  # libarchive raises its own error hierarchy
         raise ArchiveError(f"corrupt or unreadable rar archive: {exc}") from exc

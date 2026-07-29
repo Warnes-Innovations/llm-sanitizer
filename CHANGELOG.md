@@ -5,6 +5,61 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.1] — 2026-07-29
+
+### Fixed
+
+- **A valid `.7z` archive reported CRITICAL `corrupt_file` instead of being
+  scanned.** `SevenZipFile.readall()` was removed in py7zr 1.0; the `[7z]`
+  extra was declared `py7zr>=0.20` (unbounded), so a fresh resolve installed
+  py7zr 1.x and every 7z extraction died with `AttributeError: 'SevenZipFile'
+  object has no attribute 'readall'` — surfaced to consumers as "corrupt
+  file", sending reviewers hunting a problem their archive didn't have. Same
+  bug class as the 0.4.0 `mcp>=1.0` incident: an unbounded dependency
+  declaration that only a no-lockfile fresh resolve (not `uv.lock`) exposes.
+
+  The reader now uses py7zr's 1.x extraction API (`SevenZipFile.extract()`
+  with a custom `py7zr.io.WriterFactory`) instead of the removed method. The
+  decompression-bomb guard is now enforced *during* extraction (aborts the
+  moment the shared byte budget is exceeded) rather than only before/after —
+  strictly better than the old readall()-based check, which could only size
+  the archive after fully buffering it.
+
+  Internal API-mismatch failures (e.g. this exact class of bug, if py7zr's
+  API moves again) are now reported distinctly from genuine archive
+  corruption — both still fail closed as CRITICAL `corrupt_file`, but the
+  message no longer tells a reviewer their file is corrupt when the real
+  problem is a scanner/backend defect. Applied to both the 7z and RAR readers.
+
+### Changed
+
+- **Dependency upper bounds**, closing the gap that let the bug above ship:
+  `py7zr` now `>=1.0,<2` (floor raised, not just capped — the WriterFactory
+  API used above doesn't exist before 1.0) and `libarchive-c` now `>=5.0,<6`.
+  Audited and bounded every other previously-unbounded dependency for the
+  same pattern: `httpx>=0.27,<1`, `pydantic>=2.0,<3`, `filetype>=1.2,<2`,
+  `pypdf>=4.0,<7`, `markitdown[...]>=0.1,<1`, `striprtf>=0.0.26,<1`.
+- CI's no-lockfile wheel-install job (added after the 0.4.0 incident) never
+  installed the `[7z,rar]` extras, so it could not have caught this. It now
+  installs a second clean environment with both extras and actually extracts
+  a `.7z` archive through `Scanner`, asserting the payload inside is found —
+  not merely that no exception was raised.
+- **`scan_url`/`redact_url` could not tell a caller "this page could not be
+  verified" from "the scan failed"** when a managed WAF (Cloudflare/Akamai)
+  refused the fetch — both collapsed to the same generic
+  `{"status":"error","message":...}`. A fail-closed caller needs those to be
+  different states with different responses. `read_url` now raises a distinct
+  `FetchBlockedError` (carrying the HTTP status) for a remote 4xx/5xx refusal,
+  and `scan_url`/`redact_url` surface it as
+  `{"status":"error","error_type":"fetch_blocked","http_status":<code>,...}`.
+  Also sends an honest desktop-browser User-Agent (a default/absent UA is
+  itself one of the signals a WAF uses to reject a fetch). Deliberately does
+  **not** add proxy routing or other bot-protection bypass — llm-sanitizer is
+  a trust-boundary tool, and a fetch path through a third-party network that
+  can observe/alter its input works against that; a page that can't be
+  fetched server-side should be pasted into `scan_text` instead (documented
+  in the README).
+
 ## [0.5.0] — 2026-07-28
 
 Minor, not patch: although this repairs a package that could not be installed

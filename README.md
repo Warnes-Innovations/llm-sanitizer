@@ -102,6 +102,17 @@ Add to your MCP configuration:
 Available tools: `scan_text`, `scan_file`, `scan_url`, `scan_dir`, `redact`,
 `redact_file`, `redact_url`, `redact_dir`, `list_rules`.
 
+`scan_url`/`redact_url` fetch server-side with an honest browser UA, but a
+managed WAF (Cloudflare/Akamai) can still refuse the request based on origin
+reputation. That failure comes back as `{"status": "error", "error_type":
+"fetch_blocked", "http_status": <code>, ...}` — distinct from a scan failure,
+so a caller knows the page could not be verified rather than that scanning
+broke. llm-sanitizer will not route fetches through a third-party proxy to
+work around a block (a trust-boundary tool observing/altering its own input
+via another network defeats its own threat model) or otherwise bypass the
+site's bot-protection. For a page that can't be fetched server-side, paste
+its HTML/text and use `scan_text` instead.
+
 ### Python API
 
 ```python

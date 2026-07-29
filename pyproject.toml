@@ -1,6 +1,6 @@
 [project]
 name = "llm-sanitizer"
-version = "0.5.0"
+version = "0.5.1"
 description = "CLI + MCP server for detecting, classifying, and redacting embedded LLM agent instructions in documents, source code, and web pages."
 readme = {file = "README.md", content-type = "text/markdown"}
 authors = [{name = "Gregory R. Warnes", email = "greg@warnes-innovations.com"}]
@@ -42,14 +42,19 @@ dependencies = [
 	# We target the 2.x API (MCPServer); 1.x had FastMCP instead and the two are
 	# mutually exclusive, so this floor is a hard requirement, not a preference.
 	"mcp>=2.0,<3",
-	"httpx>=0.27",
-	"pydantic>=2.0",
+	# Upper bounds below are the same belt-and-suspenders policy as mcp above
+	# (see its comment): each caps at the next major above what's currently
+	# locked (uv.lock), so a fresh consumer resolve can't silently jump a
+	# breaking major the way `mcp>=1.0` and `py7zr>=0.20` (see the 7z extra
+	# below) both did.
+	"httpx>=0.27,<1",
+	"pydantic>=2.0,<3",
 	# Pure-Python (MIT) magic-byte type detection for Tier-1 extension-vs-content
 	# mismatch checks. Matches only known binary signatures (returns None for
 	# text/source), which keeps the check free of content-heuristic false positives.
-	"filetype>=1.2",
+	"filetype>=1.2,<2",
 	# Pure-Python (BSD) PDF parser for Tier-2 bounded structural validation.
-	"pypdf>=4.0",
+	"pypdf>=4.0,<7",
 	# Binary document text extraction. A CORE dependency, not optional: the
 	# file-scanning path (scan_file/scan_dir/redact_file) — and the downstream
 	# flow-guard sanitization protocol that relies on it — cannot scan binary
@@ -64,13 +69,13 @@ dependencies = [
 	# handles — PDF, DOCX, PPTX, XLSX/XLS — and deliberately exclude the
 	# markitdown[all] bloat (azure-doc-intelligence, audio transcription,
 	# youtube) that has no place in a security scanner.
-	"markitdown[pdf,docx,pptx,xlsx,xls]>=0.1",
+	"markitdown[pdf,docx,pptx,xlsx,xls]>=0.1,<1",
 	# Pure-Python (BSD) RTF text extraction. markitdown does NOT handle RTF
 	# (it raises UnsupportedFormatException for '.rtf'), and RTF is ASCII, so
 	# it sniffs as text and would otherwise be rule-scanned as raw control
 	# words. A CORE dependency for the same reason as markitdown: the scanner
 	# must never be silently unable to read a format it is handed.
-	"striprtf>=0.0.26",
+	"striprtf>=0.0.26,<1",
 ]
 
 [dependency-groups]
@@ -96,11 +101,24 @@ dev = [
 # resolving without error.
 binary = []
 # 7z archive extraction. py7zr is LGPL-3.0 (dynamically imported, AGPL-compatible).
-7z = ["py7zr>=0.20"]
+#
+# UPPER AND RAISED LOWER BOUND ARE LOAD-BEARING. This was declared
+# `py7zr>=0.20` (unbounded), and py7zr 1.0 removed `SevenZipFile.readall()`;
+# every fresh install of llm-sanitizer[7z] resolved 1.x and every valid .7z
+# archive reported CRITICAL corrupt_file instead of being expanded (same bug
+# class as the mcp>=1.0 incident — see mcp's comment above). The reader now
+# targets py7zr's 1.x extraction API (`SevenZipFile.extract()` with a custom
+# `py7zr.io.WriterFactory`, which does not exist before 1.0 — verified absent
+# in the 0.20.0/0.21.0/0.22.0 wheels), so the *floor* also had to move to 1.0,
+# not just gain a ceiling.
+7z = ["py7zr>=1.0,<2"]
 # RAR (and general libarchive-backed) extraction. libarchive-c wraps the
 # BSD-licensed libarchive; the Python wrapper is CC0. Requires the system
-# libarchive shared library to be installed.
-rar = ["libarchive-c>=5.0"]
+# libarchive shared library to be installed. Bounded for the same reason as
+# 7z above; the reader's use of file_reader()/.isdir/.pathname/.get_blocks()
+# was verified against libarchive-c 5.3 (current at time of writing) and
+# still matches, but an unbounded upper is exactly what let the 7z break ship.
+rar = ["libarchive-c>=5.0,<6"]
 
 [project.urls]
 Homepage = "https://github.com/Warnes-Innovations/llm-sanitizer"
@@ -149,5 +167,5 @@ strict = true
 # import errors when the module is absent (these imports are lazy, guarded by
 # try/except ImportError).
 [[tool.mypy.overrides]]
-module = ["py7zr", "markitdown", "pypdf", "filetype", "libarchive"]
+module = ["py7zr.*", "markitdown", "pypdf", "filetype", "libarchive"]
 ignore_missing_imports = true

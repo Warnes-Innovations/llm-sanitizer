@@ -46,10 +46,25 @@ _INTERCHAR = re.compile(
 # CRITICAL. Deliberately repeating one separator is the actual obfuscation
 # pattern; mixed punctuation is just writing.
 #
+# Repeated SPACE or TAB is excluded from the repeated-char class (unlike
+# _INTERCHAR, which keeps space for single-gap interchar splits like
+# "i g n o r e" — that is untouched here). A repeated space/tab has no
+# evasion value: every phrase pattern in this ruleset already bridges
+# whitespace with `\s+`/`[^.\n]{0,60}?`, so "ignore    all" is caught
+# identically to "ignore all" with no reconstruction needed, and repeated
+# space/tab is exactly how benign content aligns columns — markdown tables,
+# fixed-width text tables, ASCII diagrams. Without this exclusion, any such
+# table "looks split", gets reconstructed (collapsing its column padding to
+# single spaces), and an accidental match on the reconstructed text is
+# reported as character-splitting obfuscation on ordinary formatting. The
+# real obfuscation patterns (`___`, `...`, `|||`) are all non-whitespace and
+# stay fully covered.
+#
 # Anchored on the separator run (single word chars either side, no greedy {2,}
 # alnum quantifier) so it cannot backtrack quadratically on a long
 # separator-free run; \1+ is a plain greedy repeat of one literal character.
-_MULTISEP = re.compile(r"[0-9A-Za-z]([" + _SEP_CHARS + r"])\1+[0-9A-Za-z]")
+_MULTISEP_SEP_CHARS = "_.·*|-"
+_MULTISEP = re.compile(r"[0-9A-Za-z]([" + _MULTISEP_SEP_CHARS + r"])\1+[0-9A-Za-z]")
 
 # Tokenize into word / whitespace-run / punctuation-run pieces.
 _TOKEN = re.compile(r"[0-9A-Za-z]+|\s+|[^0-9A-Za-z\s]+")
