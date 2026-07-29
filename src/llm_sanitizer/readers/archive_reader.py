@@ -328,7 +328,13 @@ def _iter_7z(
             "pip install llm-sanitizer[7z]"
         ) from exc
 
-    class _BoundedMemberIO(Py7zIO):
+    # The ignore[misc] comments on both classes below silence mypy's
+    # "subclassing Any" complaint: the typecheck CI job does not install the
+    # [7z] extra (matching a base install), so py7zr resolves via
+    # ignore_missing_imports to Any. A dev env with py7zr actually installed
+    # resolves real types and doesn't need the ignore, but the CI job that
+    # gates this is the canonical check, so the ignore must stay for it.
+    class _BoundedMemberIO(Py7zIO):  # type: ignore[misc]
         """In-memory per-member buffer sharing one cumulative byte budget.
 
         ``SevenZipFile.readall()`` (removed in py7zr 1.0) decompressed every
@@ -369,7 +375,7 @@ def _iter_7z(
         def getvalue(self) -> bytes:
             return self._buffer.getvalue()
 
-    class _BoundedWriterFactory(WriterFactory):
+    class _BoundedWriterFactory(WriterFactory):  # type: ignore[misc]
         def __init__(self, max_bytes: int) -> None:
             self._budget = [max_bytes]
             self.products: dict[str, _BoundedMemberIO] = {}
