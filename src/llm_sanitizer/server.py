@@ -98,11 +98,21 @@ def scan_url(url: str, sensitivity: str = "medium") -> str:
         JSON string with findings report.
     """
     from llm_sanitizer.formatters.json_format import format_json
-    from llm_sanitizer.readers.url_reader import read_url
+    from llm_sanitizer.readers.url_reader import FetchBlockedError, read_url
     from llm_sanitizer.scanner import Scanner
 
     try:
         content = read_url(url)
+    except FetchBlockedError as exc:
+        # The remote server refused the fetch (WAF/4xx) — distinct from a
+        # scan failure: the caller cannot verify this page and should route
+        # it to human review, not treat it as "the scanner is broken" (#19).
+        return json.dumps({
+            "status": "error",
+            "error_type": "fetch_blocked",
+            "http_status": exc.status_code,
+            "message": str(exc),
+        })
     except RuntimeError as exc:
         return json.dumps({"status": "error", "message": str(exc)})
 
@@ -271,6 +281,7 @@ def redact_url(url: str, output_path: str, mode: str = "strip", sensitivity: str
     Returns:
         JSON string with status and output path.
     """
+    from llm_sanitizer.readers.url_reader import FetchBlockedError
     from llm_sanitizer.readers.url_reader import read_url as _read_url
     from llm_sanitizer.redactor import redact_content
 
@@ -285,6 +296,14 @@ def redact_url(url: str, output_path: str, mode: str = "strip", sensitivity: str
             "source": url,
             "output_path": output_path,
             "findings_redacted": result.summary.total_findings,
+        })
+    except FetchBlockedError as exc:
+        # See scan_url: distinct from a redact failure (#19).
+        return json.dumps({
+            "status": "error",
+            "error_type": "fetch_blocked",
+            "http_status": exc.status_code,
+            "message": str(exc),
         })
     except (RuntimeError, OSError, ValueError) as exc:
         return json.dumps({"status": "error", "message": str(exc)})

@@ -15,7 +15,69 @@ from pathlib import Path
 
 import pytest
 
-from llm_sanitizer.server import main, redact_dir, redact_file, scan_dir, scan_file
+from llm_sanitizer.server import (
+    main,
+    redact_dir,
+    redact_file,
+    redact_url,
+    scan_dir,
+    scan_file,
+    scan_url,
+)
+
+
+class TestScanUrlFetchBlocked:
+    """Issue #19: a WAF/HTTP-4xx block must be distinguishable in the JSON
+    payload from any other error, so a fail-closed caller can route it to
+    human review rather than treating it as a scan failure."""
+
+    def test_scan_url_reports_fetch_blocked_distinctly(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from llm_sanitizer.readers.url_reader import FetchBlockedError
+
+        def _boom(url: str) -> str:
+            raise FetchBlockedError(403, url)
+
+        monkeypatch.setattr("llm_sanitizer.readers.url_reader.read_url", _boom)
+        payload = json.loads(scan_url("https://example.test/"))
+        assert payload == {
+            "status": "error",
+            "error_type": "fetch_blocked",
+            "http_status": 403,
+            "message": "HTTP 403 fetching https://example.test/",
+        }
+
+    def test_scan_url_other_runtime_errors_stay_generic(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        def _boom(url: str) -> str:
+            raise RuntimeError("blocked SSRF target")
+
+        monkeypatch.setattr("llm_sanitizer.readers.url_reader.read_url", _boom)
+        payload = json.loads(scan_url("https://example.test/"))
+        assert payload["status"] == "error"
+        assert "error_type" not in payload
+        assert payload["message"] == "blocked SSRF target"
+
+    def test_redact_url_reports_fetch_blocked_distinctly(
+        self, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+    ) -> None:
+        from llm_sanitizer.readers.url_reader import FetchBlockedError
+
+        def _boom(url: str) -> str:
+            raise FetchBlockedError(403, url)
+
+        monkeypatch.setattr("llm_sanitizer.readers.url_reader.read_url", _boom)
+        payload = json.loads(
+            redact_url("https://example.test/", str(tmp_path / "out.txt"))
+        )
+        assert payload == {
+            "status": "error",
+            "error_type": "fetch_blocked",
+            "http_status": 403,
+            "message": "HTTP 403 fetching https://example.test/",
+        }
 
 
 class TestScanFileArchiveHandling:

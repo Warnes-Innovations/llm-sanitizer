@@ -37,6 +37,25 @@ _MAX_REDIRECTS = 5
 # Cap on the response body read from an untrusted endpoint (10 MiB). Scanned
 # documents are text/markup; a body larger than this is treated as hostile.
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
+# An honest desktop-browser UA (issue #19): a default/absent UA is one of the
+# signals managed WAFs (Cloudflare/Akamai) use to reject a fetch outright, and
+# masquerading as something other than an HTTP client is not itself an evasion
+# — legitimate browsers all send exactly this kind of string.
+_USER_AGENT = (
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+    "(KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
+)
+
+
+class FetchBlockedError(RuntimeError):
+    """The remote server actively refused the fetch (HTTP 4xx/5xx) — e.g. a
+    WAF block — as opposed to a local failure (SSRF guard, DNS, timeout, size
+    cap). Callers need to tell these apart (issue #19): a WAF block means
+    "cannot verify this page, route to human review", not "the scan failed"."""
+
+    def __init__(self, status_code: int, url: str) -> None:
+        self.status_code = status_code
+        super().__init__(f"HTTP {status_code} fetching {url}")
 
 
 def _addr_is_blocked(addr: ipaddress.IPv4Address | ipaddress.IPv6Address) -> bool:
@@ -189,14 +208,19 @@ def read_url(url: str) -> str:
     response body is bounded to :data:`_MAX_RESPONSE_BYTES`.
 
     Raises:
-        RuntimeError: If the HTTP request fails, an SSRF guard blocks a hop, or
-            the response body exceeds the size cap.
+        FetchBlockedError: If the remote server refused the request (HTTP
+            4xx/5xx) — distinct from other failures because it means the
+            content could not be verified, not that scanning itself failed.
+        RuntimeError: If the SSRF guard blocks a hop, DNS resolution fails,
+            a redirect loop occurs, or the response body exceeds the size cap.
     """
     import httpx
 
     current = url
     try:
-        with httpx.Client(follow_redirects=False, timeout=30.0) as client:
+        with httpx.Client(
+            follow_redirects=False, timeout=30.0, headers={"User-Agent": _USER_AGENT}
+        ) as client:
             for _ in range(_MAX_REDIRECTS + 1):
                 host, ips = _assert_safe_url(current)
                 # Pin the connection to the just-validated IP(s) so httpx cannot
@@ -215,8 +239,6 @@ def read_url(url: str) -> str:
                     return _read_capped(response)
         raise RuntimeError(f"too many redirects fetching {url}")
     except httpx.HTTPStatusError as exc:
-        raise RuntimeError(
-            f"HTTP {exc.response.status_code} fetching {url}"
-        ) from exc
+        raise FetchBlockedError(exc.response.status_code, url) from exc
     except httpx.RequestError as exc:
         raise RuntimeError(f"Request error fetching {url}: {exc}") from exc

@@ -15,6 +15,7 @@ import pytest
 
 from llm_sanitizer.readers import url_reader
 from llm_sanitizer.readers.url_reader import (
+    FetchBlockedError,
     _assert_safe_url,
     _ip_is_blocked,
     _read_capped,
@@ -116,6 +117,98 @@ def test_read_url_blocks_before_request(monkeypatch) -> None:
     monkeypatch.setattr(socket, "getaddrinfo", _boom)
     with pytest.raises(RuntimeError, match="scheme"):
         read_url("file:///etc/passwd")
+
+
+class _FakeStreamResponse:
+    """Stand-in for the object yielded by httpx.Client.stream()'s context
+    manager: fixed status (never a redirect), and raise_for_status() raises a
+    real httpx.HTTPStatusError when *status_code* is >= 400, matching real
+    httpx behavior closely enough to exercise read_url's except clause."""
+
+    def __init__(self, status_code: int, body: bytes = b"") -> None:
+        self.status_code = status_code
+        self.is_redirect = False
+        self.headers: dict[str, str] = {}
+        self.encoding = "utf-8"
+        self._body = body
+
+    def raise_for_status(self) -> None:
+        import httpx
+
+        if self.status_code >= 400:
+            request = httpx.Request("GET", "https://example.test/")
+            response = httpx.Response(self.status_code, request=request)
+            raise httpx.HTTPStatusError(
+                f"status {self.status_code}", request=request, response=response
+            )
+
+    def iter_bytes(self):  # noqa: ANN201 - test stub
+        yield self._body
+
+    def __enter__(self) -> "_FakeStreamResponse":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+
+class _FakeClient:
+    """Stand-in for httpx.Client capturing constructor kwargs (to assert the
+    honest UA header is set) and returning a fixed response from .stream()."""
+
+    def __init__(self, status_code: int, body: bytes = b""):
+        self._status_code = status_code
+        self._body = body
+        self.captured_kwargs: dict[str, object] = {}
+
+    def __call__(self, **kwargs: object) -> "_FakeClient":
+        self.captured_kwargs = kwargs
+        return self
+
+    def __enter__(self) -> "_FakeClient":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        return None
+
+    def stream(self, method: str, url: str) -> _FakeStreamResponse:
+        return _FakeStreamResponse(self._status_code, self._body)
+
+
+class TestReadUrlHttpErrors:
+    def test_403_raises_fetch_blocked_error_with_status_code(
+        self, monkeypatch
+    ) -> None:
+        monkeypatch.setattr(
+            socket, "getaddrinfo",
+            lambda *a, **k: [(socket.AF_INET, None, None, "", ("93.184.216.34", 443))],
+        )
+        import httpx
+
+        monkeypatch.setattr(httpx, "Client", _FakeClient(403))
+        with pytest.raises(FetchBlockedError) as excinfo:
+            read_url("https://example.test/")
+        assert excinfo.value.status_code == 403
+        assert "403" in str(excinfo.value)
+
+    def test_fetch_blocked_error_is_a_runtime_error(self) -> None:
+        # Existing callers that catch the base RuntimeError must still work.
+        assert issubclass(FetchBlockedError, RuntimeError)
+
+    def test_honest_user_agent_is_sent(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            socket, "getaddrinfo",
+            lambda *a, **k: [(socket.AF_INET, None, None, "", ("93.184.216.34", 443))],
+        )
+        import httpx
+
+        fake_client = _FakeClient(200, b"hello")
+        monkeypatch.setattr(httpx, "Client", fake_client)
+        content = read_url("https://example.test/")
+        assert content == "hello"
+        headers = fake_client.captured_kwargs.get("headers")
+        assert headers is not None
+        assert "Mozilla" in headers["User-Agent"]
 
 
 class TestDnsRebindingPin:
