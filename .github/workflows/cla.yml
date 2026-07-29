@@ -5,9 +5,8 @@
 # and records the signature. Belt-and-suspenders with the DCO check (dco.yml).
 #
 # BEFORE ENABLING (not yet verified in this draft):
-#   1. Verify the current release of contributor-assistant/github-action and PIN IT TO A FULL
-#      COMMIT SHA (repo policy — Dependabot maintains action SHA pins). The `@v2` tag below is a
-#      placeholder and has NOT been verified.
+#   1. DONE — pinned to contributor-assistant/github-action's latest release, v2.6.1
+#      (2024-09-26), commit ca4a40a7d1004f18d9960b404b97e5f30a505a08.
 #   2. Create a Personal Access Token (classic: `repo` scope, or fine-grained: contents+PRs write)
 #      and store it as the repo secret `CLA_SIGNATURES_TOKEN`. The bot uses it to commit signature
 #      records to the `cla-signatures` branch. The default GITHUB_TOKEN cannot push to a protected
@@ -34,7 +33,7 @@ jobs:
     steps:
       - name: "CLA Assistant"
         if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
-        uses: contributor-assistant/github-action@v2  # TODO: verify current release and pin to a full SHA
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08  # v2.6.1
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # PAT that can write to the signature-storage branch (see header notes):
