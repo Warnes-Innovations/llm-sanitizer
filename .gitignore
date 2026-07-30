@@ -64,4 +64,18 @@ Thumbs.db
 #
 # The DIRECTORY is excluded rather than the single filename, so a second working paper
 # dropped alongside it is covered without anyone having to remember this rule.
+#
+# The patterns below extend that to material that lands under a different name or path.
+# They are a SECOND LAYER: legal working papers, vulnerability assessments, security
+# reviews and incident notes belong in the PRIVATE repo Warnes-Innovations/confidential,
+# outside this working tree entirely. That separation is the real control. One mechanism
+# is a single point of failure; this is the one that catches a copy that lands anyway.
+#
+# If a file legitimately matches, `git add -f` it and narrow the pattern — do not widen
+# the rule.
 docs/legal/
+**/*counsel*
+**/*vulnerability-assessment*
+**/*pentest*
+**/*incident-report*
+CONFIDENTIAL*
