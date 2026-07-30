@@ -54,3 +54,14 @@ Thumbs.db
 
 # Claude Code per-machine settings
 .claude/settings.local.json
+
+# Legal working papers — NEVER commit these to THIS repository. It is PUBLIC.
+#
+# The canonical CLA counsel brief lives in the PRIVATE repo
+# Warnes-Innovations/contribution-gates, under legal/. A working copy showed up here
+# untracked and unignored on 2026-07-29; it had never been committed (verified across
+# all refs and all history), but nothing stood between it and the next `git add -A`.
+#
+# The DIRECTORY is excluded rather than the single filename, so a second working paper
+# dropped alongside it is covered without anyone having to remember this rule.
+docs/legal/
