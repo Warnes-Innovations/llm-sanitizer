@@ -1,0 +1,20 @@
+# Read by ~/src/agent-config/tools/check_confidential.py
+#
+# One of:
+#   public-bound   — this repository is published, or is intended to be. Scan every
+#                    commit for confidential material.
+#   always-private — this repository will never be published. Skip the scan.
+#
+# ABSENT FILE MEANS public-bound. That default is deliberate: a repository nobody has
+# classified is exactly the one where nobody has considered the question.
+intent: public-bound
+
+# NOTE THAT THIS REPOSITORY IS CURRENTLY PRIVATE, AND THE DECLARATION SAYS public-bound
+# ANYWAY. That is the entire reason this file records INTENT rather than the scanner
+# reading `gh repo view --json visibility`.
+#
+# bastion is slated to become public (PLAN.md, item T8). A check gated on today's
+# visibility would skip this repository — which is precisely where a confidential file
+# committed now becomes public later, with no further action by anyone and no second
+# review. A check that passes today and publishes tomorrow is worse than no check,
+# because the commit already looked reviewed.
