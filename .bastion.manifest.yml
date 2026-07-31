@@ -1,11 +1,11 @@
 # Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
 # SPDX-License-Identifier: AGPL-3.0-or-later
 #
-# Sensitivity of every tracked file. Checked by `bastion classify`.
+# Sensitivity of every tracked file. Checked by `bastion check-manifest`.
 #
 # Valid: privileged, security-sensitive, internal, public-safe
 #
-# `bastion classify` reports what is unclassified; it never assigns a value. Every entry
+# `bastion check-manifest` reports what is unclassified; it never assigns a value. Every entry
 # below is a decision someone made, and the rationale exists so it can be disagreed with.
 #
 # A file matched by several rules takes the MOST restrictive of them.
@@ -36,52 +36,52 @@ version: 1
 
 rules:
   - path: "src/**"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: "Shipped source of a published AGPL tool."
 
   - path: "tests/**"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: >
       Test suite. Contains deliberately secret-SHAPED fixtures — that is the point of
       testing a secret scanner — but they are synthetic and already public.
 
   - path: "docs/**"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: "Design spec, data-handling notes, announcement copy. Published."
 
   - path: "data-raw/**"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: >
       Dataset fetchers and pinned revisions for public corpora. Records which public
       sources are used and at which revision; no private data.
 
   - path: "scripts/**"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: "Maintenance scripts for a published project."
 
   - path: ".personas/**"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: >
       Reviewer personas and their committee-review outputs. Reviews of a public tool,
       published alongside it — the honest-disclosure posture this project takes.
 
   - path: ".github/**"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: >
       CI, issue templates, and the CLA workflow. Secrets referenced by name only.
 
   - path: ".claude/**"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: "A publish command definition; no credentials, no machine paths."
 
   - path: "wiki/**"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: >
-      Project wiki. The per-page sensitivity field is NOT enabled here; enable it in
+      Project wiki. The per-page classification field is NOT enabled here; enable it in
       wiki/SCHEMA.md if this wiki ever accumulates findings about unfixed weaknesses.
 
   - path: "*"
-    sensitivity: public-safe
+    classification: public-safe
     rationale: >
       Repo-root files: README, LICENSE, CLA, DCO, CONTRIBUTING, pyproject, linter and
       scanner configs. All already public. Matches root files ONLY (`*` is `[^/]*`).
