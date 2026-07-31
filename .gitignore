@@ -55,6 +55,12 @@ Thumbs.db
 # Claude Code per-machine settings
 .claude/settings.local.json
 
+# Linked git worktrees for non-trivial work. NOT ignored until 2026-07-31, which meant
+# a worktree created under the repo root — the documented convention — was one
+# `git add -A` away from committing an entire second checkout into a PUBLIC repo.
+# Same shape as the untracked-and-unignored hazard described below, minus the luck.
+/worktrees/
+
 # Legal working papers — NEVER commit these to THIS repository. It is PUBLIC.
 #
 # The canonical CLA counsel brief lives in the PRIVATE repo

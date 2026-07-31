@@ -76,6 +76,19 @@ dependencies = [
 	# words. A CORE dependency for the same reason as markitdown: the scanner
 	# must never be silently unable to read a format it is handed.
 	"striprtf>=0.0.26,<1",
+	# THE CONFIG FORMAT'S OWN PARSER, and its absence was a silent fail-open.
+	#
+	# `.llm-sanitizer.yml` is the documented way to disable rules and set sensitivity,
+	# and until 2026-07-31 pyyaml was not declared at all. `config.py` returned defaults
+	# SILENTLY when the import failed, so in the environment consumers actually use
+	# (`uvx --from git+...@<tag>` — verified on v0.5.1 that `import yaml` fails there)
+	# every config file was inert, while `list_rules` went on describing itself as
+	# reporting "what actually runs".
+	#
+	# Same argument as markitdown and striprtf above: the scanner must never be silently
+	# unable to read something it is handed. A config it cannot parse is now a hard
+	# error, which makes this dependency load-bearing rather than convenience.
+	"pyyaml>=6.0,<7",
 ]
 
 [dependency-groups]

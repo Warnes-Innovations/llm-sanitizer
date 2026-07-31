@@ -5,6 +5,58 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **A `.llm-sanitizer.yml` that exists was silently ignored.** `pyyaml` was
+  never a declared dependency, and `config.py` returned defaults *silently*
+  when the import failed — on a path reached only after confirming a config
+  file is present:
+
+  ```python
+  if not _YAML_AVAILABLE:
+      # PyYAML not installed — return defaults silently
+      return SanitizerConfig()
+  ```
+
+  This was live, not theoretical. In the environment consumers actually use —
+  `uvx --from git+https://github.com/Warnes-Innovations/llm-sanitizer.git@v0.5.1`,
+  which is what bastion's scanner wiring creates — `import yaml` fails.
+  Verified 2026-07-31. So in that deployment every config file was inert while
+  `list_rules` went on documenting itself as reporting "what actually runs". An
+  operator who disabled a rule saw it disabled in their config and enabled in
+  reality; one who raised `sensitivity` silently got the default.
+
+  **The latent half is worse than the live half.** Because the failure was
+  silent, `pyyaml` arriving transitively — via any dependency, at any time —
+  would have made every checked-in `enabled: false` become live *at once*, with
+  no event marking the change. Failing closed means that transition can now only
+  run from "loud error" to "working", never from "silently ignored" to
+  "suddenly enforcing something different".
+
+  Two changes, and the first is the actual fix: `pyyaml>=6.0,<7` is now a
+  declared (and bounded) dependency, and the absent-yaml branch raises
+  `ConfigError` instead of returning defaults. With the declaration in place
+  that branch should be unreachable; it is the backstop for a consumer who
+  installs with `--no-deps` or vendors the source.
+
+  Same bug class as the 0.4.0 `mcp>=1.0` and 0.5.1 `py7zr>=0.20` incidents: a
+  dependency declaration that only a fresh no-lockfile resolve exposes. `py7zr`
+  is the closest cousin — it reported a valid archive as CRITICAL/corrupt, which
+  was at least *loud*. This one was silent, which is why it survived longer.
+
+### Changed
+
+- **A config file that cannot be read is now an error, not a fallback.**
+  `load_config()` raises the new `ConfigError` when `.llm-sanitizer.yml` is
+  present but unreadable, rather than quietly substituting defaults.
+
+  **Not a breaking change for a deployment with no config file** — that case is
+  unchanged and still returns defaults, because nothing was promised there. The
+  only newly-failing case is "there *is* a policy and we cannot apply it", where
+  the previous behaviour was to report one policy while enforcing another.
+
 ## [0.5.1] — 2026-07-29
 
 ### Fixed

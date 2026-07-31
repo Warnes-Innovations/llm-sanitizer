@@ -872,6 +872,21 @@ files that had findings.
 Located at the project root (or any parent directory). Loaded automatically
 by CLI; passed explicitly via MCP tools.
 
+**Loading fails closed.** If the file is present but cannot be read —
+unparseable, or an install lacking `PyYAML` — `load_config()` raises
+`ConfigError`. It does *not* fall back to defaults.
+
+This is not a style preference. Until 2026-07-31 it did fall back, silently, and
+`pyyaml` was not a declared dependency at all — so in the `uvx --from git+...`
+environment consumers use, every config file was inert while `list_rules`
+described itself as reporting "what actually runs". A scanner that reports one
+policy while enforcing another is worse than one that refuses to start, because
+the operator gets no signal that anything is wrong.
+
+The silence also made it *latent*: had `pyyaml` arrived transitively, every
+checked-in `enabled: false` would have become live at once, with nothing marking
+the change. Absence of a config file remains a normal, non-error state.
+
 ```yaml
 # .llm-sanitizer.yml
 

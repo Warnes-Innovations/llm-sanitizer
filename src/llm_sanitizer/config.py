@@ -13,8 +13,18 @@ from typing import Any
 try:
     import yaml  # type: ignore[import-untyped]
     _YAML_AVAILABLE = True
-except ImportError:
+except ImportError:  # pragma: no cover - pyyaml is a declared dependency
     _YAML_AVAILABLE = False
+
+
+class ConfigError(RuntimeError):
+    """A config file exists and could not be honoured.
+
+    Deliberately NOT recoverable-by-default. Every caller that wants to keep going
+    without a config can simply not have one; the case this guards is "there is a
+    config, and we cannot apply it", where continuing means reporting one policy while
+    enforcing another.
+    """
 
 
 @dataclass
@@ -146,8 +156,32 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
         return SanitizerConfig()
 
     if not _YAML_AVAILABLE:
-        # PyYAML not installed — return defaults silently
-        return SanitizerConfig()
+        # WAS: "PyYAML not installed — return defaults silently". It is now a hard error,
+        # and `pyyaml` is a declared dependency so this branch should be unreachable.
+        #
+        # THE FAIL-OPEN. We have just established that a config file EXISTS. Returning
+        # defaults there tells the caller the policy is in force while running a
+        # different policy — and `list_rules` documents itself as reporting "what
+        # actually runs", so the tool would confidently report rules the operator
+        # disabled as active, and vice versa.
+        #
+        # Verified 2026-07-31 against v0.5.1: `pyyaml` was NOT declared, and in the
+        # environment consumers actually use — `uvx --from git+...@v0.5.1`, which is what
+        # bastion's INV-7 wiring creates — `import yaml` failed. So every
+        # `.llm-sanitizer.yml` in that deployment was inert, silently.
+        #
+        # It is also LATENT, which is the worse half: pyyaml arriving transitively would
+        # make every checked-in `enabled: false` become live AT ONCE, with no event
+        # marking the change. Failing closed here means that transition can only ever go
+        # from "loud error" to "working", never from "silently ignored" to "suddenly
+        # enforcing something different".
+        raise ConfigError(
+            f"{cfg_path} exists but PyYAML is not installed, so it cannot be read. "
+            "Refusing to continue with default rules: that would report a policy as "
+            "in force while running a different one. Install PyYAML "
+            "(`pip install pyyaml`), or remove the config file to accept the defaults "
+            "deliberately."
+        )
 
     with open(cfg_path) as fh:
         raw: dict[str, Any] = yaml.safe_load(fh) or {}
