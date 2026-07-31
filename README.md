@@ -126,6 +126,15 @@ print(result.findings)  # [Finding(rule='comment_directive', risk='high', ...)]
 
 Create `.llm-sanitizer.yml` at your project root:
 
+> **A config file that exists is always applied, or the scan fails.** If
+> `.llm-sanitizer.yml` is present but cannot be read — an unparseable file, or a
+> stripped-down install without `PyYAML` — the scanner raises `ConfigError`
+> instead of falling back to defaults. Reporting one policy while enforcing a
+> different one is the failure this refuses to have.
+>
+> Having *no* config file is unaffected: the built-in defaults apply, and that is
+> a deliberate choice rather than a silent one.
+
 ```yaml
 sensitivity: medium                    # low | medium | high
 
