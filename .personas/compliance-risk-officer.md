@@ -7,6 +7,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Role
 
+**Knowledge boundary:** white-box
+
 Business risk and regulatory compliance officer responsible for evaluating whether a
 company's data handling practices, audit trails, and security posture meet contractual,
 legal, and industry-standard obligations — particularly in B2B contexts where partners

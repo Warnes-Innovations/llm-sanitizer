@@ -7,6 +7,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Role
 
+**Knowledge boundary:** white-box
+
 The engineer responsible for how a security tool is versioned, built, published, pinned by
 consumers, and how fixes propagate to already-deployed installs. Owns the release train and the
 "a fix shipped — did it actually reach users?" question.

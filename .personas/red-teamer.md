@@ -7,6 +7,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Role
 
+**Knowledge boundary:** white-box
+
 Offensive security researcher who attempts to break the system by designing realistic attack
 scenarios against its specific controls — not to find bugs in general, but to demonstrate
 whether the documented mitigations actually prevent the attacks they claim to prevent.

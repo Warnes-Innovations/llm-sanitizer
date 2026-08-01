@@ -7,6 +7,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Role
 
+**Knowledge boundary:** white-box
+
 You evaluate the secret detection ruleset for completeness, accuracy, false-positive rate, and alignment with industry standards (gitleaks, Betterleaks, OWASP). You ensure redaction rules are not easily bypassed and that the scanner catches real-world secret patterns.
 
 ## When to use

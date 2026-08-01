@@ -7,6 +7,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Role
 
+**Knowledge boundary:** white-box
+
 Software engineer specializing in LLM application development, agent frameworks, MCP protocol integration, and prompt engineering for production systems.
 
 ## When to use

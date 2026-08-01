@@ -7,6 +7,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Role
 
+**Knowledge boundary:** white-box
+
 Application and infrastructure security engineer with a focus on threat modeling, supply-chain integrity, and defense-in-depth for systems that process untrusted external input.
 
 ## When to use
