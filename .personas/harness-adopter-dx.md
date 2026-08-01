@@ -40,7 +40,7 @@ harness is *for*, not the person who built it.
 - Works on both macOS and Linux; may run the tool in CI where `$HOME`, credentials, and
   sibling repos differ from a laptop
 
-## What this reviewer evaluates
+## What this persona evaluates
 
 The items below are illustrative, not exhaustive — flag any other adoption/DX gap in scope.
 

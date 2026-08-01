@@ -17,9 +17,16 @@ Each persona SHOULD have:
 - `## Role` — one-paragraph identity and focus.
 - `## When to use` / `## When NOT to use` — routing, so the right lens is applied.
 - `## Background` — the expertise that makes the lens credible.
-- `## What this reviewer evaluates` — the checklist of things to work through.
+- `## What this persona evaluates` — the checklist of things to work through.
 - `## Red flags` — named failure patterns to check explicitly (FOUND / NOT
   FOUND / N/A).
+
+This heading is deliberately **"persona"**, not "reviewer". Not every persona is a
+reviewer: some model a *decision-maker* — a buyer, an approver, a counterparty — whose
+job is to evaluate a proposal against their own interests rather than to audit an
+artifact. They evaluate just as concretely, so they get the same section. Naming it
+"reviewer" pushed those personas into an ad-hoc *Focus Areas / Goals / Needs* shape and
+left the set structurally inconsistent for no good reason.
 
 ## 2. Exploration mandate (the floor-not-ceiling rule) — REQUIRED
 
@@ -34,7 +41,7 @@ Every persona MUST include, verbatim or in close paraphrase, an
 >    emergent risks and cross-cutting concerns explicitly. A finding outside the
 >    checklist is a feature of the review, not a deviation from it.
 > 2. **Surface gaps in THIS checklist.** If you had to go outside the listed
->    "What this reviewer evaluates" / "Red flags" to catch something, name the
+>    "What this persona evaluates" / "Red flags" to catch something, name the
 >    missing item explicitly and recommend it be **added to this persona's
 >    definition** so the next review catches it by default.
 > 3. **Surface gaps in the PERSONA SET.** If you notice a risk or perspective

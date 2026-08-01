@@ -56,7 +56,7 @@ whether the documented mitigations actually prevent the attacks they claim to pr
 - **In the early design phase** — red-teaming a half-built control set produces findings
   against controls that will change; wait until the design is stable.
 
-## What this reviewer evaluates
+## What this persona evaluates
 
 The items below are illustrative examples of attack categories worth
 probing, not an exhaustive checklist — construct concrete payloads for any

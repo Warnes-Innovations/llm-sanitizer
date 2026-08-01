@@ -47,7 +47,7 @@ conduct their own vendor security assessments.
 - **Early in design when controls are still being chosen** — most valuable after the
   control set is defined, not while it's being debated
 
-## What this reviewer evaluates
+## What this persona evaluates
 
 The items below are illustrative examples of this reviewer's focus, not an
 exhaustive checklist — flag any other compliance or risk gap in scope for

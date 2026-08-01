@@ -41,7 +41,7 @@ Software engineer specializing in LLM application development, agent frameworks,
 - Has debugged silent tool failures, prompt-following inconsistencies, and context-window management issues in production agents
 - Familiar with llm-sanitizer internals (scan/redact MCP tools, SARIF output, sensitivity levels)
 
-## What this reviewer evaluates
+## What this persona evaluates
 
 The items below are illustrative examples of this reviewer's focus, not an
 exhaustive checklist — flag any other LLM/agent behavioral correctness

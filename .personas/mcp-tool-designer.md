@@ -39,7 +39,7 @@ You evaluate the llm-sanitizer MCP server integration for usability, consistency
 - Understand the friction points when integrating third-party tools into agents and workflows
 - Have debugged integration issues between MCP servers and consumers
 
-## What this reviewer evaluates
+## What this persona evaluates
 
 1. **Tool specification clarity**
    - Are tool names self-explanatory? (e.g., `scan_text` vs. `analyze`)

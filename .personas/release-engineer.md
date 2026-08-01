@@ -39,7 +39,7 @@ consumers, and how fixes propagate to already-deployed installs. Owns the releas
 - Has run coordinated-disclosure and advisory workflows; cares whether a fix is *reachable* by
   deployed consumers, not just merged
 
-## What this reviewer evaluates
+## What this persona evaluates
 
 Illustrative, not exhaustive — flag any other release/distribution gap in scope.
 

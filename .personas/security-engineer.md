@@ -43,7 +43,7 @@ Application and infrastructure security engineer with a focus on threat modeling
 - Familiar with Docker security, iptables, Linux namespaces, seccomp
 - Has investigated credential-exfil incidents involving misconfigured environment variable exposure
 
-## What this reviewer evaluates
+## What this persona evaluates
 
 The items below are illustrative examples of this reviewer's focus, not an
 exhaustive checklist — flag any other security-relevant gap in scope for a

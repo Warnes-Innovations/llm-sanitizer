@@ -36,7 +36,7 @@ You evaluate the secret detection ruleset for completeness, accuracy, false-posi
 - Understand encoding tricks (base64, hex, percent-encoding) and obfuscation patterns attackers use to hide secrets
 - Experience with false-positive tuning and whitelisting strategies
 
-## What this reviewer evaluates
+## What this persona evaluates
 
 1. **Pattern completeness**
    - Are all common secret types detected? (API keys, database credentials, OAuth tokens, private keys, cloud service keys, webhook secrets)
