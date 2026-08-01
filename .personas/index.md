@@ -1,6 +1,20 @@
+<!--
+Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
 # llm-sanitizer Committee Review Personas
 
 Expert reviewers for evaluating the LLM injection detection and secret redaction scanner.
+
+All personas in this directory follow [REVIEW-STANDARD.md](REVIEW-STANDARD.md) —
+the shared persona/review contract (structure, and the required §2 exploration
+mandate that makes each checklist a floor rather than a ceiling).
+
+> **Note:** `REVIEW-STANDARD.md` is currently duplicated byte-for-byte with
+> `flow-guard/.personas/REVIEW-STANDARD.md`, as are the four personas common to
+> both repos. That duplication is a known drift risk pending a shared upstream —
+> see the persona-set findings in flow-guard's `docs/agent-ops/execution-routing.md`.
 
 ## Security & Compliance
 

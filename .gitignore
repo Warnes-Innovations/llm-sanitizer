@@ -85,3 +85,23 @@ docs/legal/
 **/*pentest*
 **/*incident-report*
 CONFIDENTIAL*
+
+# OneByOne (OBO) session state — same principle, applied to work-in-progress notes.
+#
+# An OBO session records whatever task happens to be in flight: item titles,
+# descriptions, and the shell commands to run them. In a PUBLIC repo that is an
+# open-ended disclosure channel, because nobody chooses in advance what a future
+# session will contain — a client name, an unreleased plan, a credential pasted
+# into a command, or NDA-bound material are all one ordinary session away.
+#
+# Canonical store is Warnes-Innovations/confidential (obo_sessions/<repo>/), with
+# `.github/obo_sessions` here as a symlink into it. As with the block above, the
+# separation of stores is the control and these patterns are the second layer.
+#
+# BOTH forms are listed on purpose. A trailing slash restricts a pattern to
+# DIRECTORIES, and git does not treat a symlink as a directory — so the slash form
+# alone would stop matching the moment the directory became a symlink, which is
+# exactly what this change does. (That failure was found for real in agent-config,
+# where the slash-only rule had been silently matching nothing.)
+.github/obo_sessions
+.github/obo_sessions/

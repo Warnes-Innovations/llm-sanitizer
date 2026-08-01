@@ -1,3 +1,8 @@
+<!--
+Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+SPDX-License-Identifier: AGPL-3.0-or-later
+-->
+
 # Adversarial Red-Teamer
 
 ## Role
@@ -51,7 +56,7 @@ whether the documented mitigations actually prevent the attacks they claim to pr
 - **In the early design phase** — red-teaming a half-built control set produces findings
   against controls that will change; wait until the design is stable.
 
-## What this reviewer evaluates
+## What this persona evaluates
 
 The items below are illustrative examples of attack categories worth
 probing, not an exhaustive checklist — construct concrete payloads for any
@@ -106,3 +111,15 @@ this persona.
 - **Human review trigger wording mismatch** — "submit a request via the API" may not
   match the trigger "calling any external API with write semantics" if the agent frames
   the action differently
+
+## Exploration mandate
+
+The lists above are a **floor, not a ceiling** (full text: `REVIEW-STANDARD.md`
+§2). Work through every item, then also: (1) **surface unstated-but-relevant
+findings** and cross-cutting risks, including ones outside this persona's named
+scope — a finding outside the checklist is a feature of the review, not a
+deviation; (2) if you had to go outside the checklist to catch something,
+**name the missing item and recommend it be added to this persona**; (3) flag
+any risk that **no persona is positioned to cover** as a persona-set gap and
+recommend who should own it. Hold every finding to the same evidence bar (cite
+the location); the mandate is not license to speculate.
