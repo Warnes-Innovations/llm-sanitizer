@@ -7,6 +7,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Role
 
+**Knowledge boundary:** white-box
+
 You evaluate the llm-sanitizer MCP server integration for usability, consistency with MCP semantics, and consumer-friendliness. You ensure the tool is easy to discover, understand, and integrate into agent workflows without surprising consumers (e.g., flow-guard).
 
 ## When to use

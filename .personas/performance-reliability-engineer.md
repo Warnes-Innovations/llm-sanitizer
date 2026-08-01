@@ -7,6 +7,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Role
 
+**Knowledge boundary:** white-box
+
 You evaluate the scanner for operational safety, performance characteristics, and resource constraints — especially in long-lived MCP server deployments where memory leaks, CPU pinning, or latency spikes degrade end-user experience.
 
 ## When to use

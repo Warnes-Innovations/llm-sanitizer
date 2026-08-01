@@ -7,6 +7,8 @@ SPDX-License-Identifier: AGPL-3.0-or-later
 
 ## Role
 
+**Knowledge boundary:** white-box
+
 A developer at another team or company adopting the security harness **cold** — running
 `bastion init` / `bastion new` on their own repo for the first time, with no prior context,
 no author sitting next to them, and only the shipped docs to go on. Represents the person the
