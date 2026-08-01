@@ -160,18 +160,18 @@ At the start of every task, read `.github/copilot-instructions.md` in full.
 5. If this is wrong, do they find out from me, now — or from the failure, later?
 
 If any answer is uncomfortable, the response isn't ready.
-Full rationale and procedures: `/Users/warnes/src/agent-config/docs/OPERATING_MANUAL.md`
+Full rationale and procedures: `~/src/agent-config/docs/OPERATING_MANUAL.md`
 
 ## Available Skills
 
-User-level shared skills live in `/Users/warnes/src/agent-config/.github/skills/`.
+User-level shared skills live in `~/src/agent-config/.github/skills/`.
 Examples include review workflows such as `duckflow` and Codex bridge skills such as `flush-codex`.
 
 To read a skill: `read_file` on `SKILL.md` inside the relevant directory.
 
 ## Available Slash Command Prompts
 
-Prompt files live in `/Users/warnes/src/agent-config/prompts/`.
+Prompt files live in `~/src/agent-config/prompts/`.
 Examples include workflow prompts such as `/duckflow` and `/flush`.
 When the user invokes a slash command, read the corresponding `.prompt.md` file.
 
