@@ -61,11 +61,60 @@ being frozen at authoring time.
 ## 3. Precision (don't dilute)
 
 The exploration mandate is not license to speculate. Findings must still be
-evidence-based (cite the location), and the reviewer must distinguish an
-intentional, bounded simplification from an actual defect. Surface *more*, but
-hold each finding to the same evidentiary bar.
+evidence-based, and the reviewer must distinguish an intentional, bounded
+simplification from an actual defect. Surface *more*, but hold each finding to
+the same evidentiary bar.
 
-## 4. Severity (say which, always) — REQUIRED
+**Two evidence classes are co-equal.** A finding must carry one of them:
+
+- **Structural evidence** — cite the location (`file:line`, config key, document
+  section). The default for white-box personas, which read the implementation.
+- **Behavioral evidence** — state the exact input, the observed output, and the
+  conditions under which it was produced. The only class available to a
+  **black-box** persona (§4), which by construction cannot cite a location it is
+  not permitted to read.
+
+Both classes must be **reproducible by a third party** from the report alone. A
+structural finding that does not name where it lives, and a behavioral finding
+that does not state what was sent and what came back, both fail the bar.
+"I believe the system would…" is neither, and is not a finding.
+
+## 4. Knowledge boundary (white-box vs black-box) — REQUIRED
+
+Every persona MUST declare a `**Knowledge boundary:**` line immediately under
+`## Role`, with one of two values:
+
+- **white-box** — may read the implementation: source, config, agent
+  definitions, private docs. **This is the default**; a persona with no declared
+  boundary is white-box.
+- **black-box** — may read ONLY the sources its definition explicitly permits,
+  plus behavior it observes by exercising the system. It must not read the
+  implementation, and must not cite it.
+
+A black-box persona MUST additionally:
+
+1. **Enumerate its permitted sources** in its definition. "Pretend you don't
+   know" is not a boundary; a named, checkable list is.
+2. **Open every report with an Access Inventory** — what it actually read and
+   ran. This is what lets a reader calibrate the finding, and it is the only
+   thing standing between a real black-box review and one that peeked.
+3. **State its enforcement level** honestly. A persona file is a prompt, not a
+   sandbox: `.personas/*.md` carry no tool restrictions, so blindness declared
+   here is a *convention*. Where the finding matters enough to need a real
+   control, run the review as a restricted-tool agent or against a checkout
+   containing only the permitted sources, and say in the report which was used.
+
+Rationale: black-box and white-box reviewers fail in opposite directions. A
+white-box reviewer knows which controls exist and therefore tests *those*,
+missing whatever routes around the control set entirely — and it silently
+corrects for documentation that misstates the system, because it read the truth
+in the source. A black-box reviewer tests what a real outsider can actually
+reach, and its findings transfer directly to a real adversary or a real new
+user. Neither substitutes for the other, and a black-box persona judged by the
+structural-evidence bar of §3 would be unable to report anything at all — which
+is why §3 and §4 must move together.
+
+## 5. Severity (say which, always) — REQUIRED
 
 Every finding MUST carry a severity, and every persona MUST use this scale unless
 it defines its own `## Severity rule (persona-specific)` section specialising it.
@@ -92,7 +141,7 @@ required re-ranking every finding by hand instead of merging by declared severit
 A scale that is *specialised* is useful; a scale that is *absent* silently
 defeats consolidation, which is the whole point of running personas in parallel.
 
-## 5. Verify what the document admits it did not — REQUIRED
+## 6. Verify what the document admits it did not — REQUIRED
 
 Where a document marks a claim **unverified**, and verification is available
 **read-only**, the reviewer SHOULD attempt it and report the result.
@@ -109,6 +158,45 @@ itself a checkable claim.** In that review the document said "no available tool
 exposes this endpoint" — which was false, and the false explanation is precisely
 what kept the question open, because it instructed the reader not to try. A caveat
 that misattributes the cause of uncertainty is worse than a bare "not checked".
+
+## 7. Run the checker before committing a persona — REQUIRED
+
+**Agent instruction.** After creating or editing any persona, run the conformance
+gate and paste its output. Do not report the work complete on the strength of
+having read the file.
+
+```bash
+# from bastion-artifacts
+python3 packaging/check_persona_standard.py src/bastion_artifacts/personas
+
+# from a consumer repo that vendors a copy of this standard, with
+# bastion-artifacts checked out as a sibling directory
+python3 ../bastion-artifacts/packaging/check_persona_standard.py .personas
+```
+
+Exit 0 means every persona carries all four REQUIRED clauses: the *floor, not a
+ceiling* headline plus §2's clauses 1, 2 and 3. Exit 1 names each offender and the
+clause it is missing.
+
+**If the gate flags a persona whose clause IS present in a wording it does not
+recognise, add that wording to `CLAUSES` in the checker — do not reword the persona
+to satisfy the regex.** §2 permits close paraphrase; the gate serves the standard,
+not the other way round.
+
+Rationale: this section exists because §2 said REQUIRED and nothing checked it. An
+audit on 2026-08-01 found three personas — `claims-auditor`,
+`data-custody-reviewer`, `shell-portability-engineer` — carrying clauses 1 and 2 but
+**not clause 3**. All three had been hand-written and reviewed, and all three read
+as complete, because the missing clause is the one about risks *outside* the
+persona's own scope: a reader checking a persona against its subject matter has no
+natural reason to notice its absence. Clause 2 makes a persona self-improving;
+clause 3 makes the **roster** self-improving, and its absence silently converts "no
+persona is looking at this" into "no findings".
+
+This is a different question from the one `contribution-gates`' `check_personas.py`
+answers. That compares checklist *inventory* between repos — "do the copies agree?"
+This asks "does this persona meet the standard at all?" All three copies can agree
+perfectly and be uniformly non-conformant, which is very nearly what was found.
 
 ---
 
