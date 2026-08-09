@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# Copyright (C) 2026 Gregory R. Warnes
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """Tests for llm_sanitizer.readers.archive_reader — 7z/rar API-compatibility

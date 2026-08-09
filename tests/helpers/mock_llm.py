@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# Copyright (C) 2026 Gregory R. Warnes
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """MockProtectedLLM -- canary LLM and sandbox I/O adapter for red-team testing.

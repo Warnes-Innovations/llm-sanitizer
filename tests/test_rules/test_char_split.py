@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# Copyright (C) 2026 Gregory R. Warnes
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """Tests for the character-splitting obfuscation rule (committee H7)."""
