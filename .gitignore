@@ -94,7 +94,7 @@ CONFIDENTIAL*
 # session will contain — a client name, an unreleased plan, a credential pasted
 # into a command, or NDA-bound material are all one ordinary session away.
 #
-# Canonical store is Warnes-Innovations/confidential (obo_sessions/<repo>/), with
+# Canonical store is Warnes-Innovations/confidential (oboe_sessions/<repo>/), with
 # a symlink into it here. As with the block above, the separation of stores is the
 # control and these patterns are the second layer.
 #
