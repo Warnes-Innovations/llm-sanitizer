@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# Copyright (C) 2026 Gregory R. Warnes
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """MCP server for llm-sanitizer — 9 tools for scanning and redacting LLM instructions."""

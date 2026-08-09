@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# Copyright (C) 2026 Gregory R. Warnes
 #
 # CLA Assistant — asks first-time contributors to accept CLA.md on their pull request
 # and records the signature. Belt-and-suspenders with the DCO check (dco.yml).
