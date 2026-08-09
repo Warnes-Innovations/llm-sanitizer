@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: AGPL-3.0-or-later
-# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# Copyright (C) 2026 Gregory R. Warnes
 #
 # DCO check — fails a pull request if any of its commits lacks a `Signed-off-by:` trailer.
 # Self-contained (no third-party action) so it needs no app install or extra secrets.

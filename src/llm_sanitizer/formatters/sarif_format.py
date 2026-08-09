@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# Copyright (C) 2026 Gregory R. Warnes
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """SARIF 2.1.0 output formatter for GitHub Code Scanning integration."""
