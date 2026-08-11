@@ -105,3 +105,27 @@ CONFIDENTIAL*
 # where the slash-only rule had been silently matching nothing.)
 .github/obo_sessions
 .github/obo_sessions/
+
+# Committee-review output — the same principle again, and THIS REPO IS PUBLIC.
+#
+# `/committee-review` (a MANDATORY step of `/flush`) writes `persona-reviews/` into
+# whatever tree it runs in: a consolidated report plus one file per persona. Its own
+# prompt says that output "routinely enumerates control gaps across the fleet" — an
+# inventory of where our defenses are weak, which is precisely what must not be
+# published, and unlike a credential it cannot be rotated afterwards.
+#
+# The rule existed ONLY in agent-config (always-private), and the prompt described
+# that arrangement as though every repo inherited it. Verified 2026-08-11 with
+# `git check-ignore --no-index -v persona-reviews`: agent-config matched on both
+# forms, flow-guard matched nothing, and this repo — the PUBLIC one — matched
+# nothing. Nothing had been written yet; that was luck, not a control, and it stopped
+# being luck the moment `/flush` gained standing approval to spawn that step.
+#
+# BOTH forms again, for the reason given above: in agent-config `persona-reviews` is
+# a SYMLINK into the private store, and a trailing-slash pattern does not match a
+# symlink. A slash-only rule here would fail the instant anyone mirrored that layout.
+#
+# This is the SECOND layer. The first is not writing review output into a public tree
+# at all — see the precondition now stated in committee-review.prompt.md Step 4.
+persona-reviews
+persona-reviews/
