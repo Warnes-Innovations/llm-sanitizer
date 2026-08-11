@@ -5,6 +5,42 @@
 # Self-contained (no third-party action) so it needs no app install or extra secrets.
 # Belt-and-suspenders with the CLA Assistant workflow (cla.yml). Contributors sign off with
 # `git commit -s`; see CONTRIBUTING.md and the DCO file for the certification text.
+#
+# ---------------------------------------------------------------------------------------
+# THE OWNER EXEMPTION (Dr. Greg's decision, 2026-08-08; ported here 2026-08-11).
+#
+# WHY IT IS HERE NOW. bastion has carried this exemption since 2026-08-08 and
+# bastion-artifacts gained it on 2026-08-11. This repository did not, and nothing recorded
+# that the three differed — so the first branch after that decision hit the asymmetry:
+# identical agent-authored commits sailed through one repo's gate and were rejected by
+# another's. Three repos maintained in lockstep, disagreeing on the one thing that gates a
+# merge, is a trap that fires on every future coordinated change rather than once.
+#
+# WHY THE EXEMPTION EXISTS AT ALL. The DCO obtains a provenance certification FROM
+# contributors TO the project. Dr. Greg is the sole author and the copyright holder, so his
+# sign-off certifies provenance to himself — ceremony rather than protection. The
+# alternative, an agent writing `Signed-off-by: Gregory R. Warnes` onto commits an agent
+# authored, was refused: that is a legal attestation and it is not an agent's to make.
+#
+# WHAT IT GIVES UP, stated plainly rather than buried. There is no longer a per-commit
+# record that the owner certified provenance on his own commits. If this project ever needs
+# to demonstrate a clean chain of title for HIS contributions, the evidence is the SPDX
+# headers, the CLA, and the commit authorship — not a DCO trailer.
+#
+# WHAT IT DOES NOT GIVE UP. Every commit by anyone else still requires sign-off, and
+# cla.yml is unaffected. This narrows one gate for one identity; it does not remove it.
+#
+# THE BYPASS THIS DELIBERATELY CLOSES. Exempting on the commit author's email ALONE would
+# be forgeable by anyone: `git config user.email greg@warnes-innovations.com` in a fork, and
+# every commit in that PR becomes exempt. So the exemption requires TWO independent signals
+# and BOTH must hold — the GitHub identity that opened the PR (which GitHub asserts and a
+# contributor cannot set) AND the commit author email. A permissive signal may not stand
+# alone.
+#
+# EVERY EXEMPTION IS LOGGED as a ::notice:: naming the commit and the author. An exemption
+# that leaves no trace is indistinguishable from a check that passed — the conflation this
+# project's fail-closed gates exist to refuse.
+# ---------------------------------------------------------------------------------------
 
 name: DCO
 
@@ -28,21 +64,64 @@ jobs:
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          # THE UNFORGEABLE HALF. `pull_request.user.login` is who GitHub says opened the
+          # PR; a contributor cannot set it. The commit author email CAN be set by anyone
+          # (`git config user.email`), so an email-only exemption would let any fork PR opt
+          # out of the DCO by claiming the owner's address. Both are required together.
+          PR_AUTHOR_IS_OWNER: ${{ github.event.pull_request.user.login == 'warnes' }}
+          # Newline-separated, matched with `grep -qxF` so a substring or a lookalike
+          # domain cannot satisfy it.
+          OWNER_EMAILS: |
+            greg@warnes-innovations.com
         run: |
           set -euo pipefail
           missing=0
+          exempt=0
           # Only inspect commits introduced by this PR (base..head), skipping merge commits.
           for commit in $(git rev-list --no-merges "${BASE_SHA}..${HEAD_SHA}"); do
-            if ! git log -1 --format='%B' "${commit}" \
-                 | grep -qiE '^Signed-off-by: .+ <[^@[:space:]]+@[^[:space:]]+>[[:space:]]*$'; then
-              subject=$(git log -1 --format='%s' "${commit}")
-              echo "::error::Commit ${commit} (\"${subject}\") is missing a valid 'Signed-off-by:' line."
-              echo "   Fix with:  git commit -s   (or amend/rebase to add sign-off to existing commits)"
-              missing=1
+            # Captured, NOT piped into `grep -q`. `grep -q` exits on first match, the writer
+            # dies with 141 (SIGPIPE), and `pipefail` promotes that to the pipeline status —
+            # turning a SUCCESSFUL match into a failed check, i.e. reporting a properly
+            # signed commit as unsigned. Same class fixed in the sibling repos' gates on
+            # 2026-08-06; the message is small enough that the writer usually wins the race,
+            # which makes it latent rather than absent. "Usually wins a race" is not a
+            # property a merge gate may rest on.
+            message=$(git log -1 --format='%B' "${commit}")
+            if grep -qiE '^Signed-off-by: .+ <[^@[:space:]]+@[^[:space:]]+>[[:space:]]*$' \
+                 <<<"${message}"; then
+              continue
             fi
+            # OWNER EXEMPTION. See the header for the reasoning and for what it gives up.
+            # TWO INDEPENDENT SIGNALS, BOTH REQUIRED.
+            author=$(git log -1 --format='%ae' "${commit}")
+            # `[ -n "${author}" ]` IS LOAD-BEARING, not defensive noise. `OWNER_EMAILS` is a
+            # YAML `|` block scalar, so its value ends in a newline; `<<<` appends ANOTHER.
+            # The here-string therefore contains an empty final line, and `grep -qxF ""`
+            # matches it — so a commit whose author email is EMPTY (craftable with
+            # `git commit --author='X <>'`) would be silently EXEMPTED. Caught by the
+            # ten-case control on 2026-08-11, in the case written to prove the exemption is
+            # narrow; every case that was supposed to pass did, and this one was supposed
+            # to be rejected and was not.
+            if [ "${PR_AUTHOR_IS_OWNER}" = "true" ] && [ -n "${author}" ] \
+               && grep -qxF "${author}" <<<"${OWNER_EMAILS}"; then
+              subject=$(git log -1 --format='%s' "${commit}")
+              # LOGGED, NEVER SILENT.
+              echo "::notice::DCO EXEMPT (owner): ${commit} (\"${subject}\") authored by ${author}."
+              exempt=$((exempt + 1))
+              continue
+            fi
+            subject=$(git log -1 --format='%s' "${commit}")
+            echo "::error::Commit ${commit} (\"${subject}\") is missing a valid 'Signed-off-by:' line."
+            echo "   Fix with:  git commit -s   (or amend/rebase to add sign-off to existing commits)"
+            missing=1
           done
           if [ "${missing}" -ne 0 ]; then
             echo "::error::One or more commits are missing DCO sign-off. See CONTRIBUTING.md."
             exit 1
           fi
-          echo "All PR commits carry a valid Signed-off-by trailer. ✅"
+          if [ "${exempt}" -ne 0 ]; then
+            echo "All PR commits are accounted for: ${exempt} exempt under the owner exemption" \
+                 "(each logged above as a ::notice::), the rest signed off. ✅"
+          else
+            echo "All PR commits carry a valid Signed-off-by trailer. ✅"
+          fi
