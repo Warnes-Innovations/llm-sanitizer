@@ -129,7 +129,7 @@ The wiki has an optional compiled graph layer under `wiki/graph/`:
 - `wiki/graph/graph.sqlite` — generated. Gitignored by default.
 - `wiki/graph/graph.graphml` — generated. Track only if you want to diff it.
 
-Generation is reproducible from markdown via `scripts/wiki_graph_extract.py`. The graph can be deleted at any time and rebuilt without losing knowledge — markdown is canonical.
+Generation is reproducible from markdown via `wiki_graph_extract.py`, which ships with the external **`llm-wiki` plugin** — it is *not* a file in this repository's `scripts/` directory. If the plugin is not installed, skip the graph layer entirely; it is optional and nothing in the build, tests, or release depends on it. See `wiki/graph/README.md` for the precondition check. The graph can be deleted at any time and rebuilt without losing knowledge — markdown is canonical.
 
 ## Workflow customizations
 

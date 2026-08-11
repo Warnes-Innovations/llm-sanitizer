@@ -2,28 +2,50 @@
 
 This directory holds the compiled knowledge graph derived from the markdown
 wiki. **Markdown is canonical.** Everything here can be deleted and rebuilt
-without losing knowledge:
+without losing knowledge.
 
-```bash
-python scripts/wiki_graph_extract.py wiki/ --out wiki/graph
-```
+## Precondition: the graph tooling ships with the `llm-wiki` plugin, NOT this repo
+
+> **`wiki_graph_extract.py`, `wiki_graph_lint.py` and `wiki_graph_query.py` are
+> not files in this repository.** They belong to the external `llm-wiki`
+> plugin/skill. The `scripts/` directory here contains unrelated project
+> scripts (`check_dataset_revisions.py`, `install-deps.sh`,
+> `train_semantic_intent.py`), so the bare `scripts/…` paths this document used
+> to show would resolve, wrongly, against that directory.
+>
+> **If the `llm-wiki` plugin is not installed, skip this entire document.** The
+> graph layer is optional; the markdown wiki is fully usable without it, and
+> nothing in the build, tests, or release depends on it. Check first:
+>
+> ```bash
+> # The graph commands are reached through the plugin's `wiki:graph` skill.
+> # If the skill is unavailable, there is nothing to run here — stop.
+> ls "$(git rev-parse --show-toplevel)/scripts/"   # confirms these tools are NOT here
+> ```
+>
+> Below, `<llm-wiki>` stands for the plugin's own script directory, wherever the
+> plugin is installed on the machine. Prefer invoking the `wiki:graph` skill,
+> which resolves the paths itself, over typing them by hand.
 
 ## Files
 
 | File | Purpose | Tracking |
 |------|---------|----------|
-| `ontology.yaml` | Declares node types and predicates the graph recognises. The contract `wiki_graph_lint.py` validates against. | **Tracked. Edit by hand.** |
+| `ontology.yaml` | Declares node types and predicates the graph recognises. The contract the plugin's `wiki_graph_lint.py` validates against. | **Tracked. Edit by hand.** |
 | `nodes.jsonl` | One JSON object per node, sorted by id. | Generated. Track if you want graph diffs in PRs; otherwise gitignore. |
 | `edges.jsonl` | One JSON object per edge, sorted by id. Includes typed semantic edges, `mentions`, `sourced_from`, and `summarizes_raw`. | Generated. Same trade-off as `nodes.jsonl`. |
-| `graph.sqlite` | Queryable index used by `wiki_graph_query.py`. Schema: `nodes`, `aliases`, `edges`. | Generated. **Gitignored** — rebuild on demand. |
+| `graph.sqlite` | Queryable index used by the plugin's `wiki_graph_query.py`. Schema: `nodes`, `aliases`, `edges`. | Generated. **Gitignored** — rebuild on demand. |
 | `graph.graphml` | GraphML export for tools like Gephi or yEd. | Generated. Gitignored by default. |
 
 ## Workflow
 
 1. Author or edit a wiki page. Add typed `graph.relationships` only when an explicit source supports them.
-2. Run `python scripts/wiki_graph_lint.py wiki/` — catches unknown predicates, broken object references, missing evidence, alias collisions.
-3. Run `python scripts/wiki_graph_extract.py wiki/ --out wiki/graph` — regenerates the artifacts above.
-4. Query with `python scripts/wiki_graph_query.py wiki/ neighbors --node product:example-widget` (or `edges`, `path`, `facts`).
+2. Run `python <llm-wiki>/wiki_graph_lint.py wiki/` — catches unknown predicates, broken object references, missing evidence, alias collisions.
+3. Run `python <llm-wiki>/wiki_graph_extract.py wiki/ --out wiki/graph` — regenerates the artifacts above.
+4. Query with `python <llm-wiki>/wiki_graph_query.py wiki/ neighbors --node product:example-widget` (or `edges`, `path`, `facts`).
+
+(Or invoke the `wiki:graph` skill, which runs the same three operations without
+requiring you to resolve `<llm-wiki>` yourself.)
 
 ## Anti-patterns
 
