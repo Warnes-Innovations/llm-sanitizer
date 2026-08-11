@@ -105,24 +105,6 @@ CONFIDENTIAL*
 # where the slash-only rule had been silently matching nothing.)
 .github/obo_sessions
 .github/obo_sessions/
-# THE CANONICAL NAME, and it was MISSING while both legacy forms were present.
-#
-# `oboe-mcp`'s session.py hardcodes `base_dir/.github/oboe_sessions` — that spelling is
-# the ONLY path the tooling reads, so it is the one a real session will actually create.
-# This block ignored the two `obo_sessions` forms and neither `oboe_sessions` form, in a
-# PUBLIC repo. Verified 2026-08-11: `git check-ignore --no-index -v .github/oboe_sessions
-# .github/oboe_sessions/s.json` matched nothing here, while agent-config matched both.
-#
-# Found by a committee review of the commit two blocks below this one — that commit
-# edited this file, cited this very block by name as precedent for its own both-forms
-# rule, and did not re-derive the block it was quoting. Reading the adjacent rule to
-# borrow its rationale is not the same as checking the adjacent rule, which is the
-# "check the ADJACENT function" blind spot in its documentation form.
-#
-# Latent today: neither directory exists here. Live the moment `uvx oboe-mcp migrate`
-# runs or any session is created. All four forms are now present, per the four-form rule.
-.github/oboe_sessions
-.github/oboe_sessions/
 
 # Committee-review output — the same principle again, and THIS REPO IS PUBLIC.
 #
