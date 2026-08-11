@@ -44,6 +44,32 @@
 
 name: DCO
 
+# ---------------------------------------------------------------------------------------
+# THIS FILE IS READ FROM THE **HEAD** BRANCH. `cla.yml` IS READ FROM THE **BASE**.
+#
+# `pull_request` runs the workflow as it exists in the PR, not as it exists on `devel`.
+# Two consequences, and the first has already cost a day:
+#
+#   * A BRANCH CUT BEFORE A CHANGE TO THIS FILE IS JUDGED BY THE OLD COPY. When the owner
+#     exemption below was added, an existing PR kept failing against the pre-exemption
+#     version until `devel` was merged into its branch. Nothing about the PR looked stale;
+#     the workflow it was being judged by simply predated the fix.
+#   * A PR that CHANGES THIS FILE is judged by its own new copy — the opposite of cla.yml,
+#     where such a PR cannot pass the gate it fixes.
+#
+# WHY THIS ONE MUST BE `pull_request`: it checks out the PR head to read commit messages.
+# Under `pull_request_target` that checkout would run with a write token and repo secrets
+# in scope — the "pwn request" pattern. `pull_request` gives a read-only token and no
+# secrets for fork PRs, which is exactly what a checkout of untrusted content needs.
+#
+# KNOWN LIMITATION of running from the head: a fork PR can edit THIS FILE and soften the
+# check that judges it. The change is visible in the diff, and branch protection requiring
+# this check is the compensating control — but do not treat a green DCO on a PR that also
+# touches `.github/workflows/dco.yml` as self-evidently meaningful.
+#
+# See `agent-config/docs/STACK_NOTES.md` for the fleet-wide rule; bastion and
+# bastion-artifacts carry the same pair with the same asymmetry.
+# ---------------------------------------------------------------------------------------
 on:
   pull_request:
     types: [opened, synchronize, reopened]

@@ -32,6 +32,32 @@
 
 name: "CLA Assistant"
 
+# ---------------------------------------------------------------------------------------
+# THIS FILE IS READ FROM THE **BASE** BRANCH. `dco.yml` IS READ FROM THE **HEAD**.
+#
+# `pull_request_target` runs the workflow as it exists on the BASE branch (`devel`), not as
+# it exists in the PR. Two consequences, and both have cost real time:
+#
+#   * A PR that CHANGES THIS FILE is still judged by the base branch's copy — so it cannot
+#     pass the gate it fixes. Expect exactly one red `cla-assistant` on such a PR.
+#   * Every other PR picks the change up immediately once it is on `devel`; no branch needs
+#     rebasing or merging to receive it.
+#
+# `dco.yml` is the mirror image: `pull_request` runs the workflow from the PR HEAD, so a
+# branch cut before a dco.yml change is judged by the OLD file and must merge `devel` in to
+# receive the new one. That is not an inconsistency to tidy up — see the note in dco.yml
+# and `agent-config/docs/STACK_NOTES.md` for why each trigger is the only safe one for its
+# job.
+#
+# WHY THIS ONE MUST BE `pull_request_target`: it WRITES — signature files to the
+# `cla-signatures` branch and comments to the PR — and must work for fork PRs, which
+# `pull_request` denies both secrets and a write token. Hence `contents: write` and
+# `CLA_SIGNATURES_TOKEN` below.
+#
+# THE COROLLARY, which is why this file must never check out PR code: it runs with a write
+# token and a PAT in scope. Checking out or executing head content under
+# `pull_request_target` is the "pwn request" pattern — untrusted code with privileges.
+# ---------------------------------------------------------------------------------------
 on:
   issue_comment:
     types: [created]
@@ -70,4 +96,35 @@ jobs:
           # to settle with a silent default. The current fail-closed behavior — an
           # AI-agent PR is blocked pending a sign-off it cannot meaningfully give — is
           # intentional until that question is decided.
-          allowlist: "dependabot[bot],github-actions[bot],Warnes*"
+          #
+          # EXACT LOGINS ONLY — the wildcard was both broken and dangerous.
+          #
+          # This read `Warnes*` until 2026-08-11. Two defects, verified by running the
+          # pinned action's own `src/checkAllowList.ts` (it compiles a pattern containing
+          # `*` with `new RegExp(regex)` — no `i` flag, and no anchors):
+          #
+          #   1. CASE-SENSITIVE. `Warnes*` never matched the login `warnes`, so the owner
+          #      was told to sign his own CLA and every PR sat blocked. The allowlist is
+          #      matched against the GitHub LOGIN, not an email: `src/graphql.ts` resolves
+          #      `commit.author.user || commit.committer.user || commit.author ||
+          #      commit.committer` and then takes `committer.login || committer.name`.
+          #   2. UNANCHORED — the dangerous one. `/Warnes.*/` matches ANYWHERE in the
+          #      string, so `evil-Warnes-impostor` was allow-listed and skipped the CLA
+          #      entirely. Merely adding the `i` flag would have WIDENED that to
+          #      `evil-warnes-impostor`; case-folding and anchoring have to happen
+          #      together, which is why this is not a one-character fix upstream.
+          #
+          # Dropping the `*` takes the action's non-wildcard branch (`pattern ===
+          # committer`), which builds no regex at all — so it fixes 1 and closes 2 without
+          # depending on a third-party change. An upstream patch for the real bug is
+          # tracked separately.
+          #
+          # `Warnes-Innovations` is deliberately NOT listed: it is an organisation, and
+          # commits are authored by users, so it never matched a committer anyway.
+          #
+          # DO NOT add a display name here as a fallback for an unresolvable commit. A git
+          # author name is settable by anyone in one `git config user.name`, and the GitHub
+          # profile name is changeable at will — neither is a signal the subject cannot
+          # forge. See the two-signal reasoning in dco.yml: "a permissive signal may not
+          # stand alone."
+          allowlist: "dependabot[bot],github-actions[bot],warnes"
