@@ -90,14 +90,14 @@ Pages may declare typed graph metadata under a top-level `graph:` key. This is t
 
 ```yaml
 graph:
-  node_id: person:praney-behl       # optional; default <node_type>:<slug>
+  node_id: person:alice-example      # optional; default <node_type>:<slug>
   node_type: person                  # optional; default mapped from type/kind via ontology
   canonical: true                    # mark as canonical when multiple slugs alias the same entity
-  aliases: [Praney, praney@example.com]
+  aliases: [Alice, person@example.com]
   relationships:
     - predicate: founded
-      object: company:seedblocks
-      source: praney-founder-context-dump   # source-page slug
+      object: company:acme-corp
+      source: alice-example-founder-context-dump   # source-page slug
       evidence: "Solo technical founder and sole director..."
       confidence: high               # high | medium | low
       status: current                # current | historical | proposed | disputed | superseded

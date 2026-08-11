@@ -23,7 +23,7 @@ python scripts/wiki_graph_extract.py wiki/ --out wiki/graph
 1. Author or edit a wiki page. Add typed `graph.relationships` only when an explicit source supports them.
 2. Run `python scripts/wiki_graph_lint.py wiki/` — catches unknown predicates, broken object references, missing evidence, alias collisions.
 3. Run `python scripts/wiki_graph_extract.py wiki/ --out wiki/graph` — regenerates the artifacts above.
-4. Query with `python scripts/wiki_graph_query.py wiki/ neighbors --node product:konvy` (or `edges`, `path`, `facts`).
+4. Query with `python scripts/wiki_graph_query.py wiki/ neighbors --node product:example-widget` (or `edges`, `path`, `facts`).
 
 ## Anti-patterns
 
