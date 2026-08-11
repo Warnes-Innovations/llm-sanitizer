@@ -50,6 +50,16 @@ datasets' attribution terms.
 - The two committee gap sentences and any external **benchmark** (e.g.
   PromptShield) are kept **out of training** so generalization is measured
   honestly.
-- Revisions are pinned above; the scheduled workflow
-  `.github/workflows/dataset-monitor.yml` watches these SHAs and opens an issue
-  when a source updates (see issue #9).
+- **`data-raw/pinned-revisions.json` is the authoritative pin.** The revisions
+  quoted per-dataset above are a human-readable restatement of it. Every tool
+  reads the JSON and nothing reads this file: `scripts/check_dataset_revisions.py`
+  loads the JSON, and the scheduled `.github/workflows/dataset-monitor.yml`
+  watches *those* values and opens an issue when a source updates (see issue #9).
+- **When you retrain against a newer revision, bump BOTH** — the JSON first, then
+  the matching `**Pinned revision:**` line above. `check_dataset_revisions.py`
+  asserts the two agree and exits non-zero if they drift, so a stale restatement
+  here fails rather than quietly misinforming the next reader:
+
+  ```bash
+  python scripts/check_dataset_revisions.py --check   # offline; no network needed
+  ```

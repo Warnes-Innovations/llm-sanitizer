@@ -90,14 +90,14 @@ Pages may declare typed graph metadata under a top-level `graph:` key. This is t
 
 ```yaml
 graph:
-  node_id: person:praney-behl       # optional; default <node_type>:<slug>
+  node_id: person:alice-example      # optional; default <node_type>:<slug>
   node_type: person                  # optional; default mapped from type/kind via ontology
   canonical: true                    # mark as canonical when multiple slugs alias the same entity
-  aliases: [Praney, praney@example.com]
+  aliases: [Alice, person@example.com]
   relationships:
     - predicate: founded
-      object: company:seedblocks
-      source: praney-founder-context-dump   # source-page slug
+      object: company:acme-corp
+      source: alice-example-founder-context-dump   # source-page slug
       evidence: "Solo technical founder and sole director..."
       confidence: high               # high | medium | low
       status: current                # current | historical | proposed | disputed | superseded
@@ -129,7 +129,7 @@ The wiki has an optional compiled graph layer under `wiki/graph/`:
 - `wiki/graph/graph.sqlite` — generated. Gitignored by default.
 - `wiki/graph/graph.graphml` — generated. Track only if you want to diff it.
 
-Generation is reproducible from markdown via `scripts/wiki_graph_extract.py`. The graph can be deleted at any time and rebuilt without losing knowledge — markdown is canonical.
+Generation is reproducible from markdown via `wiki_graph_extract.py`, which ships with the external **`llm-wiki` plugin** — it is *not* a file in this repository's `scripts/` directory. If the plugin is not installed, skip the graph layer entirely; it is optional and nothing in the build, tests, or release depends on it. See `wiki/graph/README.md` for the precondition check. The graph can be deleted at any time and rebuilt without losing knowledge — markdown is canonical.
 
 ## Workflow customizations
 
