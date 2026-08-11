@@ -31,8 +31,16 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
 
-      - name: Sync dependencies
-        run: uv sync --group test --group dev
+      # --locked is load-bearing: without it, `uv sync` SILENTLY RE-LOCKS when
+      # uv.lock is stale (verified: exit 0, and it quietly installs the new
+      # version). A release that bumps pyproject.toml + __init__.py but forgets
+      # `uv lock` then sails through CI, and the omission self-heals in the
+      # runner instead of failing where someone would see it. With --locked the
+      # same situation exits 1: "The lockfile at `uv.lock` needs to be updated".
+      # uv.lock is tracked and carries the project's own version — see the
+      # three-version-site note in AGENTS.md.
+      - name: Sync dependencies (fail if uv.lock is stale)
+        run: uv sync --group test --group dev --locked
 
       - name: Run tests
         run: uv run pytest -q -p no:cacheprovider
@@ -175,8 +183,16 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Sync dependencies
-        run: uv sync --group test --group dev
+      # --locked is load-bearing: without it, `uv sync` SILENTLY RE-LOCKS when
+      # uv.lock is stale (verified: exit 0, and it quietly installs the new
+      # version). A release that bumps pyproject.toml + __init__.py but forgets
+      # `uv lock` then sails through CI, and the omission self-heals in the
+      # runner instead of failing where someone would see it. With --locked the
+      # same situation exits 1: "The lockfile at `uv.lock` needs to be updated".
+      # uv.lock is tracked and carries the project's own version — see the
+      # three-version-site note in AGENTS.md.
+      - name: Sync dependencies (fail if uv.lock is stale)
+        run: uv sync --group test --group dev --locked
 
       - name: Run mypy (strict, per pyproject)
         run: uv run mypy src/

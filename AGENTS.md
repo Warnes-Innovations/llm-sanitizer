@@ -5,10 +5,21 @@
 This repo uses a two-branch model:
 
 - **`devel`** — the working trunk. All day-to-day commits land here (default branch).
-- **`main`** — the **released** branch. Downstream consumers pin this, e.g. flow-guard's
-  `.mcp.json` runs the server via
-  `uvx --from git+https://github.com/Warnes-Innovations/llm-sanitizer.git@main llm-sanitizer`.
-  Consumers only see a change **after it reaches `main`**.
+- **`main`** — the **released** branch. Releases are cut from it, and consumers resolve
+  against those releases. Consumers only see a change **after it reaches `main`** *and* a
+  release is cut from it.
+
+  **Consumers pin an immutable tag, not the moving `@main` ref.** The reference consumer,
+  flow-guard, pins a git **tag** with extras in its `.mcp.json`:
+
+  ```
+  uvx --from 'llm-sanitizer[7z,rar] @ git+https://github.com/Warnes-Innovations/llm-sanitizer.git@vX.Y.Z' llm-sanitizer
+  ```
+
+  Two consequences follow from the pin being a tag, and both are easy to get wrong:
+  merging to `main` alone changes **nothing** for that consumer until a tag is cut *and*
+  its pin is edited to name the new tag; and a `uvx --refresh` cannot help it, because
+  there is no moving ref to re-resolve (see the section below).
 
 `main` is **protected**: no direct pushes (enforced for admins too). Changes reach `main`
 **only via a pull request** from `devel` (0 required approvals, so the maintainer can self-merge).
@@ -31,9 +42,15 @@ the new code reaches PyPI (consumers pin a PyPI version, e.g.
 is always via PR):
 
 ```bash
-# 1. On devel, clean tree: bump the version in BOTH pyproject.toml AND
-#    src/llm_sanitizer/__init__.py (keep them in sync — they have drifted
-#    before), and move CHANGELOG [Unreleased] -> [X.Y.Z] - <date>. Commit + push.
+# 1. On devel, clean tree: bump the version in ALL THREE version sites —
+#    pyproject.toml, src/llm_sanitizer/__init__.py, and uv.lock (which is
+#    TRACKED and records the project's own version). The first two have drifted
+#    before; the third is regenerated, never hand-edited:
+uv lock            # rewrites uv.lock to match the bumped pyproject.toml
+uv lock --check    # must exit 0 — fails with "the lockfile ... needs to be
+                   # updated" if uv.lock was not regenerated
+#    Then move CHANGELOG [Unreleased] -> [X.Y.Z] - <date>, and commit ALL of
+#    pyproject.toml, src/llm_sanitizer/__init__.py, uv.lock, CHANGELOG.md. Push.
 
 # 2. Open the promotion PR and merge it (brings the bump onto main):
 gh pr create --base main --head devel \
@@ -51,32 +68,44 @@ Never delete `devel` when merging — it is the permanent working trunk.
 
 **Versioning (SemVer):** on the `0.x` line, feature additions bump the minor
 (`0.1.x → 0.2.0`); reserve `1.0.0` for a committed-stable API. Don't inflate the
-minor for signalling. The version currently lives in two files — single-sourcing
-it (e.g. `importlib.metadata`) is a good follow-up.
+minor for signalling. The version currently lives in **three** tracked sites —
+`pyproject.toml`, `src/llm_sanitizer/__init__.py`, and `uv.lock` (the lockfile
+records the project's own version, so a bump that skips `uv lock` leaves it
+stale). Single-sourcing the first two (e.g. `importlib.metadata`) is a good
+follow-up; `uv.lock` stays generated and is refreshed with `uv lock`.
 
-### Consumers may need `--refresh` after a promotion
+### A tag-pinned consumer needs its PIN BUMPED — `--refresh` does nothing for it
 
-Consumers pin a **moving branch ref** (`@main`), and `uvx` caches built environments. After a
-`devel → main` promotion, a consumer running `uvx --from git+…@main llm-sanitizer` may keep
-serving the **previously cached** build until its cache refreshes — so the new `main` code does
-not always take effect immediately on the next session.
+**`uvx --refresh` only helps a consumer that pins a moving ref.** It forces `uvx` to
+re-resolve and rebuild rather than serve a cached environment — which is exactly the fix
+when the pin is `@main` or `@devel`, because the ref now points at a new commit. A
+consumer pinned to an **immutable tag** (`@vX.Y.Z`) or an exact PyPI version
+(`llm-sanitizer==X.Y.Z`) resolves to the *same artifact* no matter how many times it is
+refreshed. Telling such a maintainer to run `uvx --refresh` sends them away with a command
+that cannot deliver the fix.
 
-To force a consumer to pick up the just-promoted `main`:
+So the guidance depends on what the consumer actually pins — check the consumer's
+`.mcp.json` (or equivalent) before advising:
 
-```bash
-uvx --refresh --from git+https://github.com/Warnes-Innovations/llm-sanitizer.git@main llm-sanitizer
-# or clear the uv cache:  uv cache clean llm-sanitizer
-```
+| Consumer pins | What picks up the new code |
+| --- | --- |
+| Immutable tag `@vX.Y.Z` — **flow-guard today** | **Edit the pin** to `@vX.Y.Z+1`. Nothing else works. |
+| Exact PyPI version `llm-sanitizer==X.Y.Z` | **Bump the pinned version.** Nothing else works. |
+| Moving ref `@main` / `@devel` | Already correct after the merge; `uvx --refresh --from git+…@main llm-sanitizer` (or `uv cache clean llm-sanitizer`) if a cached build is being served. |
 
 **Agent instruction:** when you promote `devel → main` for a change a consumer needs *now*
-(e.g. a security fix flow-guard must use immediately), tell the maintainer that consumers may
-need a `uvx --refresh` (or a uv cache clean) before the new build is live.
+(e.g. a security fix flow-guard must use immediately), the release is only half the
+delivery. Cut the tag, then tell the maintainer the consumer's pin must be **bumped to the
+new tag** — and offer the exact one-line edit. Only suggest `uvx --refresh` after
+confirming the consumer really does pin a moving ref; for a tag-pinned consumer it is a
+no-op that reads like a fix.
 
 ## Local development vs. released consumption
 
 - **This repo's own `.mcp.json`** runs the server from local files (`uv run llm-sanitizer`) so it
   reflects your working tree instantly — correct for developing the server.
-- **Consumers** (flow-guard) default to the released `@main` build. A developer who wants a
+- **Consumers** (flow-guard) default to a released build pinned to an immutable **tag**
+  (`@vX.Y.Z`, with the extras that consumer needs) — not to `@main`. A developer who wants a
   consumer to exercise *local* llm-sanitizer edits adds a machine-local override that silently
   wins over the committed default:
 
