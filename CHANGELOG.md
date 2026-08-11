@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Directory scans now report where the scanner did NOT look.** `scan_dir` results and
+  the markdown report carry three numbers with distinct units: how many directory-exclusion
+  names are **specified**, how many **matched**, and how many directories were **pruned**.
+
+  This scanner is a trust boundary — an excluded directory is never examined for
+  injections — so the set of places it does not look belongs in its own output rather than
+  only in its source. Reporting the effect alone made a 7-name exclusion list and a 70-name
+  one render identically whenever both pruned one directory, so the blind spots could grow
+  with nothing in any run ever changing.
+
+  `dirs_pruned` counts **directories, not files**: exclusion prunes the walk, so files
+  beneath a pruned directory are never enumerated, and counting them would mean descending
+  into `.git` after all — the exact cost the pruning exists to avoid.
+
+  New `DirScanResult` fields (`exclusions_specified`, `exclusion_names_matched`,
+  `dirs_pruned`) are additive with defaults, so an older reader is unaffected. New
+  `walk_scannable()` returns `(files, ExclusionStats)`; `iter_scannable_files()` is
+  unchanged and now delegates to it, so every existing caller keeps its exact return type.
+
 - **`redact_dir` now accepts `sensitivity`, closing the redact-tool asymmetry.**
   `redact`, `redact_file` and `redact_url` all took a `sensitivity` argument;
   `redact_dir` did not, and built its `Scanner` with the default — so it

@@ -74,6 +74,19 @@ def format_markdown(result: ScanResult | DirScanResult) -> str:
         f"**Total findings:** {result.total_findings}  "
         f"**Max risk:** {result.max_risk or 'none'}\n"
     )
+    # WHERE THE SCANNER DID NOT LOOK — M0. Printed on EVERY dir report, including the
+    # clean one and including runs where nothing was pruned, because a list that never
+    # fires is exactly the list nobody re-derives. Three numbers with distinct units:
+    # names specified, names matched, directories pruned. `dirs_pruned` counts
+    # DIRECTORIES — the walk never descends into a pruned one, so the files beneath are
+    # never enumerated and cannot honestly be counted.
+    matched = ", ".join(f"`{n}`" for n in result.exclusion_names_matched) or "none"
+    lines.append(
+        f"**Directory exclusions:** {len(result.exclusion_names_matched)} of "
+        f"{result.exclusions_specified} name(s) matched ({matched}), pruning "
+        f"{result.dirs_pruned} director(ies). Files beneath a pruned directory were "
+        "never enumerated or scanned.\n"
+    )
     lines.append("---\n")
 
     for r in result.results:
