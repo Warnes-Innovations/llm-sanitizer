@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-11
+
+Minor, not patch: this adds public API (`walk_scannable()` / `ExclusionStats`, three new
+`DirScanResult` fields) and a new `redact_dir` parameter. **No breaking changes** — every
+addition is additive with a default, `iter_scannable_files()` is unchanged and now delegates
+to the new walker, and `sensitivity` is appended last in `redact_dir`'s signature so existing
+positional callers are unaffected.
+
+**Consumers pinning an immutable tag must bump the pin to `v0.6.0`** to receive any of this;
+`uvx --refresh` re-resolves a moving ref and does nothing for a tag.
+
 ### Added
 
 - **Directory scans now report where the scanner did NOT look.** `scan_dir` results and
