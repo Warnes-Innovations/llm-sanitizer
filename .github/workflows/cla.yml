@@ -70,4 +70,35 @@ jobs:
           # to settle with a silent default. The current fail-closed behavior — an
           # AI-agent PR is blocked pending a sign-off it cannot meaningfully give — is
           # intentional until that question is decided.
-          allowlist: "dependabot[bot],github-actions[bot],Warnes*"
+          #
+          # EXACT LOGINS ONLY — the wildcard was both broken and dangerous.
+          #
+          # This read `Warnes*` until 2026-08-11. Two defects, verified by running the
+          # pinned action's own `src/checkAllowList.ts` (it compiles a pattern containing
+          # `*` with `new RegExp(regex)` — no `i` flag, and no anchors):
+          #
+          #   1. CASE-SENSITIVE. `Warnes*` never matched the login `warnes`, so the owner
+          #      was told to sign his own CLA and every PR sat blocked. The allowlist is
+          #      matched against the GitHub LOGIN, not an email: `src/graphql.ts` resolves
+          #      `commit.author.user || commit.committer.user || commit.author ||
+          #      commit.committer` and then takes `committer.login || committer.name`.
+          #   2. UNANCHORED — the dangerous one. `/Warnes.*/` matches ANYWHERE in the
+          #      string, so `evil-Warnes-impostor` was allow-listed and skipped the CLA
+          #      entirely. Merely adding the `i` flag would have WIDENED that to
+          #      `evil-warnes-impostor`; case-folding and anchoring have to happen
+          #      together, which is why this is not a one-character fix upstream.
+          #
+          # Dropping the `*` takes the action's non-wildcard branch (`pattern ===
+          # committer`), which builds no regex at all — so it fixes 1 and closes 2 without
+          # depending on a third-party change. An upstream patch for the real bug is
+          # tracked separately.
+          #
+          # `Warnes-Innovations` is deliberately NOT listed: it is an organisation, and
+          # commits are authored by users, so it never matched a committer anyway.
+          #
+          # DO NOT add a display name here as a fallback for an unresolvable commit. A git
+          # author name is settable by anyone in one `git config user.name`, and the GitHub
+          # profile name is changeable at will — neither is a signal the subject cannot
+          # forge. See the two-signal reasoning in dco.yml: "a permissive signal may not
+          # stand alone."
+          allowlist: "dependabot[bot],github-actions[bot],warnes"
