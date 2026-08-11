@@ -15,13 +15,14 @@ without losing knowledge.
 >
 > **If the `llm-wiki` plugin is not installed, skip this entire document.** The
 > graph layer is optional; the markdown wiki is fully usable without it, and
-> nothing in the build, tests, or release depends on it. Check first:
+> nothing in the build, tests, or release depends on it.
 >
-> ```bash
-> # The graph commands are reached through the plugin's `wiki:graph` skill.
-> # If the skill is unavailable, there is nothing to run here — stop.
-> ls "$(git rev-parse --show-toplevel)/scripts/"   # confirms these tools are NOT here
-> ```
+> **The precondition is "is the `wiki:graph` skill available to me?", and only
+> the agent's own skill list answers it.** There is no command in this
+> repository that can answer it — `ls scripts/` merely re-confirms the tools are
+> not here (which this section already states) and would succeed either way, so
+> do not mistake it for a gate. If the skill is not listed, stop; nothing below
+> is runnable.
 >
 > Below, `<llm-wiki>` stands for the plugin's own script directory, wherever the
 > plugin is installed on the machine. Prefer invoking the `wiki:graph` skill,
