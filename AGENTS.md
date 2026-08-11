@@ -178,7 +178,7 @@ When the user invokes a slash command, read the corresponding `.prompt.md` file.
 ## MCP Tools available in Cline
 
 - Prefer the 'oboe-mcp' MCP tools for OBO session state.
-- Do not edit .github/obo_sessions/*.json directly or use 'obo_helper.py' when 'oboe-mcp' can perform the operation. Fall back to 'oboe-cli' when the MCP server is unavailable.
+- Do not edit .github/oboe_sessions/*.json directly or use 'obo_helper.py' when 'oboe-mcp' can perform the operation. Fall back to 'oboe-cli' when the MCP server is unavailable.
 - **oboe-mcp**: `obo_list_sessions`, `obo_create`, `obo_session_status`, `obo_next`, `obo_list_items`, `obo_get_item`, `obo_mark_blocked`, `obo_mark_complete`, `obo_mark_in_progress`, `obo_mark_skip`, `obo_set_approval`, `obo_complete_session`, `obo_create_child_session`, `obo_complete_child_session`, `obo_merge_items`, `obo_update_field`
 - **oboe-cli fallback** (when MCP unavailable): all session-scoped commands take `--session SESSION [--base-dir DIR]`
   - sessions/status/next/complete-session/list/show/in-progress/block/complete/skip/approve/update/merge/create-child/complete-child
