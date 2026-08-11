@@ -238,12 +238,13 @@ llm-sanitizer/
 ├── src/llm_sanitizer/          # Main package (src-layout)
 │   ├── __init__.py             # Package version
 │   ├── py.typed                # PEP 561 typed marker
-│   ├── server.py               # MCP server (FastMCP, 9 tools)
+│   ├── server.py               # MCP server (MCPServer, 9 tools)
 │   ├── cli.py                  # Human CLI (argparse subcommands)
 │   ├── scanner.py              # Core scan engine + rule registry
 │   ├── redactor.py             # Redaction engine (strip/comment/highlight)
-│   ├── rules/                  # Detection rule modules
+│   ├── rules/                  # Detection rule modules (12 registered rules)
 │   │   ├── __init__.py         # Rule registry + base class
+│   │   ├── _rescan.py          # Shared de-obfuscate-then-re-scan helper
 │   │   ├── instruction_override.py
 │   │   ├── zero_width.py
 │   │   ├── hidden_content.py
@@ -253,7 +254,17 @@ llm-sanitizer/
 │   │   ├── comment_directive.py
 │   │   ├── base64_encoded.py
 │   │   ├── homoglyph.py
-│   │   └── agent_config.py
+│   │   ├── char_split.py
+│   │   ├── semantic_intent.py  # Classifier-backed rule (see semantic/)
+│   │   ├── agent_config.py
+│   │   ├── archive.py          # Archive-specific findings
+│   │   └── integrity.py        # type_mismatch / corrupt_file / unscannable
+│   ├── semantic/               # Local n-gram classifier (no egress, no download)
+│   │   ├── __init__.py
+│   │   ├── classifier.py       # predict() + gated firing policy
+│   │   ├── features.py         # Featurization
+│   │   ├── corpus.py           # Training corpus assembly
+│   │   └── model.json          # Vendored trained weights
 │   ├── formatters/             # Output format modules
 │   │   ├── __init__.py
 │   │   ├── json_format.py
@@ -262,8 +273,11 @@ llm-sanitizer/
 │   ├── readers/                # Content readers by source type
 │   │   ├── __init__.py
 │   │   ├── text_reader.py      # Plain text, markdown, source code
+│   │   ├── markup_reader.py    # HTML/XML-aware extraction
 │   │   ├── url_reader.py       # HTTP fetch + content extraction
-│   │   └── binary_reader.py    # PDF/DOCX via markitdown
+│   │   ├── binary_reader.py    # PDF/DOCX via markitdown
+│   │   ├── archive_reader.py   # zip/tar/7z/rar expansion
+│   │   └── integrity_checks.py # Magic-byte + structural validation
 │   ├── config.py               # Configuration loading (.llm-sanitizer.yml)
 │   └── models.py               # Data models (Finding, ScanResult, etc.)
 ├── tests/
@@ -285,15 +299,26 @@ llm-sanitizer/
 │       └── ...
 ├── docs/
 │   ├── DESIGN_SPEC.md          # This file
-│   ├── RULES_REFERENCE.md      # Detection rule documentation
-│   └── PYPI_RELEASE.md         # Release procedure
+│   ├── DATA_HANDLING.md        # Data-handling / privacy posture
+│   └── ...
+├── data-raw/                   # Classifier training-corpus sources + pins
+├── scripts/                    # Maintenance scripts (see `ls scripts/`)
+├── .github/
+│   ├── workflows/              # CI, publish (Trusted Publishing), CodeQL, ...
+│   ├── instructions/
+│   │   └── release-workflow.instructions.md   # Release rules
+│   └── prompts/
+│       └── publish.prompt.md   # THE release procedure, step by step
 ├── pyproject.toml
 ├── LICENSE                     # AGPL-3.0-or-later
 ├── README.md
+├── AGENTS.md                   # Agent guide (CLAUDE.md/GEMINI.md symlink here)
 ├── CHANGELOG.md
-├── install.sh
-└── uv.lock
+└── uv.lock                     # Tracked; carries the project's own version
 ```
+
+Branches marked `...` are elided, not empty. Regenerate any branch from `ls`
+rather than trusting this listing; it is a map, not an inventory.
 
 ### Module Responsibilities
 
@@ -306,7 +331,7 @@ llm-sanitizer/
 | `readers/` | Read content from various sources (text, URL, binary docs) into scannable text |
 | `config.py` | Load and merge `.llm-sanitizer.yml` configuration with built-in defaults |
 | `models.py` | Pydantic or dataclass models for `Finding`, `ScanResult`, `RuleConfig`, etc. |
-| `server.py` | FastMCP tool wrappers — thin layer calling scanner/redactor |
+| `server.py` | `MCPServer` tool wrappers — thin layer calling scanner/redactor |
 | `cli.py` | Argparse CLI with subcommands — thin layer calling scanner/redactor |
 
 ### Data Flow
@@ -328,18 +353,41 @@ Inline text     ──→  (direct)                              ├─ markdown
 
 | Dependency | Purpose | Required |
 |-----------|---------|----------|
-| `mcp>=1.0` | MCP server framework (FastMCP) | Yes |
-| `httpx` | URL fetching (async-capable) | Yes |
-| `pydantic` | Data models and validation | Yes |
-| `filetype` | Tier-1 magic-byte type detection (MIT, pure-Python) | Yes (core) |
-| `pypdf` | Tier-2 bounded PDF structural validation (BSD, pure-Python) | Yes (core) |
-| `markitdown` | PDF/DOCX/etc content extraction | Optional (`[binary]` extra) |
-| `py7zr` | 7z archive extraction | Optional (`[7z]` extra — LGPL-3.0, AGPL-compatible) |
-| `libarchive-c` | RAR / general libarchive extraction | Optional (`[rar]` extra — wraps BSD-licensed libarchive) |
+`pyproject.toml` is the source of truth; regenerate this table from it rather
+than editing it in place. **Every bound here is load-bearing** — see the inline
+comments in `pyproject.toml` for the incidents behind the `mcp` and `py7zr`
+pins.
 
-ZIP, TAR, and TAR.GZ/BZ2/XZ (plus bare GZ/BZ2/XZ streams) need no optional
-dependency — they use the Python standard library (`zipfile`, `tarfile`,
-`gzip`, `bz2`, `lzma`).
+Eight core dependencies:
+
+| Dependency | Purpose | Declared as |
+|-----------|---------|-------------|
+| `mcp>=2.0,<3` | MCP server framework (`MCPServer`) | Core |
+| `httpx>=0.27,<1` | URL fetching (async-capable) | Core |
+| `pydantic>=2.0,<3` | Data models and validation | Core |
+| `filetype>=1.2,<2` | Tier-1 magic-byte type detection (MIT, pure-Python) | Core |
+| `pypdf>=4.0,<7` | Tier-2 bounded PDF structural validation (BSD, pure-Python) | Core |
+| `markitdown[pdf,docx,pptx,xlsx,xls]>=0.1,<1` | PDF/DOCX/PPTX/XLSX content extraction | Core |
+| `striprtf>=0.0.26,<1` | RTF text extraction | Core |
+| `pyyaml>=6.0,<7` | `.llm-sanitizer.yml` config loading | Core |
+
+Three extras:
+
+| Extra | Contents | Notes |
+|-------|----------|-------|
+| `[binary]` | *(empty)* | **Retained no-op.** `markitdown` moved into the core dependencies, so binary document scanning works from the base install. The extra is kept so existing `llm-sanitizer[binary]` references keep resolving instead of erroring. |
+| `[7z]` | `py7zr>=1.0,<2` | 7z extraction. LGPL-3.0, dynamically imported, AGPL-compatible. |
+| `[rar]` | `libarchive-c>=5.0,<6` | RAR / general libarchive extraction; wraps BSD-licensed libarchive. |
+
+The `mcp` floor is a hard requirement, not a preference: this code targets the
+2.x `MCPServer` API, and 1.x had `FastMCP` instead — the two are mutually
+exclusive. The upper bounds exist because the *unbounded* `mcp>=1.0` this table
+previously showed is exactly what shipped two releases that died at import on
+every fresh install.
+
+ZIP, TAR, and TAR.GZ/BZ2/XZ (plus bare GZ/BZ2/XZ streams) need no extra —
+they use the Python standard library (`zipfile`, `tarfile`, `gzip`, `bz2`,
+`lzma`).
 
 ---
 
@@ -485,18 +533,23 @@ Nine focused tools organized into scan, redact, and utility groups:
 | Tool | Parameters | Returns | Description |
 |------|-----------|---------|-------------|
 | `scan_text` | `content: str`, `sensitivity?: str` | Findings JSON | Scan inline text content |
-| `scan_file` | `path: str`, `sensitivity?: str` | Findings JSON | Scan a local file (any supported format) |
+| `scan_file` | `path: str`, `sensitivity?: str`, `binary_mode?: str` | Findings JSON | Scan a local file (any supported format) |
 | `scan_url` | `url: str`, `sensitivity?: str` | Findings JSON | Fetch and scan a web page |
-| `scan_dir` | `path: str`, `glob?: str`, `sensitivity?: str` | Findings JSON | Recursive directory scan |
+| `scan_dir` | `path: str`, `glob?: str`, `sensitivity?: str`, `binary_mode?: str` | Findings JSON | Recursive directory scan |
 
 ### Redact Tools
 
 | Tool | Parameters | Returns | Description |
 |------|-----------|---------|-------------|
-| `redact` | `content: str`, `mode?: str` | Cleaned text | Redact inline text, return clean content |
-| `redact_url` | `url: str`, `output_path: str`, `mode?: str` | Status + path | Fetch URL, redact, write to local file |
-| `redact_file` | `path: str`, `output_path: str`, `mode?: str` | Status + path | Redact a file, write clean copy to output path |
-| `redact_dir` | `path: str`, `output_dir: str`, `mode?: str`, `glob?: str` | Status + file list | Redact directory, mirror structure to output dir |
+| `redact` | `content: str`, `mode?: str`, `sensitivity?: str` | Cleaned text | Redact inline text, return clean content |
+| `redact_url` | `url: str`, `output_path: str`, `mode?: str`, `sensitivity?: str` | Status + path | Fetch URL, redact, write to local file |
+| `redact_file` | `path: str`, `output_path: str`, `mode?: str`, `binary_mode?: str`, `sensitivity?: str` | Status + path | Redact a file, write clean copy to output path |
+| `redact_dir` | `path: str`, `output_dir: str`, `mode?: str`, `glob?: str`, `binary_mode?: str`, `sensitivity?: str` | Status + file list | Redact directory, mirror structure to output dir |
+
+Parameters are listed in declaration order; all four redact tools accept
+`sensitivity`, and all four `binary_mode`-aware tools accept `binary_mode`.
+`redact_dir` gained `sensitivity` last, appended at the end of its signature so
+existing positional callers are unaffected.
 
 ### Utility Tools
 
@@ -510,8 +563,15 @@ Nine focused tools organized into scan, redact, and utility groups:
   - `low` — only critical/high findings
   - `medium` — medium and above
   - `high` — all findings including info/low
+  Pass the **same** `sensitivity` to a redact call as to the scan that
+  motivated it. Redaction removes what a scan at *that* sensitivity reports, so
+  scanning at `high` and redacting at the `medium` default silently leaves
+  behind every info/low finding the scan flagged.
 - **`mode`** (redaction): `"strip"` | `"comment"` | `"highlight"` (default: `"strip"`)
 - **`glob`** (directory scan): file pattern filter, e.g. `"**/*.md"` (default: all files)
+- **`binary_mode`**: `"extract"` (default) | `"text"` | `"skip"` — how content
+  sniffed as binary *by content, not extension* is handled. Accepted by
+  `scan_file`, `scan_dir`, `redact_file`, and `redact_dir`.
 
 ### Response Format
 
@@ -565,10 +625,21 @@ llm-sanitize redact <FILE|URL|-> -o <OUTPUT>       # Redact file/URL to output
 llm-sanitize redact <DIR> -o <OUTPUT_DIR>           # Mirror directory with redactions
 llm-sanitize redact --mode strip|comment|highlight
 
+# Aggregation — assemble a directory-level report from previously-saved
+# `scan --format json` results, WITHOUT re-scanning (for callers that cache
+# scans by content hash). The manifest is JSON_PATH<TAB>CURRENT_PATH lines,
+# read from --manifest or stdin.
+llm-sanitize merge --manifest <MANIFEST> [--source NAME]
+llm-sanitize merge --format json|markdown|sarif
+llm-sanitize merge --exit-code-threshold medium
+
 # Utility
 llm-sanitize list-rules [--category CATEGORY]
 llm-sanitize --version
 ```
+
+Four subcommands: `scan`, `redact`, `list-rules`, `merge`. `llm-sanitize --help`
+prints the live list; if this block disagrees with it, the CLI is right.
 
 ### Exit Codes
 
@@ -601,8 +672,10 @@ Summary: 2 findings (1 critical, 1 high) in 1 file
 
 ## Detection Rules
 
-Ten pluggable rules, each independently toggleable with configurable
-sensitivity:
+Twelve pluggable rules, each independently toggleable with configurable
+sensitivity. The registry is the source of truth — `llm-sanitize list-rules`
+prints the live inventory as JSON, and CI asserts the count; if this section
+disagrees with that output, the output is right:
 
 ### Rule 1: Instruction Override Phrases
 
@@ -701,6 +774,37 @@ unexpected file locations:
 - `.cursorrules`, `.clinerules`, etc. patterns in non-standard locations
 
 **Risk level:** medium (structural match), info (in known config files)
+
+### Rule 11: Character-Splitting Obfuscation
+
+Detect a phrase broken up with separators so it defeats word-based matching
+while staying readable to a human:
+- Inter-character runs: `i g n o r e   a l l`, `i_g_n_o_r_e`
+- Repeated same-separator runs between words: `ignore___all`, `ignore...all`
+
+Like base64 and homoglyph substitution this is *transport*, not a threat in
+itself, so the rule reconstructs the split text and re-scans it with the full
+ruleset (`scan_deobfuscated`), flagging only when the **reconstructed** text
+trips a rule. A single underscore is deliberately not a signal, so ordinary
+`snake_case` identifiers stay clean.
+
+**Risk level:** high (when the reconstructed text trips a rule)
+
+### Rule 12: Semantic-Intent Injection
+
+Catch *keyword-less* injection rephrasings the pattern rules miss — role
+reassignment, verbatim/echo exfiltration, and supersede-the-prior-guidance
+framing — using the local, no-egress n-gram linear classifier in
+`llm_sanitizer.semantic` (pure Python; no model download, no network).
+
+Scored per sentence-span rather than per document: the span is both the
+classification unit and the redaction unit. Firing is gated — the probability
+must clear its threshold **and** the span must exhibit a structural intent
+feature. If the vendored model is missing or broken the rule contributes
+nothing rather than failing the scan.
+
+**Risk level:** medium — deliberately lower than the keyword rules. This is a
+fuzzy signal meant to prompt review, not to hard-block.
 
 ---
 
@@ -872,6 +976,21 @@ files that had findings.
 Located at the project root (or any parent directory). Loaded automatically
 by CLI; passed explicitly via MCP tools.
 
+**Loading fails closed.** If the file is present but cannot be read —
+unparseable, or an install lacking `PyYAML` — `load_config()` raises
+`ConfigError`. It does *not* fall back to defaults.
+
+This is not a style preference. Until 2026-07-31 it did fall back, silently, and
+`pyyaml` was not a declared dependency at all — so in the `uvx --from git+...`
+environment consumers use, every config file was inert while `list_rules`
+described itself as reporting "what actually runs". A scanner that reports one
+policy while enforcing another is worse than one that refuses to start, because
+the operator gets no signal that anything is wrong.
+
+The silence also made it *latent*: had `pyyaml` arrived transitively, every
+checked-in `enabled: false` would have become live at once, with nothing marking
+the change. Absence of a config file remains a normal, non-error state.
+
 ```yaml
 # .llm-sanitizer.yml
 
@@ -952,7 +1071,7 @@ llm:
 | 2 | **Core scanner engine** | Rule registry, content parsing, finding accumulation, sensitivity filtering | 1 |
 | 3 | **Detection rules** | 10 pluggable rule classes with `detect(content) → list[Finding]` | 2 |
 | 4 | **CLI interface** | `scan`, `redact`, `list-rules` subcommands via argparse | 2, 3 |
-| 5 | **MCP server** | FastMCP tools wrapping scanner + redactor | 2, 3 |
+| 5 | **MCP server** | MCPServer tools wrapping scanner + redactor | 2, 3 |
 | 6 | **Output formatters** | JSON + Markdown + SARIF report generators | 2 |
 | 7 | **URL fetcher** | HTTP content retrieval + HTML content extraction | 2 |
 | 8 | **Binary doc support** | PDF/DOCX content extraction via markitdown | 2 |

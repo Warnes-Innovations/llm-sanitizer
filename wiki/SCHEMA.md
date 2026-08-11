@@ -1,0 +1,149 @@
+# Wiki Schema
+
+This file is the configuration for this wiki. It documents the conventions, page types, tag taxonomy, and any workflow customizations. The LLM reads this first when entering the wiki, and its conventions override the defaults documented in the `llm-wiki` skill.
+
+This file is **co-evolved with the user**. When the LLM notices a recurring pattern in your edits or feedback that isn't here, it will propose adding it. When something here stops fitting, prune it.
+
+## Repository Registry
+
+**Status:** standalone
+
+| Repository | Path | Description | Added |
+|---|---|---|---|
+| llm-sanitizer | ~/src/llm-sanitizer | Scans documents, source code, and web pages for embedded LLM agent instructions (prompt-injection detection); ships as an MCP server + CLI. | 2026-07-29 |
+
+### Agent Instructions — Repository Registry
+
+- When ingesting from a repository **not listed above**, ask the user before
+  proceeding: "Should [repo-name] be added to this wiki's repository registry?"
+- If yes, add a row to the table with today's date and update this file.
+- If this wiki is **shared** across repos, update Status to `shared` and add
+  to each participating repo's `CLAUDE.md` (or `AGENTS.md`):
+
+  ```
+  LLM Wiki: <path-to-wiki-repo> (shared with: repo1, repo2, ...)
+  ```
+
+- Include `source_repo: <repo-name>` in every page's frontmatter for traceability.
+
+### Shared Wiki Pattern
+
+When a family of related repositories should share a common wiki:
+
+1. Create a dedicated wiki repo (e.g., `~/src/team-wiki`) with its own git history.
+2. Run `/wiki:init` in that repo, answer "shared", and list all participating repos.
+3. Add `LLM Wiki: ~/src/team-wiki (shared with: ...)` to each repo's memory file.
+4. Agents in any participating repo check the shared SCHEMA.md registry before ingesting.
+
+---
+
+## Wiki location
+
+- Wiki root: `wiki/`
+- Raw sources: `raw/`
+- Asset/image storage: `raw/assets/`
+
+## Page types
+
+This wiki uses these page types, each with a dedicated subdirectory:
+
+- `source` (in `wiki/sources/`) — one summary page per ingested source.
+- `entity` (in `wiki/entities/`) — pages about specific things: people, papers, products, places, organizations.
+- `concept` (in `wiki/concepts/`) — pages about ideas, methods, frameworks, abstractions.
+- `synthesis` (in `wiki/synthesis/`) — cross-cutting analyses, comparisons, query answers filed back.
+- `incident` (in `wiki/incidents/`) — one page per production security/reliability defect: bug class, root cause, fail-mode before/after the fix, regression test added. Added 2026-07-29 per committee review (`.personas/reviews/wiki-schema/`) — Security Engineer and Performance/Reliability Engineer independently proposed this, both citing the CHANGELOG's recurring "same bug class as..." narration (py7zr 0.4.0→0.5.1) as evidence this needs a structured, queryable home instead of only living in prose.
+- `interface` (in `wiki/interfaces/`) — one page per MCP tool (`scan_text`, `scan_file`, `scan_dir`, `scan_url`, `redact*`, `list_rules`) tracking its current parameter/result schema, error taxonomy, and a version-by-version changelog of contract changes plus which known consumers are coupled to which fields. Added 2026-07-29 per committee review (MCP Tool Designer).
+- `release` (in `wiki/releases/`) — one page per version cut: promotion date, `devel` commit range promoted, CHANGELOG entries included, and a consumer "recheck" list (who pins this project, immutable vs. moving ref, whether a `uvx --refresh`/cache-clean is needed to pick up the fix). Added 2026-07-29 per committee review (Release Engineer), operationalizing the promotion ritual already described in `CLAUDE.md`.
+
+Add additional types here as the wiki evolves.
+
+## Tag taxonomy
+
+(Empty initially. Add tags here as you adopt them, with one-line descriptions. Keep this list small and disciplined — a wiki with 200 tags has effectively no tags.)
+
+Example structure:
+- `methodology` — pages about research or analytical methods.
+- `open-question` — pages or sections that flag unresolved questions.
+- `contested` — pages where sources contradict.
+
+## Page sizing
+
+- Soft cap: 400 lines / ~2,000 words. Consider splitting beyond this.
+- Hard cap: 800 lines. Must split.
+
+## Frontmatter requirements
+
+Every page must have:
+- `type`
+- `title`
+- `tags`
+- `created`
+- `updated`
+
+Plus type-specific:
+- `source` pages: `authors`, `url` (if applicable), `raw`, `ingested`
+- Non-source pages: `sources` listing the source-summary pages drawn from
+
+## Optional graph metadata
+
+Pages may declare typed graph metadata under a top-level `graph:` key. This is the source of truth for the compiled knowledge graph under `wiki/graph/`. Markdown remains canonical; the graph is a regenerable index. Pages without `graph:` still appear as nodes (derived from `type`/`kind`) and still contribute `mentions` edges from body `[[wikilinks]]`.
+
+```yaml
+graph:
+  node_id: person:alice-example      # optional; default <node_type>:<slug>
+  node_type: person                  # optional; default mapped from type/kind via ontology
+  canonical: true                    # mark as canonical when multiple slugs alias the same entity
+  aliases: [Alice, person@example.com]
+  relationships:
+    - predicate: founded
+      object: company:acme-corp
+      source: alice-example-founder-context-dump   # source-page slug
+      evidence: "Solo technical founder and sole director..."
+      confidence: high               # high | medium | low
+      status: current                # current | historical | proposed | disputed | superseded
+      # optional:
+      # valid_from: 2025-01-15
+      # valid_to: 2026-03-01
+      # notes: "..."
+      # raw_ref: "raw/founder-dump.md#L42"
+      # contradicts: edge-id-or-source-slug
+      # supersedes: edge-id-or-source-slug
+```
+
+Required fields on every relationship: `predicate`, `object`, `source`, `evidence`, `confidence`, `status`. Predicates and the subject/object types they accept are declared in `wiki/graph/ontology.yaml`. Typed semantic edges must be supported by an explicit source — never emit one inferred from training data alone.
+
+## Index structure
+
+(Update this section when sharding.)
+
+Currently flat: a single `wiki/index.md` listing all pages.
+
+When the wiki passes ~150 pages or `index.md` exceeds 300 lines, shard into `wiki/indexes/<type>.md` and update this section.
+
+## Graph layer
+
+The wiki has an optional compiled graph layer under `wiki/graph/`:
+
+- `wiki/graph/ontology.yaml` — declares node types and predicates. **Tracked.** Edit this when you introduce new predicates or domain types.
+- `wiki/graph/nodes.jsonl`, `wiki/graph/edges.jsonl` — generated. Track in git only if you want graph diffs in PRs.
+- `wiki/graph/graph.sqlite` — generated. Gitignored by default.
+- `wiki/graph/graph.graphml` — generated. Track only if you want to diff it.
+
+Generation is reproducible from markdown via `wiki_graph_extract.py`, which ships with the external **`llm-wiki` plugin** — it is *not* a file in this repository's `scripts/` directory. If the plugin is not installed, skip the graph layer entirely; it is optional and nothing in the build, tests, or release depends on it. See `wiki/graph/README.md` for the precondition check. The graph can be deleted at any time and rebuilt without losing knowledge — markdown is canonical.
+
+## Workflow customizations
+
+(Empty initially. Document any deviations from the default ingest/query/lint workflows here.)
+
+## User preferences
+
+(Empty initially. As the user expresses style preferences — "always include a 'Why this matters' section on concept pages", "never use bullet lists in summaries", "prefer comparative tables for synthesis pages" — capture them here so they persist across sessions.)
+
+## Lint cadence
+
+- Structural lint: after every 5 ingests.
+- Semantic lint: weekly or after every 20 ingests.
+- Gap-finding: monthly.
+- Graph lint + extract: after every ingest that adds typed `graph.relationships`.
+
+Adjust based on the wiki's growth rate.

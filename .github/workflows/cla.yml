@@ -1,0 +1,130 @@
+# SPDX-License-Identifier: AGPL-3.0-or-later
+# Copyright (C) 2026 Gregory R. Warnes
+#
+# CLA Assistant — asks first-time contributors to accept CLA.md on their pull request
+# and records the signature. Belt-and-suspenders with the DCO check (dco.yml).
+#
+# BEFORE ENABLING (not yet verified in this draft):
+#   1. DONE — pinned to contributor-assistant/github-action's latest release, v2.6.1
+#      (2024-09-26), commit ca4a40a7d1004f18d9960b404b97e5f30a505a08.
+#   2. DONE — `CLA_SIGNATURES_TOKEN` repo secret created (fine-grained PAT scoped to
+#      this repo only: Contents + Pull requests, read/write).
+#   3. DONE — the `path-to-document` URLs use `blob/HEAD/`, which GitHub resolves to the
+#      default branch. Do NOT pin a branch name here.
+#
+#      This step previously read "Confirm the path-to-document URL resolves to CLA.md on
+#      the default branch". Nobody ran that check, and it did not resolve: the URL said
+#      `main`, and while `main` DOES exist here (it is the protected released branch, per
+#      CONTRIBUTING.md), CLA.md is not on it — it lives on `devel`. Verified 2026-07-31:
+#      `contents/CLA.md?ref=main` -> 404 "Not Found", `?ref=devel` -> CLA.md.
+#
+#      This repository is PUBLIC, so the effect was live: every outside contributor
+#      reaching the CLA gate was handed a 404 for the document they were being asked to
+#      sign, in the workflow that blocks their PR from merging.
+#
+#      A checklist item is not a control. `HEAD` is correct by construction and survives
+#      a default-branch rename. Found by the bug-class grep on bastion's identical
+#      defect; bastion and bastion-artifacts carried three more instances.
+#
+# Still open: CLA.md itself is a legal draft pending counsel review (see its own
+# header) — this workflow can run mechanically once merged, but the document it
+# asks contributors to sign should not be treated as final until that review lands.
+
+name: "CLA Assistant"
+
+# ---------------------------------------------------------------------------------------
+# THIS FILE IS READ FROM THE **BASE** BRANCH. `dco.yml` IS READ FROM THE **HEAD**.
+#
+# `pull_request_target` runs the workflow as it exists on the BASE branch (`devel`), not as
+# it exists in the PR. Two consequences, and both have cost real time:
+#
+#   * A PR that CHANGES THIS FILE is still judged by the base branch's copy — so it cannot
+#     pass the gate it fixes. Expect exactly one red `cla-assistant` on such a PR.
+#   * Every other PR picks the change up immediately once it is on `devel`; no branch needs
+#     rebasing or merging to receive it.
+#
+# `dco.yml` is the mirror image: `pull_request` runs the workflow from the PR HEAD, so a
+# branch cut before a dco.yml change is judged by the OLD file and must merge `devel` in to
+# receive the new one. That is not an inconsistency to tidy up — see the note in dco.yml
+# and `agent-config/docs/STACK_NOTES.md` for why each trigger is the only safe one for its
+# job.
+#
+# WHY THIS ONE MUST BE `pull_request_target`: it WRITES — signature files to the
+# `cla-signatures` branch and comments to the PR — and must work for fork PRs, which
+# `pull_request` denies both secrets and a write token. Hence `contents: write` and
+# `CLA_SIGNATURES_TOKEN` below.
+#
+# THE COROLLARY, which is why this file must never check out PR code: it runs with a write
+# token and a PAT in scope. Checking out or executing head content under
+# `pull_request_target` is the "pwn request" pattern — untrusted code with privileges.
+# ---------------------------------------------------------------------------------------
+on:
+  issue_comment:
+    types: [created]
+  pull_request_target:
+    types: [opened, closed, synchronize]
+
+permissions:
+  actions: write
+  contents: write
+  pull-requests: write
+  statuses: write
+
+jobs:
+  cla-assistant:
+    runs-on: ubuntu-latest
+    steps:
+      - name: "CLA Assistant"
+        if: (github.event.comment.body == 'recheck' || github.event.comment.body == 'I have read the CLA Document and I hereby sign the CLA') || github.event_name == 'pull_request_target'
+        uses: contributor-assistant/github-action@ca4a40a7d1004f18d9960b404b97e5f30a505a08  # v2.6.1
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          # PAT that can write to the signature-storage branch (see header notes):
+          PERSONAL_ACCESS_TOKEN: ${{ secrets.CLA_SIGNATURES_TOKEN }}
+        with:
+          path-to-signatures: "signatures/version1/cla.json"
+          path-to-document: "https://github.com/Warnes-Innovations/llm-sanitizer/blob/HEAD/CLA.md"
+          branch: "cla-signatures"
+          # Custom prompts so the recorded phrase matches the `if:` condition above:
+          custom-notsigned-prcomment: "Thank you for your contribution. Before we can merge it, please read our [Contributor License Agreement](https://github.com/Warnes-Innovations/llm-sanitizer/blob/HEAD/CLA.md) and sign it by posting the exact comment below in this pull request."
+          custom-pr-sign-comment: "I have read the CLA Document and I hereby sign the CLA"
+          custom-allsigned-prcomment: "All contributors have signed the CLA. ✍️"
+          # Bots / first-party accounts that do not need to sign. Deliberately does
+          # NOT include copilot-swe-agent[bot] (GitHub's autonomous coding-agent
+          # feature) or any other AI-agent identity: whether an autonomous agent can
+          # meaningfully give a CLA sign-off is an open policy question, not something
+          # to settle with a silent default. The current fail-closed behavior — an
+          # AI-agent PR is blocked pending a sign-off it cannot meaningfully give — is
+          # intentional until that question is decided.
+          #
+          # EXACT LOGINS ONLY — the wildcard was both broken and dangerous.
+          #
+          # This read `Warnes*` until 2026-08-11. Two defects, verified by running the
+          # pinned action's own `src/checkAllowList.ts` (it compiles a pattern containing
+          # `*` with `new RegExp(regex)` — no `i` flag, and no anchors):
+          #
+          #   1. CASE-SENSITIVE. `Warnes*` never matched the login `warnes`, so the owner
+          #      was told to sign his own CLA and every PR sat blocked. The allowlist is
+          #      matched against the GitHub LOGIN, not an email: `src/graphql.ts` resolves
+          #      `commit.author.user || commit.committer.user || commit.author ||
+          #      commit.committer` and then takes `committer.login || committer.name`.
+          #   2. UNANCHORED — the dangerous one. `/Warnes.*/` matches ANYWHERE in the
+          #      string, so `evil-Warnes-impostor` was allow-listed and skipped the CLA
+          #      entirely. Merely adding the `i` flag would have WIDENED that to
+          #      `evil-warnes-impostor`; case-folding and anchoring have to happen
+          #      together, which is why this is not a one-character fix upstream.
+          #
+          # Dropping the `*` takes the action's non-wildcard branch (`pattern ===
+          # committer`), which builds no regex at all — so it fixes 1 and closes 2 without
+          # depending on a third-party change. An upstream patch for the real bug is
+          # tracked separately.
+          #
+          # `Warnes-Innovations` is deliberately NOT listed: it is an organisation, and
+          # commits are authored by users, so it never matched a committer anyway.
+          #
+          # DO NOT add a display name here as a fallback for an unresolvable commit. A git
+          # author name is settable by anyone in one `git config user.name`, and the GitHub
+          # profile name is changeable at will — neither is a signal the subject cannot
+          # forge. See the two-signal reasoning in dco.yml: "a permissive signal may not
+          # stand alone."
+          allowlist: "dependabot[bot],github-actions[bot],warnes"

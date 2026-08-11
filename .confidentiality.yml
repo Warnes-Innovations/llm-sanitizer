@@ -1,0 +1,33 @@
+# Copyright (C) 2026 Gregory R. Warnes
+# SPDX-License-Identifier: AGPL-3.0-or-later
+#
+# Read by ~/src/agent-config/tools/check_confidential.py
+#
+# One of:
+#   public-bound   — this repository is published, or is intended to be. Scan every
+#                    commit for confidential material.
+#   always-private — this repository will never be published. Skip the scan.
+#
+# ABSENT FILE MEANS public-bound. That default is deliberate: a repository nobody has
+# classified is exactly the one where nobody has considered the question.
+intent: public-bound
+
+# THIS REPOSITORY IS ALREADY PUBLIC, so `public-bound` here is a statement of fact —
+# see the same note at the top of `.bastion.manifest.yml`. The declaration is still
+# what the scanner reads, and deliberately so: it records INTENT rather than having
+# the scanner gate on `gh repo view --json visibility`.
+#
+# The reason that distinction matters is the repository that is private TODAY and
+# slated to be published later. A check gated on today's visibility would skip it —
+# which is precisely where a confidential file committed now becomes public later,
+# with no further action by anyone and no second review. A check that passes today
+# and publishes tomorrow is worse than no check, because the commit already looked
+# reviewed. Visibility may only RAISE protection, never lower it: if `gh` reports a
+# repository public, that overrides an `always-private` declaration and the
+# contradiction is reported.
+#
+# (Corrected 2026-08-11: this block was inherited verbatim from a sibling repository
+# and described THAT repository — it asserted "this repository is currently private"
+# and cited a `PLAN.md` item that does not exist here, while `.bastion.manifest.yml`
+# three files away states this repository is already public. Same defect class as the
+# inherited wiki example ids: correct where it was written, false where it landed.)

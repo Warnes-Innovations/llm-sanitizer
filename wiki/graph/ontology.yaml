@@ -1,0 +1,177 @@
+# Wiki Graph Ontology
+#
+# Declares the node types and predicates that the compiled graph layer
+# (wiki/graph/) recognises. Edit this file when you introduce a new
+# domain-specific predicate or node type — wiki_graph_lint.py reads it
+# to validate every typed edge declared in page frontmatter.
+#
+# Markdown remains canonical. This file is just the contract that makes
+# the graph layer machine-checkable.
+
+node_types:
+  person:
+    maps_from:
+      type: entity
+      kind: person
+  company:
+    maps_from:
+      type: entity
+      kind: company
+  product:
+    maps_from:
+      type: entity
+      kind: product
+  paper:
+    maps_from:
+      type: entity
+      kind: paper
+  place:
+    maps_from:
+      type: entity
+      kind: place
+  organization:
+    maps_from:
+      type: entity
+      kind: organization
+  concept:
+    maps_from:
+      type: concept
+  source:
+    maps_from:
+      type: source
+  synthesis:
+    maps_from:
+      type: synthesis
+  decision:
+    explicit_only: true
+  claim:
+    explicit_only: true
+  raw:
+    explicit_only: true
+  incident:
+    maps_from:
+      type: incident
+  interface:
+    maps_from:
+      type: interface
+  release:
+    maps_from:
+      type: release
+
+predicates:
+  # --- Implicit predicates emitted by the extractor. ---
+  mentions:
+    subject_types: ["*"]
+    object_types: ["*"]
+    requires_evidence: false
+    description: |
+      Low-specificity edge derived from body wikilinks. Use it for
+      navigation, not as evidence of a typed relationship.
+  sourced_from:
+    subject_types: ["*"]
+    object_types: [source]
+    requires_evidence: false
+    description: |
+      Derived from each non-source page's frontmatter `sources:` list.
+  summarizes_raw:
+    subject_types: [source]
+    object_types: ["*"]
+    requires_evidence: false
+    description: |
+      Derived from a source page's frontmatter `raw:` field. Object is
+      the raw file path string, not a wiki node id.
+
+  # --- Typed semantic predicates. Add domain-specific ones below. ---
+  founded:
+    subject_types: [person]
+    object_types: [company, organization]
+    requires_evidence: true
+  owns:
+    subject_types: [person, company, organization]
+    object_types: [company, product, organization]
+    requires_evidence: true
+  contains_product:
+    subject_types: [company, organization]
+    object_types: [product]
+    requires_evidence: true
+  works_on:
+    subject_types: [person]
+    object_types: [product, concept]
+    requires_evidence: true
+  chose:
+    subject_types: [person, company, organization]
+    object_types: [product, concept]
+    requires_evidence: true
+  proposed:
+    subject_types: [person]
+    object_types: [decision, claim]
+    requires_evidence: true
+  competes_with:
+    subject_types: [product, company, organization]
+    object_types: [product, company, organization]
+    requires_evidence: true
+  depends_on:
+    subject_types: [product, concept]
+    object_types: [product, concept]
+    requires_evidence: true
+  authored:
+    subject_types: [person, organization]
+    object_types: [paper, source]
+    requires_evidence: true
+  cites:
+    subject_types: [paper, source, synthesis]
+    object_types: [paper, source]
+    requires_evidence: true
+  contradicts:
+    subject_types: [claim, source, synthesis]
+    object_types: [claim, source, synthesis]
+    requires_evidence: true
+  supersedes:
+    subject_types: [claim, source, decision]
+    object_types: [claim, source, decision]
+    requires_evidence: true
+
+  # --- Added 2026-07-29 per wiki-schema committee review (see
+  # .personas/reviews/wiki-schema/committee-summary.md). ---
+  same_bug_class_as:
+    subject_types: [incident]
+    object_types: [incident]
+    requires_evidence: true
+    description: |
+      Links two incidents that share a root-cause bug class (e.g. an
+      unbounded-dependency incident recurring across two libraries).
+      Operationalizes CLAUDE.md's "Bug Class Propagation" rule as a
+      queryable graph edge instead of relying on CHANGELOG prose.
+  guards_against:
+    subject_types: [concept]
+    object_types: [concept]
+    requires_evidence: true
+    description: |
+      Connects a bounding mechanism (e.g. a per-rule scan deadline, a
+      recursion depth guard) to the resource-exhaustion hazard it bounds.
+      A graph query for hazard concepts with zero incoming guards_against
+      edges surfaces genuinely unguarded operations.
+  evades:
+    subject_types: [concept]
+    object_types: [concept]
+    requires_evidence: true
+    description: |
+      An obfuscation/evasion technique that currently defeats a detection
+      rule or control. Use status/supersedes on the edge (not this file)
+      to represent "used to evade, now fixed" without lying about current
+      exploitability.
+  breaks_compatibility_with:
+    subject_types: [decision, source]
+    object_types: [product]
+    requires_evidence: true
+    description: |
+      A rule-addition decision or fix that changed a finding's shape or
+      classification in a way a named downstream consumer (e.g.
+      flow-guard) depended on.
+  fixed_in:
+    subject_types: [concept, claim]
+    object_types: [release]
+    requires_evidence: true
+    description: |
+      Links a bug/gap/claim to the release that fixed it, so fix
+      propagation to pinned/cached consumers can be checked per release.

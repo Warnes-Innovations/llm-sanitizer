@@ -1,4 +1,4 @@
-# Copyright (C) 2026 Gregory R. Warnes / Warnes Innovations LLC
+# Copyright (C) 2026 Gregory R. Warnes
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
 """Core scanner engine — rule registry, content parsing, finding accumulation."""
@@ -8,6 +8,7 @@ from __future__ import annotations
 import fnmatch
 import os
 import tempfile
+from dataclasses import dataclass
 import time
 import zipfile
 from pathlib import Path
@@ -154,20 +155,83 @@ _EXCLUDED_DIR_NAMES = frozenset([
 ])
 
 
-def iter_scannable_files(root: Path, glob_pattern: str = "**/*") -> list[Path]:
-    """Recursively collect files under root for directory scan/redact
-    operations, pruning excluded directories (see _EXCLUDED_DIR_NAMES) during
-    the walk itself — not just filtering afterward, since .git can be large
-    enough that even walking into it before discarding results is wasteful."""
+@dataclass(frozen=True)
+class ExclusionStats:
+    """What the directory exclusion list did on one walk — M0.
+
+    THREE NUMBERS, UNITS DISTINCT: how many names the list SPECIFIES, how many of
+    those names actually MATCHED, and how many directories were PRUNED. Reporting
+    only the effect makes a 7-name list and a 70-name one look identical whenever
+    both prune one directory, so a scanner's blind spots could grow with nothing in
+    the output ever changing. For the tool that IS the trust boundary, that is the
+    failure mode worth the extra line.
+
+    THE UNIT IS DIRECTORIES, NOT FILES, and the distinction is not cosmetic.
+    Exclusion happens by pruning `dirnames` during the walk, so the walk never
+    descends and the files beneath are never enumerated — counting them would mean
+    walking `.git` after all, which is the exact cost the pruning exists to avoid.
+    Naming this `files_skipped` would be a count in one unit wearing another's
+    label, which is the mistake that shipped in agent-config's first M0 attempt.
+    """
+
+    specified: int
+    matched: frozenset[str]
+    pruned_dirs: int
+
+    def summary(self) -> str:
+        """One line, for a CLI footer or an MCP response field."""
+        return (
+            f"{len(self.matched)} of {self.specified} excluded directory name(s) "
+            f"matched, pruning {self.pruned_dirs} director(ies) "
+            "(files beneath a pruned directory are never enumerated)"
+        )
+
+
+def walk_scannable(
+    root: Path, glob_pattern: str = "**/*"
+) -> tuple[list[Path], ExclusionStats]:
+    """`iter_scannable_files`, plus what the exclusion list did.
+
+    Separate from `iter_scannable_files` rather than a signature change: that
+    function is imported by cli.py, server.py, this module and four test
+    assertions, and this package is released. A caller that wants the M0 report
+    asks for it; every existing caller keeps its exact return type.
+    """
     files: list[Path] = []
+    matched: set[str] = set()
+    pruned = 0
     for dirpath, dirnames, filenames in os.walk(root):
-        dirnames[:] = [d for d in dirnames if d not in _EXCLUDED_DIR_NAMES]
+        keep = []
+        for d in dirnames:
+            if d in _EXCLUDED_DIR_NAMES:
+                matched.add(d)
+                pruned += 1
+            else:
+                keep.append(d)
+        dirnames[:] = keep
         for name in filenames:
             files.append(Path(dirpath) / name)
 
     if glob_pattern != "**/*":
         files = [p for p in files if fnmatch.fnmatch(p.name, glob_pattern.lstrip("**/"))]
-    return files
+    return files, ExclusionStats(
+        specified=len(_EXCLUDED_DIR_NAMES),
+        matched=frozenset(matched),
+        pruned_dirs=pruned,
+    )
+
+
+def iter_scannable_files(root: Path, glob_pattern: str = "**/*") -> list[Path]:
+    """Recursively collect files under root for directory scan/redact
+    operations, pruning excluded directories (see _EXCLUDED_DIR_NAMES) during
+    the walk itself — not just filtering afterward, since .git can be large
+    enough that even walking into it before discarding results is wasteful.
+
+    Thin wrapper over `walk_scannable`; use that one if you need the M0 exclusion
+    report. ONE walk implementation, two callers — a second copy is how the two
+    would drift into disagreeing about what "scannable" means.
+    """
+    return walk_scannable(root, glob_pattern)[0]
 
 
 # Bytes sniffed from the head of each file to classify it as binary. Matches
@@ -1093,7 +1157,7 @@ class Scanner:
         results: list[ScanResult] = []
         files_skipped_binary = 0
 
-        files = iter_scannable_files(root, glob_pattern)
+        files, exclusions = walk_scannable(root, glob_pattern)
 
         for file_path in sorted(files):
             try:
@@ -1115,6 +1179,9 @@ class Scanner:
             sensitivity=sensitivity,
             files_scanned=len(results),
             files_skipped_binary=files_skipped_binary,
+            exclusions_specified=exclusions.specified,
+            exclusion_names_matched=sorted(exclusions.matched),
+            dirs_pruned=exclusions.pruned_dirs,
             summary=summary,
             total_findings=summary.total_findings,
             max_risk=summary.max_risk,

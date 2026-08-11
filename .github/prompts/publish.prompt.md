@@ -18,8 +18,11 @@ Use this prompt to release a new version of `llm-sanitizer` to PyPI.
 - **PyPI publication is automated via Trusted Publishing (OIDC).** Cutting a GitHub
   **Release** on `main` triggers `.github/workflows/publish.yml`, which builds and
   uploads to PyPI. There is **no local `uv publish`** and **no `UV_PUBLISH_TOKEN`**.
-- The version lives in **two files that must stay in sync**: `pyproject.toml` and
-  `src/llm_sanitizer/__init__.py`.
+- The version lives in **three tracked files**: `pyproject.toml` and
+  `src/llm_sanitizer/__init__.py` (hand-edited, must stay in sync) and **`uv.lock`**, which
+  records the project's own version and is regenerated with `uv lock` — never hand-edited.
+  Skipping the lockfile is not cosmetic: `uv lock --check` then fails with *"The lockfile at
+  `uv.lock` needs to be updated"*.
 - Every irreversible action (push, PR merge, GitHub Release → PyPI) requires explicit
   user confirmation before proceeding. A PyPI version is **permanent even if yanked**.
 
@@ -27,7 +30,14 @@ Also read `.github/instructions/release-workflow.instructions.md` for repo-speci
 
 ## Step 1: Establish Repo State
 
-- Confirm the working directory is `/Users/warnes/src/llm-sanitizer` and the current branch is `devel`
+- Confirm you are inside the `llm-sanitizer` checkout and on branch `devel`. Resolve the repo
+  root portably rather than assuming a home directory — the checkout path differs per machine
+  and per OS:
+  ```bash
+  REPO_ROOT="$(git rev-parse --show-toplevel)" && echo "$REPO_ROOT" && git branch --show-current
+  ```
+  Confirm the basename is `llm-sanitizer` and the branch is `devel`. Use `"$REPO_ROOT"` for
+  every `cd` in the steps below.
 - Run `git status` and `git log --oneline -8` to summarize uncommitted changes and recent commits
 - If there are uncommitted changes, list them and ask whether to commit, stash, or abort before continuing
 - Read the current version from `pyproject.toml` **and** `src/llm_sanitizer/__init__.py`; if they
@@ -40,7 +50,7 @@ Also read `.github/instructions/release-workflow.instructions.md` for repo-speci
 
 Run:
 ```bash
-cd /Users/warnes/src/llm-sanitizer
+cd "$(git rev-parse --show-toplevel)"
 uv run pytest tests/ -q --tb=short > tmp/llm_san_publish_tests.txt 2>&1
 tail -20 tmp/llm_san_publish_tests.txt
 ```
@@ -50,15 +60,24 @@ tail -20 tmp/llm_san_publish_tests.txt
 - Also run `uv run mypy src/` and confirm it is clean
 - If all pass, state the counts explicitly and continue
 
-## Step 3: Bump the Version (BOTH files)
+## Step 3: Bump the Version (ALL THREE files)
 
 - Compute the new version from the current version and the bump type
 - Show the user: current version → proposed new version
 - **STOP and ask for confirmation before editing any file**
-- After confirmation, update **both**:
+- After confirmation, update **both** hand-edited sites, keeping them identical:
   - `version` in `pyproject.toml`
   - `__version__` in `src/llm_sanitizer/__init__.py`
-- Keep them identical
+- Then regenerate the **third** site, `uv.lock` — it is tracked and carries the project's own
+  version, so a bump that skips it leaves the lockfile stale:
+  ```bash
+  cd "$(git rev-parse --show-toplevel)"
+  uv lock          # regenerate; never hand-edit uv.lock
+  uv lock --check  # MUST exit 0 before continuing
+  ```
+- If `uv lock --check` reports *"The lockfile at `uv.lock` needs to be updated"*, the
+  regeneration did not happen — do not continue until it exits 0
+- Confirm `git diff --stat` shows all three files changed
 
 ## Step 4: Update CHANGELOG.md
 
@@ -73,7 +92,7 @@ tail -20 tmp/llm_san_publish_tests.txt
 
 The published artifact is built by `publish.yml` in CI; this local build is only a pre-flight check.
 ```bash
-cd /Users/warnes/src/llm-sanitizer
+cd "$(git rev-parse --show-toplevel)"
 uv build --wheel --out-dir dist/
 uv run --with dist/llm_sanitizer-X.Y.Z-py3-none-any.whl llm-sanitize --help 2>&1 | head -5
 ```
@@ -82,7 +101,9 @@ uv run --with dist/llm_sanitizer-X.Y.Z-py3-none-any.whl llm-sanitize --help 2>&1
 
 ## Step 6: Commit the Release Prep on devel
 
-- Stage `pyproject.toml`, `src/llm_sanitizer/__init__.py`, and `CHANGELOG.md`
+- Stage `pyproject.toml`, `src/llm_sanitizer/__init__.py`, **`uv.lock`**, and `CHANGELOG.md`
+  — all four. Omitting `uv.lock` ships a release whose lockfile still names the previous
+  version; verify with `git diff --cached --name-only` before committing
 - Propose a commit message: `chore(release): bump version to X.Y.Z`
 - **STOP and ask for confirmation before running `git commit`**
 - After confirmation, commit, then **STOP and ask for confirmation before `git push origin devel`**
@@ -144,16 +165,23 @@ point of no return: a PyPI version is permanent even if yanked.**
    ```
 3. Visit `https://pypi.org/project/llm-sanitizer/` and confirm the new version
 
-## Step 11: Tell Consumers to Refresh
+## Step 11: Tell Consumers How to Actually Pick Up the Release
 
-Consumers that pin the moving `@main` git ref (e.g. flow-guard's `.mcp.json`) may keep serving a
-**cached** `uvx` build after the promotion. Tell the maintainer that to pick up the new `main`
-immediately they can run:
-```bash
-uvx --refresh --from git+https://github.com/Warnes-Innovations/llm-sanitizer.git@main llm-sanitizer
-# or clear the cache:  uv cache clean llm-sanitizer
-```
-Consumers pinned to a **PyPI version** (`uvx llm-sanitizer==X.Y.Z`) pick up the new version by
-bumping that pin.
+**Check what the consumer pins before advising — the advice differs, and the wrong advice is a
+no-op that reads like a fix.** `uvx --refresh` only re-resolves a *moving* ref; against an
+immutable tag or an exact PyPI version it rebuilds the identical artifact and changes nothing.
+
+The reference consumer, flow-guard, pins an **immutable tag with extras** in its `.mcp.json`
+(`llm-sanitizer[7z,rar] @ git+…@vX.Y.Z`), so it falls in the first row:
+
+| Consumer pins | What to tell the maintainer |
+| --- | --- |
+| Immutable tag `@vX.Y.Z` — **flow-guard today** | **Bump the pin** to the tag just cut. Offer the exact edit: in the consumer's `.mcp.json`, change `…@vX.Y.Z` to `…@vX.Y.Z+1`, preserving the `[7z,rar]` extras. `uvx --refresh` will NOT help. |
+| Exact PyPI version `llm-sanitizer==X.Y.Z` | **Bump the pinned version** in the consumer's config. `--refresh` will NOT help. |
+| Moving ref `@main` / `@devel` | Already points at the new code; if a stale cached build is being served, `uvx --refresh --from git+…@main llm-sanitizer` or `uv cache clean llm-sanitizer`. |
+
+- Report the consumer's current pin, the tag just released, and the one-line edit needed
+- Do **not** edit a consumer repo's pin as part of this workflow — surface it and let the
+  maintainer make that change deliberately
 
 Report the final result: version published, PyPI URL, workflow run status, and any follow-up items.

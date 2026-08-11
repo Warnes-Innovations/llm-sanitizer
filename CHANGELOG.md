@@ -5,6 +5,110 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+## [0.6.0] — 2026-08-11
+
+Minor, not patch: this adds public API (`walk_scannable()` / `ExclusionStats`, three new
+`DirScanResult` fields) and a new `redact_dir` parameter. **No breaking changes** — every
+addition is additive with a default, `iter_scannable_files()` is unchanged and now delegates
+to the new walker, and `sensitivity` is appended last in `redact_dir`'s signature so existing
+positional callers are unaffected.
+
+**Consumers pinning an immutable tag must bump the pin to `v0.6.0`** to receive any of this;
+`uvx --refresh` re-resolves a moving ref and does nothing for a tag.
+
+### Added
+
+- **Directory scans now report where the scanner did NOT look.** `scan_dir` results and
+  the markdown report carry three numbers with distinct units: how many directory-exclusion
+  names are **specified**, how many **matched**, and how many directories were **pruned**.
+
+  This scanner is a trust boundary — an excluded directory is never examined for
+  injections — so the set of places it does not look belongs in its own output rather than
+  only in its source. Reporting the effect alone made a 7-name exclusion list and a 70-name
+  one render identically whenever both pruned one directory, so the blind spots could grow
+  with nothing in any run ever changing.
+
+  `dirs_pruned` counts **directories, not files**: exclusion prunes the walk, so files
+  beneath a pruned directory are never enumerated, and counting them would mean descending
+  into `.git` after all — the exact cost the pruning exists to avoid.
+
+  New `DirScanResult` fields (`exclusions_specified`, `exclusion_names_matched`,
+  `dirs_pruned`) are additive with defaults, so an older reader is unaffected. New
+  `walk_scannable()` returns `(files, ExclusionStats)`; `iter_scannable_files()` is
+  unchanged and now delegates to it, so every existing caller keeps its exact return type.
+
+- **`redact_dir` now accepts `sensitivity`, closing the redact-tool asymmetry.**
+  `redact`, `redact_file` and `redact_url` all took a `sensitivity` argument;
+  `redact_dir` did not, and built its `Scanner` with the default — so it
+  redacted at `"medium"` no matter what the caller asked for. The failure was
+  silent: the output directory looked redacted while quietly under-redacting
+  (caller wanted `"high"`) or over-redacting (caller wanted `"low"`), and a
+  consumer protocol instructing "pass `sensitivity="high"` to every redact
+  call" was simply false for directories.
+
+  The parameter is appended **last** in the signature
+  (`path, output_dir, mode, glob, binary_mode, sensitivity`), so existing
+  positional callers are unaffected; the default remains `"medium"`, matching
+  the other three tools. Regression tests live in
+  `tests/test_server.py::TestRedactDirHonorsSensitivity`, including a
+  positional-compatibility case.
+
+  **Redact at the same sensitivity as the scan that motivated it** — redaction
+  removes what a scan at *that* sensitivity reports, so scanning at `"high"`
+  and redacting at the `"medium"` default leaves every info/low finding behind.
+
+### Fixed
+
+- **A `.llm-sanitizer.yml` that exists was silently ignored.** `pyyaml` was
+  never a declared dependency, and `config.py` returned defaults *silently*
+  when the import failed — on a path reached only after confirming a config
+  file is present:
+
+  ```python
+  if not _YAML_AVAILABLE:
+      # PyYAML not installed — return defaults silently
+      return SanitizerConfig()
+  ```
+
+  This was live, not theoretical. In the environment consumers actually use —
+  `uvx --from git+https://github.com/Warnes-Innovations/llm-sanitizer.git@v0.5.1`,
+  which is what bastion's scanner wiring creates — `import yaml` fails.
+  Verified 2026-07-31. So in that deployment every config file was inert while
+  `list_rules` went on documenting itself as reporting "what actually runs". An
+  operator who disabled a rule saw it disabled in their config and enabled in
+  reality; one who raised `sensitivity` silently got the default.
+
+  **The latent half is worse than the live half.** Because the failure was
+  silent, `pyyaml` arriving transitively — via any dependency, at any time —
+  would have made every checked-in `enabled: false` become live *at once*, with
+  no event marking the change. Failing closed means that transition can now only
+  run from "loud error" to "working", never from "silently ignored" to
+  "suddenly enforcing something different".
+
+  Two changes, and the first is the actual fix: `pyyaml>=6.0,<7` is now a
+  declared (and bounded) dependency, and the absent-yaml branch raises
+  `ConfigError` instead of returning defaults. With the declaration in place
+  that branch should be unreachable; it is the backstop for a consumer who
+  installs with `--no-deps` or vendors the source.
+
+  Same bug class as the 0.4.0 `mcp>=1.0` and 0.5.1 `py7zr>=0.20` incidents: a
+  dependency declaration that only a fresh no-lockfile resolve exposes. `py7zr`
+  is the closest cousin — it reported a valid archive as CRITICAL/corrupt, which
+  was at least *loud*. This one was silent, which is why it survived longer.
+
+### Changed
+
+- **A config file that cannot be read is now an error, not a fallback.**
+  `load_config()` raises the new `ConfigError` when `.llm-sanitizer.yml` is
+  present but unreadable, rather than quietly substituting defaults.
+
+  **Not a breaking change for a deployment with no config file** — that case is
+  unchanged and still returns defaults, because nothing was promised there. The
+  only newly-failing case is "there *is* a policy and we cannot apply it", where
+  the previous behaviour was to report one policy while enforcing another.
+
 ## [0.5.1] — 2026-07-29
 
 ### Fixed
