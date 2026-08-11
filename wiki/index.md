@@ -23,3 +23,15 @@ When this file exceeds ~300 lines or the wiki passes ~150 pages, shard into `wik
 ## Synthesis
 
 (populated as query answers are filed back)
+
+## Incidents
+
+(populated as production security/reliability defects are written up)
+
+## Interfaces
+
+(populated as MCP tool contracts are documented)
+
+## Releases
+
+(populated as versions are cut)

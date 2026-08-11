@@ -120,9 +120,10 @@ no-op that reads like a fix.
 
 **An obfuscation rule should only fire if de-obfuscating reveals problematic
 text.** Obfuscation — base64, homoglyph/confusable substitution, zero-width
-characters, hidden/CSS-invisible text, and the like — is a *transport*, not a
-threat in itself. Such a rule must de-obfuscate the content (decode, normalize,
-strip, un-hide) and then decide based on whether the *recovered* text is
+characters, character-splitting (`i g n o r e`, `ignore___all`),
+hidden/CSS-invisible text, and the like — is a *transport*, not a threat in
+itself. Such a rule must de-obfuscate the content (decode, normalize, strip,
+reconstruct, un-hide) and then decide based on whether the *recovered* text is
 actually problematic — i.e. whether it trips another detection rule — never on
 the mere presence of the obfuscation.
 
@@ -142,9 +143,19 @@ the mere presence of the obfuscation.
   problematic".
 - **Whole class.** Route de-obfuscation through the shared `scan_deobfuscated`
   helper (depth-guarded, so obfuscation rules can safely recurse into one
-  another). `base64`, `homoglyph`, and `zero_width` all follow this — they
-  decode / normalize / strip and re-scan, flagging only what the *recovered*
-  text trips.
+  another). This is a *class* rule, not a list of three rules: **every rule that
+  de-obfuscates then re-scans goes through that one helper**, and each decodes /
+  normalizes / strips / reconstructs / un-hides and flags only what the
+  *recovered* text trips. Enumerate the current members from the code rather
+  than from this document — the set grows, and a hardcoded list here goes stale
+  silently:
+
+  ```bash
+  grep -rln --include='*.py' 'scan_deobfuscated(' src/llm_sanitizer/rules/ | grep -v _rescan
+  ```
+
+  A new obfuscation rule joins this class by calling the same helper; do not
+  hand-roll a private re-scan path.
 - **Transport vs. steganography.** The de-obfuscate-then-re-scan rule above is
   for *transport* obfuscation, where the hidden text is recoverable (decode
   base64, normalize homoglyphs, strip zero-width splitters). *Camouflage* rules
@@ -169,7 +180,9 @@ This project maintains an LLM-curated wiki at `wiki/` following Andrej Karpathy'
 
 Before answering questions that rely on knowledge accumulated in this project, read `wiki/index.md` (or the relevant shard under `wiki/indexes/` if the wiki has been sharded) and use its one-line summaries to find the pages you need. Cite with `[[wikilinks]]`. If the index does not surface good candidates, fall back to `wiki_search.py` from the `llm-wiki` skill for BM25-ranked retrieval.
 
-To add a new source, follow the `llm-wiki` skill's ingest workflow: decide placement under `wiki/sources/`, `wiki/entities/`, `wiki/concepts/`, or `wiki/synthesis/`; identify touched pages and make surgical `str_replace` updates rather than rewrites; update the index; append a one-line entry to `wiki/log.md`.
+To add a new source, follow the `llm-wiki` skill's ingest workflow: decide placement among the page types, identify touched pages and make surgical `str_replace` updates rather than rewrites, update the index, and append a one-line entry to `wiki/log.md`.
+
+**Read the page types from `wiki/SCHEMA.md` ("Page types"), not from here.** That list is authoritative and has grown beyond the original four — it now also covers `incident`, `interface`, and `release` pages, each with its own subdirectory and required content. An enumeration repeated here would go stale and would leave a reader with nowhere to file the types it omits.
 
 Scaling discipline: atomic pages (400-line soft cap, 800-line hard cap), sharded indexes past ~150 pages or 300 index lines, required YAML frontmatter on every page, `[[wikilinks]]` for every cross-reference.
 
