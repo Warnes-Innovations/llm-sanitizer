@@ -162,6 +162,23 @@ class DirScanResult(BaseModel):
     sensitivity: str
     files_scanned: int
     files_skipped_binary: int = 0
+    # WHAT THE DIRECTORY-EXCLUSION LIST DID — M0 (docs/MEASUREMENT.md in agent-config).
+    #
+    # Three numbers with distinct units, because reporting only the effect makes a
+    # 7-name exclusion list and a 70-name one look identical whenever both prune one
+    # directory. This scanner IS a trust boundary: an excluded directory is never
+    # examined for injections, so the set of places it does not look must be visible in
+    # its own output rather than only in its source.
+    #
+    # `dirs_pruned` counts DIRECTORIES, not files. Exclusion prunes the walk, so the
+    # files beneath are never enumerated — counting them would mean descending into
+    # `.git` after all, which is the cost the pruning exists to avoid. Naming this
+    # `files_*` would be a count in one unit wearing another's label.
+    #
+    # Additive with defaults: an older reader ignores these and behaves exactly as before.
+    exclusions_specified: int = 0
+    exclusion_names_matched: list[str] = Field(default_factory=list)
+    dirs_pruned: int = 0
     # `summary` mirrors ScanResult.summary so a consumer can read
     # `result.summary.max_risk` / `.total_findings` uniformly across single-file
     # and directory scans (committee H3 — an agent that gated on summary.max_risk
