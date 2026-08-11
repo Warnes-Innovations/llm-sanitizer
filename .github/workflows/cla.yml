@@ -32,6 +32,32 @@
 
 name: "CLA Assistant"
 
+# ---------------------------------------------------------------------------------------
+# THIS FILE IS READ FROM THE **BASE** BRANCH. `dco.yml` IS READ FROM THE **HEAD**.
+#
+# `pull_request_target` runs the workflow as it exists on the BASE branch (`devel`), not as
+# it exists in the PR. Two consequences, and both have cost real time:
+#
+#   * A PR that CHANGES THIS FILE is still judged by the base branch's copy — so it cannot
+#     pass the gate it fixes. Expect exactly one red `cla-assistant` on such a PR.
+#   * Every other PR picks the change up immediately once it is on `devel`; no branch needs
+#     rebasing or merging to receive it.
+#
+# `dco.yml` is the mirror image: `pull_request` runs the workflow from the PR HEAD, so a
+# branch cut before a dco.yml change is judged by the OLD file and must merge `devel` in to
+# receive the new one. That is not an inconsistency to tidy up — see the note in dco.yml
+# and `agent-config/docs/STACK_NOTES.md` for why each trigger is the only safe one for its
+# job.
+#
+# WHY THIS ONE MUST BE `pull_request_target`: it WRITES — signature files to the
+# `cla-signatures` branch and comments to the PR — and must work for fork PRs, which
+# `pull_request` denies both secrets and a write token. Hence `contents: write` and
+# `CLA_SIGNATURES_TOKEN` below.
+#
+# THE COROLLARY, which is why this file must never check out PR code: it runs with a write
+# token and a PAT in scope. Checking out or executing head content under
+# `pull_request_target` is the "pwn request" pattern — untrusted code with privileges.
+# ---------------------------------------------------------------------------------------
 on:
   issue_comment:
     types: [created]
