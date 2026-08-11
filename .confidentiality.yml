@@ -12,12 +12,22 @@
 # classified is exactly the one where nobody has considered the question.
 intent: public-bound
 
-# NOTE THAT THIS REPOSITORY IS CURRENTLY PRIVATE, AND THE DECLARATION SAYS public-bound
-# ANYWAY. That is the entire reason this file records INTENT rather than the scanner
-# reading `gh repo view --json visibility`.
+# THIS REPOSITORY IS ALREADY PUBLIC, so `public-bound` here is a statement of fact —
+# see the same note at the top of `.bastion.manifest.yml`. The declaration is still
+# what the scanner reads, and deliberately so: it records INTENT rather than having
+# the scanner gate on `gh repo view --json visibility`.
 #
-# bastion is slated to become public (PLAN.md, item T8). A check gated on today's
-# visibility would skip this repository — which is precisely where a confidential file
-# committed now becomes public later, with no further action by anyone and no second
-# review. A check that passes today and publishes tomorrow is worse than no check,
-# because the commit already looked reviewed.
+# The reason that distinction matters is the repository that is private TODAY and
+# slated to be published later. A check gated on today's visibility would skip it —
+# which is precisely where a confidential file committed now becomes public later,
+# with no further action by anyone and no second review. A check that passes today
+# and publishes tomorrow is worse than no check, because the commit already looked
+# reviewed. Visibility may only RAISE protection, never lower it: if `gh` reports a
+# repository public, that overrides an `always-private` declaration and the
+# contradiction is reported.
+#
+# (Corrected 2026-08-11: this block was inherited verbatim from a sibling repository
+# and described THAT repository — it asserted "this repository is currently private"
+# and cited a `PLAN.md` item that does not exist here, while `.bastion.manifest.yml`
+# three files away states this repository is already public. Same defect class as the
+# inherited wiki example ids: correct where it was written, false where it landed.)

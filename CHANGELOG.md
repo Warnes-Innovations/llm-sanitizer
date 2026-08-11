@@ -28,6 +28,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `walk_scannable()` returns `(files, ExclusionStats)`; `iter_scannable_files()` is
   unchanged and now delegates to it, so every existing caller keeps its exact return type.
 
+- **`redact_dir` now accepts `sensitivity`, closing the redact-tool asymmetry.**
+  `redact`, `redact_file` and `redact_url` all took a `sensitivity` argument;
+  `redact_dir` did not, and built its `Scanner` with the default — so it
+  redacted at `"medium"` no matter what the caller asked for. The failure was
+  silent: the output directory looked redacted while quietly under-redacting
+  (caller wanted `"high"`) or over-redacting (caller wanted `"low"`), and a
+  consumer protocol instructing "pass `sensitivity="high"` to every redact
+  call" was simply false for directories.
+
+  The parameter is appended **last** in the signature
+  (`path, output_dir, mode, glob, binary_mode, sensitivity`), so existing
+  positional callers are unaffected; the default remains `"medium"`, matching
+  the other three tools. Regression tests live in
+  `tests/test_server.py::TestRedactDirHonorsSensitivity`, including a
+  positional-compatibility case.
+
+  **Redact at the same sensitivity as the scan that motivated it** — redaction
+  removes what a scan at *that* sensitivity reports, so scanning at `"high"`
+  and redacting at the `"medium"` default leaves every info/low finding behind.
+
 ### Fixed
 
 - **A `.llm-sanitizer.yml` that exists was silently ignored.** `pyyaml` was

@@ -79,6 +79,7 @@ persona.
 - **Human review steps described as optional or vague** — "manual review is recommended" without a checklist is not a control
 - **Missing authentication on internal services** — Option A API proxy at `host.docker.internal:4000` with no auth token
 - **Floating image tags in Dockerfile** — `node:lts-slim` can silently pull a different image after a Node LTS version bump
+- **Dangling/phantom cross-reference in a security-critical protocol doc** — the doc points to a section or control that does not exist in the document graph (a consumer protocol doc referenced a "section 3.3", and later a "Remaining Gaps" entry, that weren't present). A reader — human or agent — can't verify it and may take the missing control on faith. Grep every cross-reference target; if it resolves to nothing, flag it.
 
 ## Exploration mandate
 

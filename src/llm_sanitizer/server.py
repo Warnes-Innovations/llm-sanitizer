@@ -316,6 +316,7 @@ def redact_dir(
     mode: str = "strip",
     glob: str = "**/*",
     binary_mode: str = "extract",
+    sensitivity: str = "medium",
 ) -> str:
     """Redact a directory, mirroring its structure under the output directory.
 
@@ -327,6 +328,11 @@ def redact_dir(
         output_dir: Path to the output directory (will be created).
         mode: Redaction mode — "strip", "comment", or "highlight".
         glob: File pattern filter. Defaults to all files.
+        sensitivity: Detection sensitivity ("low" | "medium" | "high") — the
+            redaction removes what a scan at THIS sensitivity reports, so a
+            caller scanning at "high" must also redact at "high" or the
+            output keeps findings the scan flagged. Appended last so existing
+            positional callers are unaffected.
         binary_mode: How to handle content sniffed as binary (by content,
             not extension) — "extract" (default; scan embedded text via
             markitdown but always copy the original binary through
@@ -381,7 +387,9 @@ def redact_dir(
                     shutil.copy2(file_path, out_path)
                     files_written.append(str(out_path))
                     continue
-                scan_result = scanner.scan(content, source=str(file_path))
+                scan_result = scanner.scan(
+                    content, source=str(file_path), sensitivity=sensitivity
+                )
                 if scan_result.findings and not is_binary_content:
                     out_path.write_text(
                         _redactor.redact(content, scan_result, mode=mode),
