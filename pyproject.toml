@@ -6,6 +6,14 @@ readme = {file = "README.md", content-type = "text/markdown"}
 authors = [{name = "Gregory R. Warnes", email = "greg@warnes-innovations.com"}]
 license = {text = "AGPL-3.0-or-later"}
 license-files = ["LICENSE"]
+# NO UPPER BOUND ON PURPOSE. The resolution chain markitdown -> magika -> onnxruntime
+# has no cp314 wheels for macOS x86_64 (Intel Macs): onnxruntime dropped
+# `macosx_x86_64` wheels entirely at 1.24.0, and 1.23.2 (the last Intel build) only
+# ships cp313 and older. A global `requires-python` cap cannot express that — markers
+# are not allowed there — and it would regress the platforms where Python 3.14 works
+# fine (macOS arm64 14+, Linux, Windows, all of which have cp314 onnxruntime wheels).
+# So the cap stays open, and consumers on Intel macOS must pin the interpreter (e.g.
+# `uvx --python 3.13 ...`) — see the README's Platform notes.
 requires-python = ">=3.11"
 keywords = [
 	"agent",
@@ -27,6 +35,7 @@ classifiers = [
 	"Programming Language :: Python :: 3",
 	"Programming Language :: Python :: 3.11",
 	"Programming Language :: Python :: 3.12",
+	"Programming Language :: Python :: 3.13",
 	"Topic :: Security",
 	"Topic :: Software Development",
 	"Topic :: Software Development :: Libraries :: Python Modules",

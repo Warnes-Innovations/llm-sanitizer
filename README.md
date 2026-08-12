@@ -50,6 +50,22 @@ pip install llm-sanitizer
 uv pip install llm-sanitizer
 ```
 
+### Platform notes
+
+The dependency chain `markitdown -> magika -> onnxruntime` needs binary wheels for
+`onnxruntime` on your platform and Python version.
+
+* **Intel macOS (x86_64):** onnxruntime dropped `macosx_x86_64` wheels entirely at
+  1.24.0, and the last Intel build (1.23.2) only ships wheels for Python ≤3.13. Use
+  Python 3.13 or older — with uv, pin the interpreter explicitly:
+  `uvx --python 3.13 --from llm-sanitizer[7z,rar] llm-sanitize ...`.
+* **Apple Silicon macOS:** works on macOS 14+ (onnxruntime 1.24+ wheels require
+  macOS 14); on macOS 13 or earlier use Python ≤3.13.
+* **Linux and Windows:** work on Python 3.11 through 3.14.
+
+We keep `requires-python = ">=3.11"` rather than capping it: a cap cannot carry
+platform markers and would regress the platforms where Python 3.14 resolves fine.
+
 ## Quick Start
 
 ### CLI
