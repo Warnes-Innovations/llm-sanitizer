@@ -221,7 +221,7 @@ When the user invokes a slash command, read the corresponding `.prompt.md` file.
 
 - Prefer the 'oboe-mcp' MCP tools for OBO session state.
 - Do not edit .github/oboe_sessions/*.json directly or use 'obo_helper.py' when 'oboe-mcp' can perform the operation. Fall back to 'oboe-cli' when the MCP server is unavailable.
-- **oboe-mcp**: `obo_list_sessions`, `obo_create`, `obo_session_status`, `obo_next`, `obo_list_items`, `obo_get_item`, `obo_mark_blocked`, `obo_mark_complete`, `obo_mark_in_progress`, `obo_mark_skip`, `obo_set_approval`, `obo_complete_session`, `obo_create_child_session`, `obo_complete_child_session`, `obo_merge_items`, `obo_update_field`
+- **oboe-mcp**: `oboe_list_sessions`, `oboe_create`, `oboe_session_status`, `oboe_next`, `oboe_list_items`, `oboe_get_item`, `oboe_mark_blocked`, `oboe_mark_complete`, `oboe_mark_in_progress`, `oboe_mark_skip`, `oboe_set_approval`, `oboe_complete_session`, `oboe_create_child_session`, `oboe_complete_child_session`, `oboe_merge_items`, `oboe_update_field`
 - **oboe-cli fallback** (when MCP unavailable): all session-scoped commands take `--session SESSION [--base-dir DIR]`
   - sessions/status/next/complete-session/list/show/in-progress/block/complete/skip/approve/update/merge/create-child/complete-child
   - `create` and `merge` require `--input-file items.json` (items as a JSON array)
