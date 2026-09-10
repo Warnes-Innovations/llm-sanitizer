@@ -135,7 +135,7 @@ class TestCharSplitNoReDoS:
 
     def test_long_mixed_run_is_fast(self) -> None:
         start = time.time()
-        CharSplitRule().detect(("abcdefghij" * 200_000))
+        CharSplitRule().detect("abcdefghij" * 200_000)
         assert time.time() - start < 5.0
 
 
