@@ -221,7 +221,7 @@ When the user invokes a slash command, read the corresponding `.prompt.md` file.
 
 - Prefer the 'oboe-mcp' MCP tools for OBO session state.
 - Do not edit .github/oboe_sessions/*.json directly or use 'obo_helper.py' when 'oboe-mcp' can perform the operation. Fall back to 'oboe-cli' when the MCP server is unavailable.
-- **oboe-mcp**: `obo_list_sessions`, `obo_create`, `obo_session_status`, `obo_next`, `obo_list_items`, `obo_get_item`, `obo_mark_blocked`, `obo_mark_complete`, `obo_mark_in_progress`, `obo_mark_skip`, `obo_set_approval`, `obo_complete_session`, `obo_create_child_session`, `obo_complete_child_session`, `obo_merge_items`, `obo_update_field`
+- **oboe-mcp**: the tools are named `oboe_*` (`oboe_create`, `oboe_next`, `oboe_mark_complete`, …). Read the live tool list from your own session rather than working from a list written down here — this block is committed into several repositories, so any roster copied into it is a snapshot that goes stale silently in all of them. It already did: it shipped 16 `obo_*` names that matched no tool at all, while the server served 23 under the `oboe_` prefix.
 - **oboe-cli fallback** (when MCP unavailable): all session-scoped commands take `--session SESSION [--base-dir DIR]`
   - sessions/status/next/complete-session/list/show/in-progress/block/complete/skip/approve/update/merge/create-child/complete-child
   - `create` and `merge` require `--input-file items.json` (items as a JSON array)

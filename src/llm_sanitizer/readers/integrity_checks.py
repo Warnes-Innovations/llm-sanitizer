@@ -58,18 +58,84 @@ _TEXT_EXTENSIONS: frozenset[str] = frozenset({
     ".gradle", ".cmake", ".mk", ".make", ".dockerfile", ".gitignore",
 })
 
-# Bytes sniffed to decide whether unrecognized content is binary (NUL present),
-# mirroring the scanner's _is_binary heuristic (kept local to avoid an import
-# cycle: the scanner imports this module).
-_BINARY_SNIFF_BYTES = 8000
+# --- Text vs. binary classification ------------------------------------------
+#
+# THE ONE implementation. `scanner._is_binary` delegates here (the scanner
+# imports this module, never the reverse). There used to be two copies of this
+# decision — one here, one in scanner.py — with a comment on this one saying it
+# "mirrors" the other. They agreed only because nobody had changed either.
+
+#: C0 control bytes that appear routinely in legitimate text: tab, newline,
+#: vertical tab, form feed, carriage return.
+_TEXT_CONTROL_BYTES = frozenset({0x09, 0x0A, 0x0B, 0x0C, 0x0D})
+
+#: Streaming chunk size. This bounds MEMORY only — every byte of the file is
+#: examined, and the verdict does not depend on this number. That distinction
+#: is the whole point: the previous rule read the first 8000 bytes and decided
+#: from those, so the value changed the answer.
+_READ_CHUNK = 65536
 
 
-def _is_binary_content(path: Path) -> bool:
+def is_binary_content(path: Path) -> bool:
+    """True if *path* holds binary content rather than text.
+
+    Two steps, in order, neither with a byte budget:
+
+    1. **Magic bytes.** If ``filetype`` recognises a known format, the file is
+       binary because it says what it is. The library matches only binary
+       signatures and returns None for plain text and source, which is exactly
+       the property this needs. A short uncompressed PDF is now binary because
+       it starts ``%PDF-``, not because of where its NUL bytes happen to fall.
+
+    2. **Whole-file control-character test.** For anything unrecognised, the
+       file is text unless it contains a C0 control byte other than the usual
+       whitespace. Read in chunks, but every byte is examined and the first
+       disqualifying byte ends it.
+
+    **Why control characters and not UTF-8 decodability.** Latin-1 text
+    (``caf\\xe9 au lait``) is not valid UTF-8, and a decodability test would
+    call it binary — routing a perfectly ordinary text file into the extractor,
+    which would fail, which would refuse the file. Control characters separate
+    text from binary without assuming an encoding.
+
+    **What this replaces, and why it was wrong.** The old rule read the first
+    8000 bytes and returned ``b"\\0" in head``. It failed in both directions:
+    a file whose first NUL sits past byte 8000 read as text, and a short PDF
+    with no NUL at all read as text — the same two-line document classified
+    differently at 9,339 and 9,567 bytes depending only on how its deflate
+    stream compressed. The scanner then read PDF object dictionaries instead of
+    the document's words.
+
+    Errors resolve to False (not binary) so callers keep their existing
+    error paths; an unreadable file is reported by the code that tries to read
+    it, not here.
+    """
+    try:
+        import filetype
+    except ImportError:
+        # Core dep missing → fall through to the content test rather than
+        # crashing. Same graceful degradation as detect_type_mismatch.
+        pass
+    else:
+        try:
+            if filetype.guess(str(path)) is not None:
+                return True
+        except (OSError, TypeError, ValueError):
+            return False
+
     try:
         with path.open("rb") as fh:
-            return b"\x00" in fh.read(_BINARY_SNIFF_BYTES)
+            while chunk := fh.read(_READ_CHUNK):
+                for byte in chunk:
+                    if byte < 0x20 and byte not in _TEXT_CONTROL_BYTES:
+                        return True
     except OSError:
         return False
+    return False
+
+
+#: Retained as the module-internal spelling used below.
+_is_binary_content = is_binary_content
 
 
 # --- Tier 2 scope: the office formats we structurally validate --------------
