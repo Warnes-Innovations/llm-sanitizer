@@ -302,10 +302,10 @@ class TestTheGuardsAreUnchanged:
         observed: dict[str, object] = {}
         real = url_reader._scannable_text
 
-        def _watched(raw: bytes, encoding: str):
+        def _watched(raw: bytes, encoding: str, **kwargs):
             observed["lock_held"] = url_reader._pin_lock.locked()
             observed["getaddrinfo_patched"] = socket.getaddrinfo is not _real_gai
-            return real(raw, encoding)
+            return real(raw, encoding, **kwargs)
 
         serve(pdf_bytes)
         # Captured AFTER serve(), which installs the test's own resolver stub —

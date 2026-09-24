@@ -256,8 +256,11 @@ def _read_content(target: str, binary_mode: str = "extract") -> tuple[str | None
     content is None when target is a file sniffed as binary and binary_mode
     excludes it from scanning (see llm_sanitizer.scanner.read_scannable_content)."""
     if target == "-":
-        from llm_sanitizer.readers.text_reader import read_text
-        return read_text("-"), "<stdin>"
+        from llm_sanitizer.readers.text_reader import read_stdin
+        # May be None: piped binary that no extractor could read. The callers
+        # below already handle None for files and now get the same contract
+        # here, instead of a UnicodeDecodeError traceback (#55).
+        return read_stdin(), "<stdin>"
     if _is_url(target):
         from llm_sanitizer.readers.url_reader import read_url
         return read_url(target), target
@@ -268,13 +271,19 @@ def _read_content(target: str, binary_mode: str = "extract") -> tuple[str | None
 def _unreadable_reason(target: str, binary_mode: str) -> str:
     """Explain why *target* yielded no scannable text.
 
-    A URL and a file reach the same None for different reasons, and quoting
-    binary_mode for a URL would be wrong: the URL reader always extracts, so
-    the flag is never consulted there (see readers.url_reader.read_url, #53).
+    A URL, piped stdin and a file all reach the same None for different
+    reasons. Quoting binary_mode for the first two would be wrong: they always
+    extract, so the flag is never consulted there (readers.url_reader.read_url
+    for #53, readers.text_reader.read_stdin for #55).
     """
     if _is_url(target):
         return (
             "the fetched content is a binary document no extractor could read, "
+            "or one that extracted to nothing"
+        )
+    if target == "-":
+        return (
+            "the piped content is a binary document no extractor could read, "
             "or one that extracted to nothing"
         )
     return f"binary content, binary_mode={binary_mode!r}"
