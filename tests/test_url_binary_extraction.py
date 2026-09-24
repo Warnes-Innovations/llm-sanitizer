@@ -265,6 +265,39 @@ class TestTheGuardsAreUnchanged:
     redirect re-validation and the size cap. Reshaping the return contract must
     not have loosened any of them."""
 
+    def test_extraction_runs_outside_the_dns_pin(
+        self, pdf_bytes: bytes, serve, monkeypatch
+    ) -> None:
+        # _pin_host_to_ips patches a PROCESS-GLOBAL socket.getaddrinfo and holds
+        # a non-reentrant lock. Extraction is markitdown and can take seconds, so
+        # doing it inside the pin would rewrite every other thread's DNS — and
+        # fail every concurrent read_url — for the length of a document parse
+        # rather than a fetch. Caught in review of this change; pinned here
+        # because nothing else would notice it coming back.
+        from llm_sanitizer.readers import url_reader
+
+        observed: dict[str, object] = {}
+        real = url_reader._scannable_text
+
+        def _watched(raw: bytes, encoding: str):
+            observed["lock_held"] = url_reader._pin_lock.locked()
+            observed["getaddrinfo_patched"] = socket.getaddrinfo is not _real_gai
+            return real(raw, encoding)
+
+        serve(pdf_bytes)
+        # Captured AFTER serve(), which installs the test's own resolver stub —
+        # that stub is the baseline, and the pin would replace it again.
+        _real_gai = socket.getaddrinfo
+        monkeypatch.setattr(url_reader, "_scannable_text", _watched)
+
+        read_url("https://example.test/doc.pdf")
+
+        assert observed, "_scannable_text was never reached"
+        assert observed["lock_held"] is False, "the DNS pin lock was still held"
+        assert observed["getaddrinfo_patched"] is False, (
+            "socket.getaddrinfo was still patched during extraction"
+        )
+
     def test_ssrf_guard_still_blocks_metadata(self, monkeypatch) -> None:
         monkeypatch.setattr(
             socket,
