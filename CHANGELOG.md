@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (scan deadline)
+
+- **The scan deadline is now observable *during* a rule, not only after its setup.**
+  Four rules built their line-offset table and split the input before consulting the
+  clock, so an expired deadline could not stop work that was already in flight — which
+  is precisely the window a large or hostile input widens
+  ([#56](https://github.com/Warnes-Innovations/llm-sanitizer/issues/56)).
+
+  Two independent causes, and the reported one turned out to be the smaller:
+
+  1. **`newline_offsets` was a per-character Python loop.** It read as the obvious O(n)
+     implementation — and is — but paid the whole n in interpreted iterations rather
+     than inside the C scanner. On the 5.28 MB single-line input the rules are
+     stress-tested with: **331 ms, against 0.3 ms** for the `str.find` scan that
+     replaces it. The cost tracked the input *length*, not the newline count, so the
+     worst case was the input with no newlines at all. Four rules call this helper.
+  2. **No rule checked the deadline before that setup.** `AgentConfigRule.detect()` spent
+     ~367 ms uninterruptibly before its first check; its YAML-frontmatter loop had no
+     check at all, while its sibling loop did. `agent_config`, `comment_directive`,
+     `semantic_intent` and `system_prompt` now return immediately on an expired deadline.
+
+  The issue named `sorted(... finditer ...)` as the cause; measured, that step is ~37 ms
+  of the ~367 ms. It is fixed by the early return along with the rest.
+
+  **Verified under load, because idle proves nothing here.** The existing guard
+  `test_every_rule_honors_the_scan_deadline` passes on an idle machine and fails under
+  contention. Against a controlled 32-process CPU load it failed **5 of 5** before and
+  passes **5 of 5** after, at a higher load average, with the run dropping from ~3.3 s to
+  ~0.6 s. New deterministic tests assert the same property by *counting* work instead of
+  timing it, so a loaded and an idle machine answer identically.
+
+  No behaviour change for any scan that completes within its deadline.
+
 ### Changed
 
 - **`scan_url` and `redact_url` now return a different verdict for any binary document

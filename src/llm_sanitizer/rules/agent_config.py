@@ -59,6 +59,15 @@ class AgentConfigRule(BaseRule):
     )
 
     def detect(self, content: str, source: str = "") -> list[Finding]:
+        # Consult the clock BEFORE the setup below, not only inside the match
+        # loops. `splitlines`, `newline_offsets` and every `finditer` here scale
+        # with the input, so a rule whose first deadline check is inside its
+        # loop has already done all of that uninterruptibly — and that window is
+        # exactly what a large or hostile input widens. Measured at ~367 ms on a
+        # 5.28 MB single line before this returned anything (issue #56).
+        if deadline_exceeded():
+            return []
+
         findings: list[Finding] = []
         lines = content.splitlines()
         offsets = newline_offsets(content)
@@ -68,6 +77,10 @@ class AgentConfigRule(BaseRule):
 
         # Check for YAML frontmatter with agent keys
         for fm_match in _FRONTMATTER_PATTERN.finditer(content):
+            # This loop had no deadline check at all, while the key loop below
+            # did. Both iterate once per match over untrusted input.
+            if deadline_exceeded():
+                break
             fm_content = fm_match.group(1)
             if _AGENT_CONFIG_KEYS_IN_FRONTMATTER.search(fm_content):
                 line_no = line_number_at(offsets, fm_match.start())

@@ -66,6 +66,12 @@ class SystemPromptRule(BaseRule):
     )
 
     def detect(self, content: str, source: str = "") -> list[Finding]:
+        # Before the input-proportional setup, not only inside the loops below
+        # — the deadline is only as fine-grained as the longest step between
+        # two checks (issue #56).
+        if deadline_exceeded():
+            return []
+
         findings: list[Finding] = []
         lines = content.splitlines()
         fid = 1

@@ -18,8 +18,30 @@ def newline_offsets(content: str) -> list[int]:
     :func:`line_number_at` for O(log n) per-match line lookup — replacing the
     ``content[:pos].count('\\n')`` idiom, which is O(n) per call and therefore
     O(n²) when a rule has one match per line on a large input (a measured DoS
-    that the between-rules deadline could not interrupt)."""
-    return [i for i, ch in enumerate(content) if ch == "\n"]
+    that the between-rules deadline could not interrupt).
+
+    **Scan with ``str.find``; do NOT rewrite this as a per-character Python
+    loop.** It was ``[i for i, ch in enumerate(content) if ch == "\\n"]``, which
+    reads as the obvious O(n) implementation and is — but with the whole n paid
+    in interpreted iterations rather than inside the C scanner. Measured on the
+    5.28 MB single-line input the rules are stress-tested with: 331 ms for the
+    comprehension against 0.4 ms here, and 309 ms against 12 ms when the same
+    size is spread over 80,000 lines. The cost does not depend on how many
+    newlines there are, only on the length, so the pathological case is the
+    input with none.
+
+    That mattered because this helper runs BEFORE any rule consults the scan
+    deadline: it was ~219 ms of the ~367 ms that ``AgentConfigRule.detect()``
+    spent uninterruptibly on that input, across four rules that call it. The
+    deadline is only as fine-grained as the longest step between two checks
+    (issue #56). Cheap here is a safety property, not a micro-optimisation.
+    """
+    offsets: list[int] = []
+    idx = content.find("\n")
+    while idx != -1:
+        offsets.append(idx)
+        idx = content.find("\n", idx + 1)
+    return offsets
 
 
 def line_number_at(offsets: list[int], pos: int) -> int:
