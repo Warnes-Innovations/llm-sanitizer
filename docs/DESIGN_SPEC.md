@@ -960,9 +960,22 @@ After:  Check out our site ⚠️[LLM-INSTRUCTION: <!-- ignore previous instruct
 
 ### Directory Redaction
 
-`redact_dir` mirrors the full directory structure under the output directory.
-**All files** are copied — clean files pass through unchanged, files with
-findings are redacted. This produces a drop-in replacement directory.
+`redact_dir` mirrors the directory structure under the output directory. Clean
+text files pass through byte-for-byte; text files with findings are redacted in
+the mirror.
+
+**It is NOT a drop-in replacement directory for binaries, deliberately.** A
+binary member is written as its redacted *extracted text* under `<name>.txt`;
+the original bytes are never copied. A member with no recoverable text — no
+extractor for the format, extraction failed, a recognized archive, or
+`binary_mode="skip"` — is not written at all and is enumerated in the
+response's `refused` array with a reason.
+
+This trades the drop-in property for the guarantee that nothing the scanner
+could not read is handed onward under a successful status. The previous
+behaviour copied such files through, which meant a caller following the
+documented protocol ("pass the output path to the consuming agent, never the
+original") passed on unscanned bytes while every check it could make passed.
 
 An `--affected-only` flag (CLI) or parameter (MCP) limits output to only
 files that had findings.

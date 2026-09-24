@@ -7,6 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **SECURITY (fail-open at the trust boundary): the redact paths no longer write
+  unredacted binary.** For any input that sniffed as binary, `redact_file`,
+  `redact_dir`, `llm-sanitize redact <file>` and `llm-sanitize redact <dir>` wrote a
+  **byte-identical copy of the source** to the output path and returned
+  `{"status": "ok", "findings_redacted": N}`, where `N` counted the findings *left in*
+  the file. Nothing in the response distinguished that from a real redaction.
+
+  A caller following the documented protocol — "pass `output_path` to the consuming
+  agent, never the original path" — therefore handed a downstream model the unmodified
+  original while every guard it could apply passed: the status was `ok`, the fields were
+  present, the output file existed, and it even had the `.txt` name the caller chose.
+  Only `file` or `cmp` on the bytes revealed it. Observed live on a 6.3 MB PDF
+  ([#51](https://github.com/Warnes-Innovations/llm-sanitizer/issues/51)).
+
+  The scan already has the document's text — extracting it is how a binary gets scanned
+  at all. The redact paths now write that **redacted extracted text** instead of
+  discarding it, and name what they wrote:
+
+  ```json
+  {"status": "ok", "output_format": "extracted-text", "original_format": "binary",
+   "findings_redacted": 1}
+  ```
+
+  `findings_redacted` now counts findings **removed**, not findings left behind.
+
+  When there is genuinely no usable text — no extractor for the format, extraction
+  failed, a recognized archive, or `binary_mode="skip"` — the call is **refused and no
+  output file is created** (`status: "error"`, `error_type: "unredactable"`). Refusing
+  without writing is deliberate: the consuming protocol treats the output's existence
+  as evidence.
+
+  This was **seven `shutil.copy2` sites across two files**, not the one the issue
+  reported, with the behaviour stated as intent in a source comment and duplicated in
+  four docstrings. All redact entry points now route through a single
+  `redactor.redact_file_to()` so the policy cannot diverge again.
+
+### Changed
+
+- **BREAKING for `redact_dir` / `llm-sanitize redact <dir>`: the output is no longer a
+  drop-in replacement directory for binary members.** A binary member is written as
+  `<name>.txt` holding its redacted extracted text, and a member with no recoverable
+  text is not written at all. Both the MCP response and the CLI's JSON now carry a
+  `refused` array of `{source, refusal_code, message}`, so a skipped input is
+  enumerated rather than silently absent. Clean **text** files still pass through
+  byte-for-byte, which also stops non-UTF-8 content being re-encoded through
+  `errors="replace"` on the way out.
+
+  `--binary-mode skip` correspondingly **refuses** binary inputs rather than copying
+  them through unscanned.
+
+### Added
+
+- **`placeholder` redaction mode** — replaces each character of the matched text with
+  `█` (U+2588), so the instruction text is removed while every byte offset, line number
+  and column in the document stays where it was. Available on `redact`, `redact_file`,
+  `redact_dir`, `redact_url` and `llm-sanitize redact --mode placeholder`.
+
+  Note the deliberate trade-off: a same-length placeholder discloses the **length** of
+  what it replaced. That is unimportant for injected instruction text, and would not be
+  for a short secret.
+
 ## [0.6.0] — 2026-08-11
 
 Minor, not patch: this adds public API (`walk_scannable()` / `ExclusionStats`, three new
