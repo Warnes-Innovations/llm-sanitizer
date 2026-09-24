@@ -28,9 +28,10 @@ import ipaddress
 import socket
 import threading
 from collections.abc import Iterator
-from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
+
+from llm_sanitizer.readers.bytes_reader import scannable_text
 
 # Guards the process-global getaddrinfo patch in _pin_host_to_ips: because the
 # patch is process-wide, two concurrent pins would clobber each other's saved
@@ -214,98 +215,11 @@ def _read_body_capped(response: object) -> bytes:
     return b"".join(chunks)
 
 
-def _suffix_from_magic(raw: bytes) -> str:
-    """Return a filename suffix (``".pdf"``, ``".docx"``, …) derived ONLY from
-    *raw*'s magic bytes, or ``""`` when nothing is recognised.
-
-    **Content decides, and nothing else may.** Not the URL path, not
-    Content-Type, not Content-Disposition — all three are attacker-controlled
-    when the URL came out of scanned content, and all three are wrong often
-    enough by accident. Measured against markitdown, a *wrong* suffix is worse
-    than none at all: a PDF written as ``.txt`` came back as 594 bytes of raw
-    PDF source, and a DOCX written as ``.txt`` came back as 4 bytes **with the
-    injected sentence missing entirely**. A suffix-less file, by contrast,
-    extracts correctly — markitdown sniffs.
-
-    So why derive one at all? Because :func:`~llm_sanitizer.readers.
-    archive_reader.is_zip_based_document` decides on the file NAME. Without a
-    ``.docx`` suffix a fetched DOCX is ZIP magic with no document extension,
-    which ``read_scannable_content`` treats as an archive-to-expand and refuses
-    — the document would never reach the extractor.
-
-    ``filetype`` supplies the extension, so the value comes from a fixed
-    library-controlled vocabulary rather than from the response. The
-    alphanumeric guard is belt-and-braces against that assumption changing:
-    this string becomes part of a filesystem path.
-    """
-    try:
-        import filetype
-    except ImportError:
-        # Core dep missing → no suffix. Same graceful degradation as the
-        # integrity checks; markitdown still sniffs for the formats it handles.
-        return ""
-    try:
-        kind = filetype.guess(raw)
-    except (TypeError, ValueError):
-        return ""
-    if kind is None:
-        return ""
-    ext = str(kind.extension)
-    if not ext.isalnum():
-        return ""
-    return f".{ext}"
-
-
-def _scannable_text(raw: bytes, encoding: str) -> str | None:
-    """Turn a fetched response body into text that is worth scanning, or None.
-
-    This is the URL path's half of the symmetry issue #53 is about: the file
-    path sniffs, extracts, and returns None when it cannot, and until now the
-    URL path did none of the three.
-
-    The decision is DELEGATED, never re-implemented. ``is_binary_content`` is
-    the one binary/text classifier (a second copy of that rule is exactly what
-    commit 1b66094 had to merge back together), ``sniff_rtf`` is the one RTF
-    check, and ``read_scannable_content`` is the one extraction path. The
-    branch order here mirrors ``read_scannable_content``'s own — markup, then
-    binary, then text — because anything else would decide the same question
-    two different ways.
-
-    Genuine text keeps the old behaviour exactly, decoded with the charset the
-    response declared. That matters: routing text through a temp file and
-    ``read_text(encoding="utf-8")`` instead would silently mangle every page
-    served as iso-8859-1.
-
-    An extraction that yields nothing is a REFUSAL, not empty content. That is
-    the precise hazard in issue #53 — "zero findings on a document whose text
-    was never read" — and it matches the scanner's own default
-    ``unprocessable_binary_policy="fail"``. An empty *text* body is still just
-    empty text; only the extraction branch refuses.
-    """
-    import tempfile
-
-    from llm_sanitizer.readers.integrity_checks import is_binary_content
-    from llm_sanitizer.readers.markup_reader import sniff_rtf
-    from llm_sanitizer.scanner import read_scannable_content
-
-    if not raw:
-        return ""
-
-    with tempfile.TemporaryDirectory(prefix="llm-sanitizer-url-") as tmpdir:
-        # A fixed basename plus a magic-derived suffix. Nothing from the URL or
-        # the response headers reaches the filesystem, so a hostile
-        # Content-Disposition cannot steer where this lands. tempfile creates
-        # the directory 0700 and removes it (and the body) on the way out.
-        path = Path(tmpdir) / f"body{_suffix_from_magic(raw)}"
-        path.write_bytes(raw)
-
-        if not sniff_rtf(raw) and not is_binary_content(path):
-            return raw.decode(encoding, errors="replace")
-
-        text = read_scannable_content(path, binary_mode="extract")
-        if text is None or not text.strip():
-            return None
-        return text
+# Staging fetched bytes and turning them into scannable text is NOT url-specific
+# — `llm-sanitize scan -` needs exactly the same thing for piped stdin (#55). It
+# therefore lives in one shared module rather than being copied here; a second
+# copy of this decision is what commit 1b66094 had to merge back together.
+_scannable_text = scannable_text
 
 
 def read_url(url: str) -> str | None:
@@ -376,7 +290,7 @@ def read_url(url: str) -> str | None:
                 # leave every other thread's DNS rewritten, and every concurrent
                 # read_url failing loudly, for the length of a document parse
                 # rather than the length of a fetch.
-                return _scannable_text(raw, encoding)
+                return _scannable_text(raw, encoding, origin="url")
         raise RuntimeError(f"too many redirects fetching {url}")
     except httpx.HTTPStatusError as exc:
         raise FetchBlockedError(exc.response.status_code, url) from exc

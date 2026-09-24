@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed (piped stdin)
+
+- **`llm-sanitize scan -` / `redact -` now classify and extract piped binary instead of
+  decoding it as text** ([#55](https://github.com/Warnes-Innovations/llm-sanitizer/issues/55)) —
+  the third and last entry point in the family #51 and #53 closed.
+
+  `sys.stdin.read()` is text-mode by construction: the locale codec decodes the input
+  before any code can sniff it. Two consequences, and only the first was reported:
+
+  - A piped PDF with any non-UTF-8 byte raised an unhandled `UnicodeDecodeError`
+    traceback. Loud, and it misled nobody.
+  - A piped **pure-ASCII** PDF has no undecodable byte, so it did not crash — it was
+    scanned as the container's source. That is the quiet half, and it is the same
+    silent-wrong-verdict shape as #53.
+
+  Stdin is now read from `sys.stdin.buffer` and routed through the same classifier and
+  extractor the file path uses. It returns None — refuse — where there is no usable
+  text, which the CLI already handled for files (exit 3).
+
+  `read_text("-")` no longer reads stdin and raises `ValueError` naming `read_stdin()`.
+  Refusing loudly is deliberate: returning `str` from a function that cannot sniff is
+  what made this reachable in the first place.
+
+  **The staging logic is now shared, not copied.** `readers/bytes_reader.py` holds the
+  one implementation of "untrusted bytes → scannable text or a refusal", used by both
+  the URL path and stdin. In particular the temp file's suffix is derived from content
+  magic for both, which is load-bearing rather than cosmetic: `is_zip_based_document`
+  decides on the file **name**, so a suffix-less DOCX is refused as an archive before it
+  ever reaches the extractor, while a *wrong* suffix is worse still — a DOCX staged as
+  `.txt` extracts to 4 bytes with the injected sentence gone.
+
 ### Fixed (scan deadline)
 
 - **The scan deadline is now observable *during* a rule, not only after its setup.**
