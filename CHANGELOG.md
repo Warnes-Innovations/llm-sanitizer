@@ -7,7 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **`scan_url` and `redact_url` now return a different verdict for any binary document
+  fetched by URL.** This is the intended consequence of the fix below and is called out
+  separately because it moves results a caller may have pinned:
+
+  - `scan_url` on a PDF/DOCX now reports findings against the document's **text**. It
+    previously reported findings against the decoded container bytes — one measured
+    sample returned 11 CRITICAL `homoglyph` findings, every one matched against a PDF
+    **font width array**.
+  - `redact_url` on such a URL now writes the redacted **extracted text**; it previously
+    wrote a redacted decoding of the container bytes.
+  - Either endpoint now **refuses** — `{"status": "error", "refusal_code":
+    "no-extractable-text"}`, and for `redact_url` no file is written — when the fetched
+    document yields no usable text. `readers.read_url` therefore returns `str | None`
+    rather than `str`, matching `read_file`.
+
+  A caller treating "CRITICAL" as "refuse" will see previously-blocked PDF URLs start
+  returning real reports. That was the point: they were blocked by false positives, not
+  by analysis.
+
 ### Fixed
+
+- **SECURITY: a binary document fetched by URL is now extracted, not decoded as text.**
+  `readers/url_reader.py` ended `b"".join(chunks).decode(encoding, errors="replace")` —
+  an unconditional byte-decode with no content-type sniffing, no extraction step, and
+  no way to return "I cannot read this". A PDF or DOCX fetched by URL was handed to the
+  rule engine as mojibake
+  ([#53](https://github.com/Warnes-Innovations/llm-sanitizer/issues/53)).
+
+  **Why this was not a safe default despite looking fail-closed.** Under the documented
+  protocol `max_risk: critical` means refuse, so a URL-fetched PDF *was* blocked — but
+  nothing had been scanned. The findings were homoglyph hits on font metrics. A PDF with
+  uncompressed streams and no font-width arrays returns **zero findings on a document
+  whose text was never read**: safety depended on the false positives firing.
+
+  The URL path now does what the file path does, by **delegating to the same code** —
+  `is_binary_content` for the classification, `sniff_rtf` for presentation markup, and
+  `read_scannable_content` for the extraction. No second implementation of any of those
+  decisions was added; a parallel copy of the binary rule is precisely what the previous
+  entry had to merge back together.
+
+  Details worth knowing:
+
+  - **The temp file's suffix is derived from the content's magic bytes only** — never
+    the URL path, Content-Type or Content-Disposition, all of which are
+    attacker-controlled here. Measured: a *wrong* suffix is worse than none, with a
+    DOCX written as `.txt` extracting to 4 bytes with the injected sentence gone. A
+    suffix is nonetheless required, because `is_zip_based_document` decides on the file
+    **name**: without `.docx` a fetched DOCX reads as a plain archive and is refused
+    before reaching the extractor.
+  - **An extraction that yields nothing is a refusal**, not empty content — the "clean
+    verdict on a document nobody read" case named above. An empty *text* body is still
+    empty text.
+  - **The SSRF guard, manual redirect re-validation and 10 MiB size cap are unchanged**,
+    and the cap still applies to the raw bytes before any extraction. `_read_capped` was
+    split into `_read_body_capped` (bytes) and `_scannable_text`; it was renamed rather
+    than changed in place so no stale caller could silently receive bytes where it
+    expected `str`.
+  - Text pages are unaffected and are still returned as raw markup, decoded with the
+    charset the response declared.
+
+  No new dependency, no new extra, no lockfile change.
 
 - **SECURITY: text-vs-binary classification no longer depends on an arbitrary byte
   count.** `_is_binary` read the first 8000 bytes of a file and called it binary if one

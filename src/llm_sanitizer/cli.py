@@ -265,6 +265,21 @@ def _read_content(target: str, binary_mode: str = "extract") -> tuple[str | None
     return read_file(target, binary_mode=binary_mode), target
 
 
+def _unreadable_reason(target: str, binary_mode: str) -> str:
+    """Explain why *target* yielded no scannable text.
+
+    A URL and a file reach the same None for different reasons, and quoting
+    binary_mode for a URL would be wrong: the URL reader always extracts, so
+    the flag is never consulted there (see readers.url_reader.read_url, #53).
+    """
+    if _is_url(target):
+        return (
+            "the fetched content is a binary document no extractor could read, "
+            "or one that extracted to nothing"
+        )
+    return f"binary content, binary_mode={binary_mode!r}"
+
+
 def _filter_by_min_risk(result: object, min_risk_str: str) -> object:
     """Post-filter findings by min_risk if needed."""
     from llm_sanitizer.models import RiskLevel, ScanResult
@@ -333,7 +348,7 @@ def _cmd_scan(args: argparse.Namespace) -> None:
             if content is None:
                 print(
                     f"[llm-sanitize] Skipped: no scannable text content "
-                    f"(binary file, binary_mode={binary_mode!r}): {target}",
+                    f"({_unreadable_reason(target, binary_mode)}): {target}",
                     file=sys.stderr,
                 )
                 sys.exit(3)
@@ -388,7 +403,7 @@ def _cmd_redact(args: argparse.Namespace) -> None:
             if content is None:
                 print(
                     f"[llm-sanitize] Refused: no scannable text content "
-                    f"(binary content, binary_mode={binary_mode!r}): {target}",
+                    f"({_unreadable_reason(target, binary_mode)}): {target}",
                     file=sys.stderr,
                 )
                 sys.exit(3)

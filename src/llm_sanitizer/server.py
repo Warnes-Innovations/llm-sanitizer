@@ -94,7 +94,15 @@ def scan_url(url: str, sensitivity: str = "medium") -> str:
         sensitivity: Detection sensitivity — "low", "medium", or "high".
 
     Returns:
-        JSON string with findings report.
+        JSON string with findings report. On refusal — a binary document whose
+        text could not be extracted — `{"status": "error", "error_type":
+        "unscannable", "refusal_code": "no-extractable-text", ...}` and no
+        report, mirroring redact_file's refusal shape.
+
+        NOTE (#53): a PDF/DOCX URL now yields a report of the document's TEXT.
+        It previously yielded findings matched against the container's bytes —
+        typically CRITICAL homoglyph hits on font-width arrays — so verdicts on
+        such URLs have moved, by design.
     """
     from llm_sanitizer.formatters.json_format import format_json
     from llm_sanitizer.readers.url_reader import FetchBlockedError, read_url
@@ -114,6 +122,21 @@ def scan_url(url: str, sensitivity: str = "medium") -> str:
         })
     except RuntimeError as exc:
         return json.dumps({"status": "error", "message": str(exc)})
+
+    if content is None:
+        # No usable text. Refusing is the point: reporting zero findings here
+        # would be a clean verdict on a document that was never read (#53).
+        return json.dumps({
+            "status": "error",
+            "error_type": "unscannable",
+            "refusal_code": "no-extractable-text",
+            "source": url,
+            "message": (
+                f"no extractable text from {url} (a binary document no "
+                "extractor could read, or one that extracted to nothing): the "
+                "content was never scanned, so no report is given"
+            ),
+        })
 
     result = Scanner().scan(content, source=url, sensitivity=sensitivity)
     return format_json(result)
@@ -295,7 +318,14 @@ def redact_url(url: str, output_path: str, mode: str = "strip", sensitivity: str
             everything the scan reported.
 
     Returns:
-        JSON string with status and output path.
+        JSON string with status and output path. On refusal — a binary document
+        whose text could not be extracted — `{"status": "error", "error_type":
+        "unredactable", "refusal_code": "no-extractable-text",
+        "output_written": false, ...}` and NO file is written.
+
+        NOTE (#53): for a PDF/DOCX URL the output is now the redacted EXTRACTED
+        TEXT of the document. It was previously the redacted decoding of the
+        container's bytes.
     """
     from llm_sanitizer.readers.url_reader import FetchBlockedError
     from llm_sanitizer.readers.url_reader import read_url as _read_url
@@ -303,6 +333,24 @@ def redact_url(url: str, output_path: str, mode: str = "strip", sensitivity: str
 
     try:
         content = _read_url(url)
+        if content is None:
+            # Same contract as redact_file: refuse, and write NOTHING. An
+            # output file's mere existence is read downstream as evidence that
+            # the content was sanitized (#51), so a file here would be worse
+            # than no file at all.
+            return json.dumps({
+                "status": "error",
+                "error_type": "unredactable",
+                "refusal_code": "no-extractable-text",
+                "source": url,
+                "output_written": False,
+                "message": (
+                    f"no extractable text from {url} (a binary document no "
+                    "extractor could read, or one that extracted to nothing): "
+                    "the content was never scanned, so it cannot be redacted "
+                    "and no output was written"
+                ),
+            })
         clean, result = redact_content(
             content, mode=mode, source=url, sensitivity=sensitivity
         )
