@@ -195,6 +195,29 @@ class TestFetchedBinaryIsExtracted:
         assert INJECTION in text
         assert "word/document.xml" not in text
 
+    def test_rtf_by_url_is_extracted_not_returned_as_control_words(
+        self, serve
+    ) -> None:
+        # RTF is ASCII, so it sniffs as TEXT and never reaches the binary
+        # branch — `_scannable_text` has to consult `sniff_rtf` separately, in
+        # the same order `read_scannable_content` does. Without that this
+        # returns `\fs24`-style control words, which the rules read as neither
+        # markup nor prose. The discriminator is the control word, not the
+        # sentence, which survives in the raw source either way.
+        rtf = (
+            rb"{\rtf1\ansi\deff0 {\fonttbl{\f0 Times;}}\f0\fs24 "
+            + INJECTION.encode()
+            + rb"\par}"
+        )
+        assert b"fs24" in rtf, "fixture must carry the control word to discriminate"
+
+        serve(rtf)
+        text = read_url("https://example.test/doc.rtf")
+
+        assert text is not None
+        assert "fs24" not in text, "raw RTF control words reached the scanner"
+        assert INJECTION in text
+
     def test_the_url_path_and_the_file_path_agree(
         self, pdf_bytes: bytes, serve, tmp_path
     ) -> None:
