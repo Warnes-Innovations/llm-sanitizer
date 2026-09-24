@@ -70,6 +70,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   what it replaced. That is unimportant for injected instruction text, and would not be
   for a short secret.
 
+- **In-place PDF redaction, behind the new `[pdf-redact]` extra.** For a PDF input the
+  redact paths now *additionally* write a rewritten PDF — `<stem>.redacted.pdf`, beside
+  the text output — with the findings removed from the content stream, for callers who
+  need the original format back. The response carries `redacted_binary_path`,
+  `binary_redaction` (`ok` | `unavailable` | `refused` | `not-applicable`) and
+  `binary_redaction_detail`.
+
+  This never replaces or gates the redacted extracted text; that remains the contract.
+  Where a rewrite is impossible — PyMuPDF absent, an encrypted PDF, or a `comment` /
+  `highlight` mode whose whole purpose is to keep the matched text as a marker — the
+  text output stands alone and the response says why.
+
+  **The rewrite is published only after passing three independent checks**, and any
+  failure deletes the candidate and reports `refused`:
+
+  1. the project's own markitdown-extract-and-scan pipeline, at the caller's
+     sensitivity — nothing it flagged may survive;
+  2. a second, independent extractor (PyMuPDF's own `get_text`), scanned the same way;
+  3. the **decompressed content streams**, searched for each fragment in every encoding
+     a PDF plausibly stores it in.
+
+  Check 3 is not redundant with check 1. The classic failure of this whole category is a
+  "redaction" that draws a black rectangle over text and leaves the glyphs in the file:
+  it looks right in a viewer and in a screenshot, and the text copies straight back out.
+  `apply_redactions` does remove the glyphs — but it is verified per call rather than
+  trusted, because a rewrite that silently failed would be indistinguishable from one
+  that worked.
+
+  Check 3 also reports whether it had any **power** on the document — whether the
+  predicate could locate the fragment in the *unredacted* input. An earlier draft
+  searched only for UTF-8 bytes while MuPDF writes show-text operands as hex, so it
+  could never have matched and returned a clean-looking "absent" for every file. A
+  negative from an instrument that cannot produce a positive is not evidence.
+
 ## [0.6.0] — 2026-08-11
 
 Minor, not patch: this adds public API (`walk_scannable()` / `ExclusionStats`, three new
