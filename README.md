@@ -37,10 +37,20 @@ Five risk levels: **info** (legitimate AI config) → **low** → **medium** →
 
 ### Redaction
 
-Non-destructive cleaning in three modes:
+Non-destructive cleaning in four modes:
 - **strip** — remove the instruction entirely
 - **comment** — replace with `[REDACTED: ...]` marker
 - **highlight** — wrap in visible markers for review
+- **placeholder** — replace each character with `█`, so the text is gone but
+  every byte offset, line number and column in the document is unchanged
+
+**Binary inputs never produce binary output.** Scanning a PDF, DOCX, PPTX or
+XLSX requires extracting its text, so that redacted text is what the redact
+tools write, and the response says so (`output_format: "extracted-text"`).
+The original bytes are never copied to an output path. Where no text can be
+recovered at all, the call is **refused and no file is written** — an
+unredacted copy is worse than no file, because a caller that checks only
+whether the output exists cannot tell the two apart.
 
 ## Installation
 
