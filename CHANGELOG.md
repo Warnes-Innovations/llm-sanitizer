@@ -9,6 +9,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **SECURITY: text-vs-binary classification no longer depends on an arbitrary byte
+  count.** `_is_binary` read the first 8000 bytes of a file and called it binary if one
+  of them was NUL. That failed in **both** directions:
+
+  - **The window.** A file whose first NUL sits at byte 8001 read as text.
+  - **The signal.** NUL-freeness is not textness. A short, simple PDF often contains no
+    NUL at all, so it read as text and the scanner scanned **raw PDF object
+    dictionaries and xref tables** instead of the document's words. A 600-byte
+    uncompressed PDF carrying a plain-text injection was classified as text; the same
+    two-line document built by a PDF library classified as text at 9,339 bytes and as
+    binary at 9,567, the only difference being how its deflate stream happened to
+    compress.
+
+  Both are now gone. Classification is two steps, neither with a byte budget:
+
+  1. **Magic bytes** — if `filetype` (already a core dependency) recognises the format,
+     it is binary because it says what it is. The library matches only binary
+     signatures and returns `None` for plain text and source, which is exactly the
+     property needed. A PDF is binary because it starts `%PDF-`.
+  2. **A whole-file control-character test** for anything unrecognised — text unless a
+     C0 control byte outside the usual whitespace appears. Read in chunks, but every
+     byte is examined and the chunk size cannot change the answer.
+
+  Control characters rather than UTF-8 decodability, deliberately: Latin-1 text
+  (`café au lait`) is not valid UTF-8, and a decodability test would call an ordinary
+  text file binary, route it into the extractor and refuse it.
+
+  **This was two copies of one rule** — `scanner._is_binary` and a private
+  `integrity_checks._is_binary_content`, the second carrying a comment saying it
+  mirrored the first. They are now one implementation, with the scanner delegating;
+  a test asserts both entry points return the same verdict.
+
+  No new dependency, no new extra, no lockfile change.
+
 - **SECURITY (fail-open at the trust boundary): the redact paths no longer write
   unredacted binary.** For any input that sniffed as binary, `redact_file`,
   `redact_dir`, `llm-sanitize redact <file>` and `llm-sanitize redact <dir>` wrote a
