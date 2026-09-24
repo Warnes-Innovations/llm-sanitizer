@@ -13,6 +13,12 @@ private, link-local, and cloud-metadata (``169.254.169.254``) targets.
 Because the URL (and thus the responder) is untrusted, the response body is read
 as a bounded stream and aborted once it exceeds :data:`_MAX_RESPONSE_BYTES`, so a
 malicious endpoint cannot exhaust memory with an unbounded/huge body.
+
+The body is then classified and, where it is a binary document, EXTRACTED —
+:func:`_scannable_text` — so that a PDF or DOCX fetched by URL is scanned as its
+text rather than as decoded bytes (issue #53). :func:`read_url` therefore
+returns ``str | None``, the same "I cannot read this" contract the file path has
+always had; None means refuse the content, never "the page was empty".
 """
 
 from __future__ import annotations
@@ -22,6 +28,7 @@ import ipaddress
 import socket
 import threading
 from collections.abc import Iterator
+from pathlib import Path
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
@@ -34,8 +41,9 @@ _pin_lock = threading.Lock()
 
 _ALLOWED_SCHEMES = ("http", "https")
 _MAX_REDIRECTS = 5
-# Cap on the response body read from an untrusted endpoint (10 MiB). Scanned
-# documents are text/markup; a body larger than this is treated as hostile.
+# Cap on the response body read from an untrusted endpoint (10 MiB). A body
+# larger than this is treated as hostile. The cap applies to the raw bytes,
+# before any extraction, so it still bounds memory for binary documents.
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 # An honest desktop-browser UA (issue #19): a default/absent UA is one of the
 # signals managed WAFs (Cloudflare/Akamai) use to reject a fetch outright, and
@@ -174,10 +182,21 @@ def _pin_host_to_ips(host: str, ips: list[str]) -> Iterator[None]:
         _pin_lock.release()
 
 
-def _read_capped(response: object) -> str:
+def _read_body_capped(response: object) -> bytes:
     """Read a streaming httpx response body, aborting past _MAX_RESPONSE_BYTES,
-    and decode it to text. A declared Content-Length over the cap is rejected
-    before reading a single byte."""
+    and return the RAW BYTES. A declared Content-Length over the cap is rejected
+    before reading a single byte.
+
+    Reading the body and turning it into text are deliberately separate
+    responsibilities. They used to be one function that ended
+    ``.decode(encoding, errors="replace")``, and that unconditional decode is
+    what made a fetched PDF scannable-looking mojibake (issue #53): with the
+    decode baked in here there was no point at which the content could be
+    sniffed or extracted, and no way for the reader to say "I cannot read this".
+
+    Do not re-merge the decode into this function. The cap logic below is
+    unchanged and is the reason this function exists at all.
+    """
     clen = response.headers.get("content-length")  # type: ignore[attr-defined]
     if clen and clen.isdigit() and int(clen) > _MAX_RESPONSE_BYTES:
         raise RuntimeError(
@@ -192,20 +211,129 @@ def _read_capped(response: object) -> str:
                 f"response body exceeds {_MAX_RESPONSE_BYTES}-byte cap"
             )
         chunks.append(chunk)
-    encoding = response.encoding or "utf-8"  # type: ignore[attr-defined]
-    return b"".join(chunks).decode(encoding, errors="replace")
+    return b"".join(chunks)
 
 
-def read_url(url: str) -> str:
-    """Fetch a URL via HTTP and return its content as text.
+def _suffix_from_magic(raw: bytes) -> str:
+    """Return a filename suffix (``".pdf"``, ``".docx"``, …) derived ONLY from
+    *raw*'s magic bytes, or ``""`` when nothing is recognised.
+
+    **Content decides, and nothing else may.** Not the URL path, not
+    Content-Type, not Content-Disposition — all three are attacker-controlled
+    when the URL came out of scanned content, and all three are wrong often
+    enough by accident. Measured against markitdown, a *wrong* suffix is worse
+    than none at all: a PDF written as ``.txt`` came back as 594 bytes of raw
+    PDF source, and a DOCX written as ``.txt`` came back as 4 bytes **with the
+    injected sentence missing entirely**. A suffix-less file, by contrast,
+    extracts correctly — markitdown sniffs.
+
+    So why derive one at all? Because :func:`~llm_sanitizer.readers.
+    archive_reader.is_zip_based_document` decides on the file NAME. Without a
+    ``.docx`` suffix a fetched DOCX is ZIP magic with no document extension,
+    which ``read_scannable_content`` treats as an archive-to-expand and refuses
+    — the document would never reach the extractor.
+
+    ``filetype`` supplies the extension, so the value comes from a fixed
+    library-controlled vocabulary rather than from the response. The
+    alphanumeric guard is belt-and-braces against that assumption changing:
+    this string becomes part of a filesystem path.
+    """
+    try:
+        import filetype
+    except ImportError:
+        # Core dep missing → no suffix. Same graceful degradation as the
+        # integrity checks; markitdown still sniffs for the formats it handles.
+        return ""
+    try:
+        kind = filetype.guess(raw)
+    except (TypeError, ValueError):
+        return ""
+    if kind is None:
+        return ""
+    ext = str(kind.extension)
+    if not ext.isalnum():
+        return ""
+    return f".{ext}"
+
+
+def _scannable_text(raw: bytes, encoding: str) -> str | None:
+    """Turn a fetched response body into text that is worth scanning, or None.
+
+    This is the URL path's half of the symmetry issue #53 is about: the file
+    path sniffs, extracts, and returns None when it cannot, and until now the
+    URL path did none of the three.
+
+    The decision is DELEGATED, never re-implemented. ``is_binary_content`` is
+    the one binary/text classifier (a second copy of that rule is exactly what
+    commit 1b66094 had to merge back together), ``sniff_rtf`` is the one RTF
+    check, and ``read_scannable_content`` is the one extraction path. The
+    branch order here mirrors ``read_scannable_content``'s own — markup, then
+    binary, then text — because anything else would decide the same question
+    two different ways.
+
+    Genuine text keeps the old behaviour exactly, decoded with the charset the
+    response declared. That matters: routing text through a temp file and
+    ``read_text(encoding="utf-8")`` instead would silently mangle every page
+    served as iso-8859-1.
+
+    An extraction that yields nothing is a REFUSAL, not empty content. That is
+    the precise hazard in issue #53 — "zero findings on a document whose text
+    was never read" — and it matches the scanner's own default
+    ``unprocessable_binary_policy="fail"``. An empty *text* body is still just
+    empty text; only the extraction branch refuses.
+    """
+    import tempfile
+
+    from llm_sanitizer.readers.integrity_checks import is_binary_content
+    from llm_sanitizer.readers.markup_reader import sniff_rtf
+    from llm_sanitizer.scanner import read_scannable_content
+
+    if not raw:
+        return ""
+
+    with tempfile.TemporaryDirectory(prefix="llm-sanitizer-url-") as tmpdir:
+        # A fixed basename plus a magic-derived suffix. Nothing from the URL or
+        # the response headers reaches the filesystem, so a hostile
+        # Content-Disposition cannot steer where this lands. tempfile creates
+        # the directory 0700 and removes it (and the body) on the way out.
+        path = Path(tmpdir) / f"body{_suffix_from_magic(raw)}"
+        path.write_bytes(raw)
+
+        if not sniff_rtf(raw) and not is_binary_content(path):
+            return raw.decode(encoding, errors="replace")
+
+        text = read_scannable_content(path, binary_mode="extract")
+        if text is None or not text.strip():
+            return None
+        return text
+
+
+def read_url(url: str) -> str | None:
+    """Fetch a URL via HTTP and return scannable text, or None to refuse it.
 
     For HTML pages, returns the raw HTML so hidden-content rules can detect
     CSS-hidden elements and comment directives.
 
+    For a **binary document** (PDF, DOCX, …) the text is EXTRACTED, exactly as
+    ``read_file`` does for a local file — see :func:`_scannable_text`. Returning
+    None means "there is no usable text here": callers must refuse the content
+    rather than treat it as clean. This mirrors
+    ``scanner.read_scannable_content``, whose None the file path has always had.
+
+    **This return type is load-bearing.** Before issue #53 this function
+    returned ``str`` unconditionally, so a fetched PDF was handed to the rule
+    engine as decoded bytes — one measured sample produced 11 CRITICAL findings
+    matched against a *font width array*, and a PDF with uncompressed streams
+    and no such array produced a clean report on text nobody had read. Do not
+    reintroduce a plain ``str`` return by substituting ``""`` for None: an empty
+    string scans clean, which is the failure this closes.
+
     Redirects are followed MANUALLY (``follow_redirects=False``) so the target
     of each hop is re-validated by :func:`_assert_safe_url` — a benign-looking
     URL that 302-redirects to ``169.254.169.254`` is therefore blocked. The
-    response body is bounded to :data:`_MAX_RESPONSE_BYTES`.
+    response body is bounded to :data:`_MAX_RESPONSE_BYTES`. Neither guard is
+    affected by the extraction step, which happens after the body is fully read
+    and capped.
 
     Raises:
         FetchBlockedError: If the remote server refused the request (HTTP
@@ -213,6 +341,9 @@ def read_url(url: str) -> str:
             content could not be verified, not that scanning itself failed.
         RuntimeError: If the SSRF guard blocks a hop, DNS resolution fails,
             a redirect loop occurs, or the response body exceeds the size cap.
+            Also covers ExtractorUnavailableError (a RuntimeError subclass),
+            which propagates deliberately: a missing extractor is a systemic
+            coverage gap and fails fast rather than degrading to a raw decode.
     """
     import httpx
 
@@ -236,7 +367,9 @@ def read_url(url: str) -> str:
                         current = urljoin(current, loc)
                         continue
                     response.raise_for_status()
-                    return _read_capped(response)
+                    raw = _read_body_capped(response)
+                    encoding = response.encoding or "utf-8"
+                    return _scannable_text(raw, encoding)
         raise RuntimeError(f"too many redirects fetching {url}")
     except httpx.HTTPStatusError as exc:
         raise FetchBlockedError(exc.response.status_code, url) from exc

@@ -12,9 +12,22 @@ it is given.
 
 ## Summary
 
-- **In-memory only.** Content is read, scanned, and (for redaction) rewritten in
-  process memory. The tool keeps no database and writes no copy of scanned
-  content except the redaction output file you explicitly ask for.
+- **In-memory, except for short-lived extraction scratch space.** Content is
+  read, scanned, and (for redaction) rewritten in process memory. The tool keeps
+  no database, and the only copy it writes that outlives the call is the
+  redaction output file you explicitly ask for.
+
+  Some paths do stage bytes on disk first, because the checker or extractor
+  they hand the content to takes a *path*, not a buffer. As of this writing
+  there are three: the nested-archive bomb check, scanning an archive's
+  members, and a binary document fetched by `scan_url` / `redact_url` (written
+  to a private temp directory so its text can be *extracted* rather than
+  scanned as decoded bytes). In each case the bytes go to the OS temp
+  directory, unreadable by other users — the archive paths via
+  `NamedTemporaryFile` (mode 0600), the URL path inside a `TemporaryDirectory`
+  (mode 0700) — and are removed before the call returns, on the error path as
+  well as the success path. Nothing there survives the process, and no scanned
+  content is ever written to the working directory.
 - **No retention.** Nothing is persisted between runs. There is no cache of
   scanned content, no history, no analytics store.
 - **No telemetry.** The tool emits no usage analytics and "phones home" to no
