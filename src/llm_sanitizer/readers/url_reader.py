@@ -369,7 +369,14 @@ def read_url(url: str) -> str | None:
                     response.raise_for_status()
                     raw = _read_body_capped(response)
                     encoding = response.encoding or "utf-8"
-                    return _scannable_text(raw, encoding)
+                # Extraction runs OUTSIDE the pin and the open stream, and must
+                # stay there. _pin_host_to_ips patches a PROCESS-GLOBAL
+                # socket.getaddrinfo and holds a non-reentrant lock; extraction
+                # is markitdown, which can take seconds. Calling it inside would
+                # leave every other thread's DNS rewritten, and every concurrent
+                # read_url failing loudly, for the length of a document parse
+                # rather than the length of a fetch.
+                return _scannable_text(raw, encoding)
         raise RuntimeError(f"too many redirects fetching {url}")
     except httpx.HTTPStatusError as exc:
         raise FetchBlockedError(exc.response.status_code, url) from exc

@@ -120,7 +120,10 @@ def scan_url(url: str, sensitivity: str = "medium") -> str:
             "http_status": exc.status_code,
             "message": str(exc),
         })
-    except RuntimeError as exc:
+    except (RuntimeError, OSError) as exc:
+        # OSError matters since #53: the URL path now stages the fetched bytes
+        # in a temp file so they can be extracted, so this endpoint can fail on
+        # disk I/O where it previously could not.
         return json.dumps({"status": "error", "message": str(exc)})
 
     if content is None:
