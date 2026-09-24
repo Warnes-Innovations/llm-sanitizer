@@ -104,6 +104,10 @@ test = [
 # reproducible. install-deps.sh installs this unless --no-dev is passed.
 dev = [
 	"mypy>=1.13",
+	# The [pdf-redact] extra's backend. Declared here as well so CI actually
+	# RUNS tests/test_pdf_in_place_redaction.py instead of skipping it — an
+	# optional feature whose tests silently skip in CI is an untested feature.
+	"pymupdf>=1.24,<2",
 ]
 
 [project.optional-dependencies]
@@ -132,6 +136,24 @@ binary = []
 # was verified against libarchive-c 5.3 (current at time of writing) and
 # still matches, but an unbounded upper is exactly what let the 7z break ship.
 rar = ["libarchive-c>=5.0,<6"]
+# IN-PLACE PDF REDACTION. Without this extra a PDF still redacts — the redact
+# paths write its redacted extracted TEXT, which is the contract closed in
+# issue #51. This extra additionally rewrites the PDF itself, for callers who
+# need the original format back (a human opening the file, an archive that must
+# stay a PDF).
+#
+# PyMuPDF and not a hand-rolled parser: `add_redact_annot` + `apply_redactions`
+# removes the glyphs from the CONTENT STREAM. Drawing a black rectangle over
+# text leaves the text in the file and is the classic failure of this whole
+# category — it looks correct in a viewer and in a screenshot, and the text
+# copies straight back out.
+#
+# Bounded above for the same reason as 7z and rar (see their comments): an
+# unbounded upper is exactly what let the py7zr 1.0 break ship. PyMuPDF is
+# AGPL-3.0, which matches this project's own license; it is an OPTIONAL extra
+# so that a consumer who cannot take an AGPL dependency still gets the
+# security fix, just without the binary rewrite.
+pdf-redact = ["pymupdf>=1.24,<2"]
 
 [project.urls]
 Homepage = "https://github.com/Warnes-Innovations/llm-sanitizer"

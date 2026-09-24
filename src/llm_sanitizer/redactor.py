@@ -6,10 +6,15 @@
 from __future__ import annotations
 
 import shutil
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from llm_sanitizer.models import Finding, ScanResult
+
+if TYPE_CHECKING:
+    from llm_sanitizer.binary_redactors import BinaryRedaction
 
 #: Every redaction mode the engine accepts. Keep `redact`'s validation, the CLI
 #: `--mode` choices and the MCP tool docstrings derived from this one tuple —
@@ -251,6 +256,15 @@ class RedactedFile:
     #: True when the file was clean and the caller asked for affected-only
     #: output. Not a refusal: there was nothing to redact.
     skipped_clean: bool = False
+    #: Where a VERIFIED-clean rewrite of the original binary was written, if one
+    #: was possible. None is the normal case and never means "the text output is
+    #: untrustworthy" — the text output stands on its own.
+    redacted_binary_path: str | None = None
+    #: "ok" | "unavailable" | "refused" | "not-applicable" — see
+    #: llm_sanitizer.binary_redactors. "refused" specifically means a rewrite
+    #: was produced, FAILED verification and was deleted.
+    binary_redaction: str = "not-applicable"
+    binary_redaction_detail: str | None = None
 
 
 def _refusal(
@@ -396,6 +410,17 @@ def redact_file_to(
         )
 
     out.write_text(clean, encoding="utf-8")
+
+    # ALSO rewrite the original format where that is possible and provable.
+    # This never changes what `out` holds and never gates it: the redacted text
+    # is the contract, and the binary rewrite is an extra artifact for callers
+    # who need the original format back. A rewrite that cannot be PROVED clean
+    # is not written at all (see binary_redactors), so its absence is safe and
+    # its presence is verified.
+    binary = _maybe_redact_binary_in_place(
+        src, out, result.findings, mode=mode, sensitivity=sensitivity
+    )
+
     return RedactedFile(
         source=str(path),
         written=True,
@@ -406,5 +431,33 @@ def redact_file_to(
         refused=False,
         refusal_code=None,
         refusal_reason=None,
+        redacted_binary_path=binary.output_path,
+        binary_redaction=binary.status,
+        binary_redaction_detail=binary.detail or None,
+    )
+
+
+def _maybe_redact_binary_in_place(
+    src: Path,
+    text_out: Path,
+    findings: Sequence[Finding],
+    *,
+    mode: str,
+    sensitivity: str,
+) -> BinaryRedaction:
+    """Try to write a verified-clean rewrite of *src* in its own format.
+
+    Placed beside the text output as ``<stem>.redacted<suffix>`` — derived from
+    the SOURCE name, not from the text output's, so a directory mirror's
+    ``report.pdf.txt`` does not yield ``report.pdf.redacted.pdf``.
+    """
+    from llm_sanitizer.binary_redactors import BinaryRedaction as _BR
+    from llm_sanitizer.binary_redactors import is_pdf, redact_pdf_in_place
+
+    if not findings or not is_pdf(src):
+        return _BR("not-applicable", "")
+    target = text_out.with_name(f"{src.stem}.redacted{src.suffix or '.pdf'}")
+    return redact_pdf_in_place(
+        src, target, findings, mode=mode, sensitivity=sensitivity
     )
 

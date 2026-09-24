@@ -272,6 +272,9 @@ def redact_file(
         "output_format": outcome.output_format,
         "original_format": outcome.original_format,
         "findings_redacted": outcome.findings_redacted,
+        "redacted_binary_path": outcome.redacted_binary_path,
+        "binary_redaction": outcome.binary_redaction,
+        "binary_redaction_detail": outcome.binary_redaction_detail,
     })
 
 
@@ -405,6 +408,8 @@ def redact_dir(
                 continue
             if outcome.written and outcome.output_path is not None:
                 files_written.append(outcome.output_path)
+            if outcome.redacted_binary_path is not None:
+                files_written.append(outcome.redacted_binary_path)
 
         return json.dumps({
             "status": "ok",

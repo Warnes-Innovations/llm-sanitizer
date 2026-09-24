@@ -435,6 +435,19 @@ def _cmd_redact(args: argparse.Namespace) -> None:
                 f"[llm-sanitize] Redacted {outcome.findings_redacted} finding(s) "
                 f"→ {outcome.output_path}{note}"
             )
+            if outcome.redacted_binary_path:
+                print(
+                    "[llm-sanitize] Verified-clean rewrite in the original "
+                    f"format → {outcome.redacted_binary_path}"
+                )
+            elif outcome.binary_redaction == "refused":
+                # Loud, and on stderr: a rewrite was attempted, could not be
+                # proved clean, and was deleted. The text output still stands.
+                print(
+                    "[llm-sanitize] In-place rewrite REFUSED: "
+                    f"{outcome.binary_redaction_detail}",
+                    file=sys.stderr,
+                )
     except ExtractorUnavailableError as exc:
         print(
             f"[llm-sanitize] Extractor unavailable — cannot complete redact: {exc.hint}",
@@ -496,6 +509,8 @@ def _redact_dir(
             continue
         if outcome.written and outcome.output_path is not None:
             files_written.append(outcome.output_path)
+        if outcome.redacted_binary_path is not None:
+            files_written.append(outcome.redacted_binary_path)
 
     print(
         json.dumps(
