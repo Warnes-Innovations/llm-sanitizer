@@ -34,8 +34,26 @@ _CAMOUFLAGE_PATTERNS = [
 # Near-zero `opacity:0` is dominated by benign fade-in transitions/animations;
 # skip a near-zero opacity when the same rule block declares a transition or
 # animation over opacity (its start state), the main legitimate use.
+#
+# The gap is BOUNDED (`{0,_MAX_DECL_GAP}`) and must never be made unbounded.
+# An unbounded `[^;{}]*` is a denial-of-service amplifier here: the repeated
+# literal `animation ` is simultaneously an O(n) supply of start positions AND
+# the `;{}`-free filler each one greedily swallows and backtracks through, so
+# the cost is quadratic. Measured through `Scanner.scan` on the default config:
+# an 82 KB CSS block of the form `a{opacity:0;animation animation …}` took
+# 72.9 s, and it is NOT interruptible — the blowup is inside one C-level
+# `re.search`, so `deadline_exceeded()` is never reached and a 1-second
+# `max_scan_seconds` measured 33.6 s.
+#
+# Bounding it cannot hide an injection. This regex SUPPRESSES a finding (the
+# caller `continue`s on a match), so a gap too long to match can only produce
+# an extra MEDIUM finding, never a missed one — the bound fails toward the
+# protective outcome. `[^;{}]` already cannot cross a `;`, so the gap stays
+# inside a single CSS declaration, and the cap is far above any real one.
+_MAX_DECL_GAP = 200
 _TRANSITION_RE = re.compile(
-    r'(?:transition|animation)\b[^;{}]*\b(?:opacity|all)\b', re.IGNORECASE
+    r'(?:transition|animation)\b[^;{}]{0,' + str(_MAX_DECL_GAP) + r'}\b(?:opacity|all)\b',
+    re.IGNORECASE,
 )
 
 # --- Text-color visibility analysis -----------------------------------------

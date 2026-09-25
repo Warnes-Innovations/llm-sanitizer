@@ -37,9 +37,19 @@ _MARKDOWN_SYSTEM_HEADINGS = re.compile(
     re.IGNORECASE | re.MULTILINE,
 )
 
-# Delimiter-style markers
+# Delimiter-style markers.
+#
+# The leading indentation is `[^\S\n]*` (horizontal whitespace only), NOT
+# `\s*`. `(?:^|\n)` gives O(n) start positions; a greedy `\s*` there swallows
+# the whole remaining whitespace run and backtracks one character at a time
+# through the alternation below, which is O(n) work at each of O(n) starts —
+# quadratic, and uninterruptible because it happens inside a single C-level
+# `re.search` that never returns to Python for a `deadline_exceeded()` check.
+# No coverage is lost: `(?:^|\n)` already matches at the newline immediately
+# before the marker's own line, so a marker preceded by blank lines is still
+# found (and with the right line number). Do NOT change this back to `\s*`.
 _DELIMITER_MARKERS = re.compile(
-    r'(?:^|\n)\s*(?:---\s*SYSTEM\s*---|'
+    r'(?:^|\n)[^\S\n]*(?:---\s*SYSTEM\s*---|'
     r'\[SYSTEM\]|\{system_prompt:|'
     r'#{1,3}\s*SYSTEM\s*:|'
     r'@system\s+prompt)',

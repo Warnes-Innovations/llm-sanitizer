@@ -7,6 +7,75 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-25
+
+### Security (denial of service in the scanner's own regexes)
+
+- **Six detection patterns backtracked quadratically, and `max_scan_seconds` could not
+  stop any of them.** A scanner for untrusted content whose own regexes blow up on
+  attacker-chosen input is a denial of service, and this one returned **zero findings**
+  while doing it, so the input looked clean. Present in 0.7.0 and every earlier release
+  that shipped these rules.
+
+  Measured through `Scanner.scan` on the **default** configuration, before the fix:
+
+  | input | size | time | findings |
+  | --- | --- | --- | --- |
+  | blank CRLF lines | 1 KB | 0.21 s | 0 |
+  | blank CRLF lines | 2 KB | 0.66 s | 0 |
+  | blank CRLF lines | 4 KB | 2.12 s | 0 |
+  | blank CRLF lines | 8 KB | 7.66 s | 0 |
+  | `a{opacity:0;animation animation …}` | 82 KB | 72.9 s | 1 |
+
+  After the fix those same inputs cost 0.065 s, 0.054 s, 0.12 s, 0.21 s and 1.40 s.
+
+  **`max_scan_seconds` is not a bound on this, and that is the part worth understanding.**
+  The scanner consults the deadline immediately before each rule and inside each match
+  loop, but the backtracking happens inside a *single* `re.search` that never returns to
+  Python — so `deadline_exceeded()` is never reached. With `max_scan_seconds=1.0` the two
+  inputs above measured **6.4 s** and **33.6 s**. The fix is to remove the blowup, not to
+  add another deadline check.
+
+  The mechanism in each case is an unbounded greedy quantifier reachable from O(n) start
+  positions: a `^` under `MULTILINE` (or `(?:^|\n)`) offers a start at every line, and the
+  quantifier then swallows the remainder and backtracks one position at a time through the
+  literal alternation that follows.
+
+  - `rules/agent_config.py` — `_AGENT_SPECIFIC_PATTERN`, `_GENERIC_KEY_PATTERN`,
+    `_AGENT_CONFIG_KEYS_IN_FRONTMATTER`: leading `\s*` → `[^\S\n]*`.
+  - `rules/system_prompt.py` — `_DELIMITER_MARKERS`: leading `\s*` → `[^\S\n]*`.
+  - `rules/hidden_content.py` — `_TRANSITION_RE`: `[^;{}]*` → `[^;{}]{0,200}`.
+  - `rules/comment_directive.py` — `_MD_COMMENT`: `[^)]*` → `[^)\n]{0,200}` on both sides
+    of the keyword alternation.
+
+  **Effect on detection.** The four `[^\S\n]*` changes lose nothing: the line-start anchor
+  already offers a position at the key's own line, so a key preceded by blank lines is
+  still found — and now reports the *correct* line number, which the newline-crossing
+  version got wrong. `_TRANSITION_RE` suppresses a finding rather than raising one, so its
+  bound can only add a finding, never hide one.
+
+  **`_MD_COMMENT` is the exception and does narrow detection.** Its parenthesised content
+  must now sit on one line (correct for a markdown link-reference definition, but a
+  narrowing), and a comment padded past 200 characters before the keyword no longer
+  matches this rule. The instruction text inside such a comment is still read by the
+  injection rules, which scan raw content and do not care about the wrapper. The bound was
+  chosen by measurement: 200/200 costs ~3.7 s/MB on the adversarial shape against
+  ~3.4 s/MB for `data_exfil._CRED_EXFIL_PATTERNS[0]`, an already-shipping linear pattern,
+  while 300/300 costs 8.0 s/MB and 400/400 costs 11.7 s/MB.
+
+### Added
+
+- **`tests/test_regex_complexity.py` sweeps every compiled pattern in the package**, not
+  the ones someone happened to time. The defect was reported against four patterns; the
+  sweep found a fifth (`_TRANSITION_RE`), and widening its payloads to compound literal
+  prefixes found a sixth (`_MD_COMMENT`). It asserts a fitted growth exponent measured on
+  `time.process_time()` rather than a wall-clock limit — a wall-clock guard had already
+  failed twice here, once by sitting *above* the broken implementation — and passes
+  unchanged under 32 concurrent CPU hogs on 12 cores.
+- **`tests/test_scan_deadline.py` now covers a stall *inside* a rule.** Its existing 15
+  tests all set an already-expired deadline, a state the scanner makes unreachable, and
+  passed in 0.20 s against code where `max_scan_seconds` bounded nothing.
+
 ## [0.7.0] — 2026-09-24
 
 ### Fixed (piped stdin)
