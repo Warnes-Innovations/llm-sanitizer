@@ -144,6 +144,81 @@ class TestAnExpiredDeadlineSkipsInputProportionalWork:
         assert not slow, f"rules doing O(n) work past an expired deadline: {slow}"
 
 
+class TestTheBudgetBoundsAStallInsideARuleAndNotOnlyBetweenRules:
+    """The case this file never tested, and the one that actually failed.
+
+    Every test above sets an ALREADY-EXPIRED deadline and checks that a rule
+    returns without doing O(n) work. That case is real but unreachable in
+    production: `Scanner` consults the deadline immediately before each rule
+    call, so no rule is ever entered late. All 15 of those tests passed in
+    0.20 s against code in which `max_scan_seconds` did not bound anything.
+
+    What was never tested is the deadline expiring DURING a rule. A rule cannot
+    observe it from inside a single `re.search`, because that call never returns
+    to Python — so a regex that backtracks quadratically runs to completion no
+    matter what the budget says. Measured on v0.7.0 with `max_scan_seconds=1.0`:
+    8 KB of blank CRLF lines took 6.4 s, and an 82 KB CSS block took 33.6 s.
+
+    The assertion is on CPU time, not wall clock. Wall clock stretches under
+    load and would make this flaky in the direction of a false alarm; CPU time
+    measures the work actually done, which is the thing the budget is supposed
+    to bound.
+    """
+
+    # Enough to be unmistakable while the defect is present (~30 s of CPU
+    # pre-fix) and trivial once it is not (~0.4 s).
+    BLANK_CRLF_LINES = "\r\n" * 8192
+    BUDGET_SECONDS = 1.0
+    # ~25x the measured post-fix cost, and ~3x below the measured pre-fix cost.
+    # A bound has to sit between those two to mean anything; the guard this
+    # replaces sat ABOVE the broken implementation and so passed against it.
+    MAX_CPU_SECONDS = 10.0
+
+    def _scan_cpu_seconds(self, content: str) -> float:
+        import dataclasses
+
+        from llm_sanitizer.config import load_config
+        from llm_sanitizer.scanner import Scanner
+
+        config = dataclasses.replace(
+            load_config(), max_scan_seconds=self.BUDGET_SECONDS
+        )
+        scanner = Scanner(config)
+        start = time.process_time()
+        scanner.scan(content, source="payload.txt")
+        return time.process_time() - start
+
+    def test_a_one_second_budget_bounds_a_whitespace_payload(self) -> None:
+        spent = self._scan_cpu_seconds(self.BLANK_CRLF_LINES)
+        assert spent < self.MAX_CPU_SECONDS, (
+            f"a {self.BUDGET_SECONDS}s budget spent {spent:.1f}s of CPU on "
+            f"{len(self.BLANK_CRLF_LINES)} bytes of blank CRLF lines. The budget "
+            "cannot interrupt a backtracking re.search, so this is a rule "
+            "regex problem, not a deadline-plumbing problem — see "
+            "tests/test_regex_complexity.py."
+        )
+
+    def test_a_one_second_budget_bounds_a_css_payload(self) -> None:
+        # `opacity:0;` reaches hidden_content's transition check, and the
+        # `;{}`-free run after it is what that check's gap used to swallow.
+        payload = "a{opacity:0;animation " + ("animation " * 8192) + "}"
+        spent = self._scan_cpu_seconds(payload)
+        assert spent < self.MAX_CPU_SECONDS, (
+            f"a {self.BUDGET_SECONDS}s budget spent {spent:.1f}s of CPU on "
+            f"{len(payload)} bytes of CSS"
+        )
+
+    def test_the_whitespace_payload_is_still_scanned_not_merely_fast(self) -> None:
+        """Returning early without scanning would also make the tests above
+        pass. A clean scan must be a scan that happened."""
+        from llm_sanitizer.scanner import scan_text
+
+        result = scan_text(self.BLANK_CRLF_LINES, source="payload.txt")
+        assert not any(f.rule == "scan_timeout" for f in result.findings), (
+            "the scan hit its own time limit on blank lines"
+        )
+
+
 class TestTheRuleStillWorksWhenTheDeadlineHasNotPassed:
     """The other direction. An early return is trivially easy to get wrong in
     the direction of returning early always."""

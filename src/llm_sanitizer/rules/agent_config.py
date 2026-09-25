@@ -17,10 +17,32 @@ from llm_sanitizer.rules import (
     register_rule,
 )
 
+# Leading indentation, horizontal whitespace ONLY — never `\s*`.
+#
+# `\s*` here is a denial-of-service amplifier, not a style choice. Under
+# MULTILINE the `^` (or an explicit `(?:^|\n)`) offers O(n) start positions;
+# a greedy `\s*` at that position swallows every remaining whitespace
+# character and then backtracks one at a time through the literal
+# alternation that follows. On whitespace-only input that is O(n) work at
+# each of O(n) starts — quadratic. 8 KB of blank CRLF lines took 7.7 s
+# through `Scanner.scan`, and the blowup happens inside a single C-level
+# `re.search` that never returns to Python, so `deadline_exceeded()` is
+# never consulted and `max_scan_seconds` CANNOT interrupt it. A 1-second
+# budget measured 6.4 s.
+#
+# `[^\S\n]` is "whitespace except newline". It costs nothing in coverage:
+# under MULTILINE `^` already matches at the key's OWN line start, so any
+# key a newline-crossing `\s*` could reach is still reached — and reached
+# with the correct line number, which the old pattern got wrong whenever it
+# started the match on an earlier blank line.
+#
+# Do NOT "simplify" this back to `\s*`.
+_HSPACE = r'[^\S\n]*'
+
 # Agent-SPECIFIC keys: strong signal on their own — they name an LLM/agent
 # directly and rarely appear in ordinary config.
 _AGENT_SPECIFIC_PATTERN = re.compile(
-    r'^\s*["\']?(?:instructions?|system_prompt|agent_mode|ai_behavior|'
+    r'^' + _HSPACE + r'["\']?(?:instructions?|system_prompt|agent_mode|ai_behavior|'
     r'agent_instructions?|ai_context|llm_config)["\']?\s*[:=]',
     re.IGNORECASE | re.MULTILINE,
 )
@@ -29,7 +51,7 @@ _AGENT_SPECIFIC_PATTERN = re.compile(
 # false positives, so they are only flagged when an agent-SPECIFIC key also
 # occurs in the same content (corroboration).
 _GENERIC_KEY_PATTERN = re.compile(
-    r'^\s*["\']?(?:model|temperature|tools|context_window|max_tokens|top_p|'
+    r'^' + _HSPACE + r'["\']?(?:model|temperature|tools|context_window|max_tokens|top_p|'
     r'stop_sequences?)["\']?\s*[:=]',
     re.IGNORECASE | re.MULTILINE,
 )
@@ -41,7 +63,7 @@ _FRONTMATTER_PATTERN = re.compile(
 )
 
 _AGENT_CONFIG_KEYS_IN_FRONTMATTER = re.compile(
-    r'(?:^|\n)\s*["\']?(?:instructions?|system_prompt|agent_mode|ai_behavior|'
+    r'(?:^|\n)' + _HSPACE + r'["\']?(?:instructions?|system_prompt|agent_mode|ai_behavior|'
     r'tools|model|temperature)["\']?\s*:',
     re.IGNORECASE,
 )
