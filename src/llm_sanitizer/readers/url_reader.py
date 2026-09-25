@@ -13,6 +13,12 @@ private, link-local, and cloud-metadata (``169.254.169.254``) targets.
 Because the URL (and thus the responder) is untrusted, the response body is read
 as a bounded stream and aborted once it exceeds :data:`_MAX_RESPONSE_BYTES`, so a
 malicious endpoint cannot exhaust memory with an unbounded/huge body.
+
+The body is then classified and, where it is a binary document, EXTRACTED —
+:func:`_scannable_text` — so that a PDF or DOCX fetched by URL is scanned as its
+text rather than as decoded bytes (issue #53). :func:`read_url` therefore
+returns ``str | None``, the same "I cannot read this" contract the file path has
+always had; None means refuse the content, never "the page was empty".
 """
 
 from __future__ import annotations
@@ -25,6 +31,8 @@ from collections.abc import Iterator
 from typing import Any
 from urllib.parse import urljoin, urlparse
 
+from llm_sanitizer.readers.bytes_reader import scannable_text
+
 # Guards the process-global getaddrinfo patch in _pin_host_to_ips: because the
 # patch is process-wide, two concurrent pins would clobber each other's saved
 # original and restore the wrong resolver. Acquired non-blocking so a concurrent
@@ -34,8 +42,9 @@ _pin_lock = threading.Lock()
 
 _ALLOWED_SCHEMES = ("http", "https")
 _MAX_REDIRECTS = 5
-# Cap on the response body read from an untrusted endpoint (10 MiB). Scanned
-# documents are text/markup; a body larger than this is treated as hostile.
+# Cap on the response body read from an untrusted endpoint (10 MiB). A body
+# larger than this is treated as hostile. The cap applies to the raw bytes,
+# before any extraction, so it still bounds memory for binary documents.
 _MAX_RESPONSE_BYTES = 10 * 1024 * 1024
 # An honest desktop-browser UA (issue #19): a default/absent UA is one of the
 # signals managed WAFs (Cloudflare/Akamai) use to reject a fetch outright, and
@@ -174,10 +183,21 @@ def _pin_host_to_ips(host: str, ips: list[str]) -> Iterator[None]:
         _pin_lock.release()
 
 
-def _read_capped(response: object) -> str:
+def _read_body_capped(response: object) -> bytes:
     """Read a streaming httpx response body, aborting past _MAX_RESPONSE_BYTES,
-    and decode it to text. A declared Content-Length over the cap is rejected
-    before reading a single byte."""
+    and return the RAW BYTES. A declared Content-Length over the cap is rejected
+    before reading a single byte.
+
+    Reading the body and turning it into text are deliberately separate
+    responsibilities. They used to be one function that ended
+    ``.decode(encoding, errors="replace")``, and that unconditional decode is
+    what made a fetched PDF scannable-looking mojibake (issue #53): with the
+    decode baked in here there was no point at which the content could be
+    sniffed or extracted, and no way for the reader to say "I cannot read this".
+
+    Do not re-merge the decode into this function. The cap logic below is
+    unchanged and is the reason this function exists at all.
+    """
     clen = response.headers.get("content-length")  # type: ignore[attr-defined]
     if clen and clen.isdigit() and int(clen) > _MAX_RESPONSE_BYTES:
         raise RuntimeError(
@@ -192,20 +212,42 @@ def _read_capped(response: object) -> str:
                 f"response body exceeds {_MAX_RESPONSE_BYTES}-byte cap"
             )
         chunks.append(chunk)
-    encoding = response.encoding or "utf-8"  # type: ignore[attr-defined]
-    return b"".join(chunks).decode(encoding, errors="replace")
+    return b"".join(chunks)
 
 
-def read_url(url: str) -> str:
-    """Fetch a URL via HTTP and return its content as text.
+# Staging fetched bytes and turning them into scannable text is NOT url-specific
+# — `llm-sanitize scan -` needs exactly the same thing for piped stdin (#55). It
+# therefore lives in one shared module rather than being copied here; a second
+# copy of this decision is what commit 1b66094 had to merge back together.
+_scannable_text = scannable_text
+
+
+def read_url(url: str) -> str | None:
+    """Fetch a URL via HTTP and return scannable text, or None to refuse it.
 
     For HTML pages, returns the raw HTML so hidden-content rules can detect
     CSS-hidden elements and comment directives.
 
+    For a **binary document** (PDF, DOCX, …) the text is EXTRACTED, exactly as
+    ``read_file`` does for a local file — see :func:`_scannable_text`. Returning
+    None means "there is no usable text here": callers must refuse the content
+    rather than treat it as clean. This mirrors
+    ``scanner.read_scannable_content``, whose None the file path has always had.
+
+    **This return type is load-bearing.** Before issue #53 this function
+    returned ``str`` unconditionally, so a fetched PDF was handed to the rule
+    engine as decoded bytes — one measured sample produced 11 CRITICAL findings
+    matched against a *font width array*, and a PDF with uncompressed streams
+    and no such array produced a clean report on text nobody had read. Do not
+    reintroduce a plain ``str`` return by substituting ``""`` for None: an empty
+    string scans clean, which is the failure this closes.
+
     Redirects are followed MANUALLY (``follow_redirects=False``) so the target
     of each hop is re-validated by :func:`_assert_safe_url` — a benign-looking
     URL that 302-redirects to ``169.254.169.254`` is therefore blocked. The
-    response body is bounded to :data:`_MAX_RESPONSE_BYTES`.
+    response body is bounded to :data:`_MAX_RESPONSE_BYTES`. Neither guard is
+    affected by the extraction step, which happens after the body is fully read
+    and capped.
 
     Raises:
         FetchBlockedError: If the remote server refused the request (HTTP
@@ -213,6 +255,9 @@ def read_url(url: str) -> str:
             content could not be verified, not that scanning itself failed.
         RuntimeError: If the SSRF guard blocks a hop, DNS resolution fails,
             a redirect loop occurs, or the response body exceeds the size cap.
+            Also covers ExtractorUnavailableError (a RuntimeError subclass),
+            which propagates deliberately: a missing extractor is a systemic
+            coverage gap and fails fast rather than degrading to a raw decode.
     """
     import httpx
 
@@ -236,7 +281,16 @@ def read_url(url: str) -> str:
                         current = urljoin(current, loc)
                         continue
                     response.raise_for_status()
-                    return _read_capped(response)
+                    raw = _read_body_capped(response)
+                    encoding = response.encoding or "utf-8"
+                # Extraction runs OUTSIDE the pin and the open stream, and must
+                # stay there. _pin_host_to_ips patches a PROCESS-GLOBAL
+                # socket.getaddrinfo and holds a non-reentrant lock; extraction
+                # is markitdown, which can take seconds. Calling it inside would
+                # leave every other thread's DNS rewritten, and every concurrent
+                # read_url failing loudly, for the length of a document parse
+                # rather than the length of a fetch.
+                return _scannable_text(raw, encoding, origin="url")
         raise RuntimeError(f"too many redirects fetching {url}")
     except httpx.HTTPStatusError as exc:
         raise FetchBlockedError(exc.response.status_code, url) from exc

@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"path": "../../.."
+		},
+		{
+			"path": "../../../../specstoryai"
+		},
+		{
+			"path": "../../../../specstory-cli"
+		},
+		{
+			"path": "../../../../agent-config"
+		}
+	],
+	"settings": {
+		"specstory.cloudSync.enabled": "never"
+	}
+}

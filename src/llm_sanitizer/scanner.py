@@ -33,6 +33,7 @@ from llm_sanitizer.readers.archive_reader import (
 )
 from llm_sanitizer.readers.integrity_checks import (
     detect_type_mismatch,
+    is_binary_content,
     validate_structure,
 )
 from llm_sanitizer.rules import BaseRule, get_all_rules, is_legitimate_file
@@ -234,22 +235,24 @@ def iter_scannable_files(root: Path, glob_pattern: str = "**/*") -> list[Path]:
     return walk_scannable(root, glob_pattern)[0]
 
 
-# Bytes sniffed from the head of each file to classify it as binary. Matches
-# the heuristic git and most other tools use (presence of a NUL byte), rather
-# than an extension allowlist/denylist — classifying by content instead of
-# name means renaming a file can't change how it's handled, closing off an
-# evasion in both directions: a malicious text file renamed to a benign-
-# looking extension (e.g. .png) to dodge scanning, or a document renamed
-# *away* from its real extension to dodge markitdown text extraction.
-_BINARY_SNIFF_BYTES = 8000
-
-
 def _is_binary(path: Path) -> bool:
-    try:
-        with path.open("rb") as fh:
-            return b"\0" in fh.read(_BINARY_SNIFF_BYTES)
-    except OSError:
-        return False
+    """Classify *path* as binary or text, by CONTENT.
+
+    Content and never the extension, so renaming a file cannot change how it is
+    handled — closing an evasion in both directions: a malicious text file
+    renamed to a benign-looking extension (e.g. `.png`) to dodge scanning, or a
+    document renamed *away* from its real extension to dodge markitdown text
+    extraction.
+
+    The implementation is `readers.integrity_checks.is_binary_content`, shared
+    with the Tier-1 type-mismatch check because it asks the same question.
+    **Do not re-implement it here.** Until this delegation existed there were
+    two copies of a "NUL in the first 8000 bytes" rule, one in each module,
+    the second carrying a comment saying it mirrored the first. The rule turned
+    out to be wrong in both directions, and having two copies meant two places
+    to fix and two chances to fix only one.
+    """
+    return is_binary_content(path)
 
 
 def _recognized_media_kind(path: Path) -> str | None:

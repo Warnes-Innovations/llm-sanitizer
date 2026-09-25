@@ -567,11 +567,37 @@ existing positional callers are unaffected.
   motivated it. Redaction removes what a scan at *that* sensitivity reports, so
   scanning at `high` and redacting at the `medium` default silently leaves
   behind every info/low finding the scan flagged.
-- **`mode`** (redaction): `"strip"` | `"comment"` | `"highlight"` (default: `"strip"`)
+- **`mode`** (redaction): `"strip"` | `"comment"` | `"highlight"` | `"placeholder"`
+  (default: `"strip"`)
 - **`glob`** (directory scan): file pattern filter, e.g. `"**/*.md"` (default: all files)
 - **`binary_mode`**: `"extract"` (default) | `"text"` | `"skip"` — how content
   sniffed as binary *by content, not extension* is handled. Accepted by
   `scan_file`, `scan_dir`, `redact_file`, and `redact_dir`.
+
+#### How "binary" is decided
+
+Two steps, in order, and **neither has a byte budget**:
+
+1. **Magic bytes.** If `filetype` recognises the format, the content is binary.
+   The library matches only binary signatures and returns `None` for plain text
+   and source, which is the property that makes this precise. A PDF is binary
+   because it begins `%PDF-`.
+2. **A whole-file control-character test** for anything unrecognised. Text
+   unless a C0 control byte outside the usual whitespace (tab, newline,
+   vertical tab, form feed, carriage return) appears anywhere in the file. It
+   is read in chunks to bound memory, but every byte is examined and the chunk
+   size cannot change the verdict.
+
+Control characters rather than UTF-8 decodability, because Latin-1 text is not
+valid UTF-8 and a decodability test would misclassify ordinary text files as
+binary, route them into the extractor and refuse them.
+
+**What this replaced.** The rule used to be "a NUL byte within the first 8000",
+which was wrong in both directions: a file whose first NUL sat past byte 8000
+read as text, and a short PDF — which often contains no NUL at all — read as
+text, so the scanner scanned PDF object syntax rather than the document. One
+implementation now serves both the scanner and the Tier-1 type-mismatch check,
+which previously kept separate copies of the same rule.
 
 ### Response Format
 
@@ -960,9 +986,22 @@ After:  Check out our site ⚠️[LLM-INSTRUCTION: <!-- ignore previous instruct
 
 ### Directory Redaction
 
-`redact_dir` mirrors the full directory structure under the output directory.
-**All files** are copied — clean files pass through unchanged, files with
-findings are redacted. This produces a drop-in replacement directory.
+`redact_dir` mirrors the directory structure under the output directory. Clean
+text files pass through byte-for-byte; text files with findings are redacted in
+the mirror.
+
+**It is NOT a drop-in replacement directory for binaries, deliberately.** A
+binary member is written as its redacted *extracted text* under `<name>.txt`;
+the original bytes are never copied. A member with no recoverable text — no
+extractor for the format, extraction failed, a recognized archive, or
+`binary_mode="skip"` — is not written at all and is enumerated in the
+response's `refused` array with a reason.
+
+This trades the drop-in property for the guarantee that nothing the scanner
+could not read is handed onward under a successful status. The previous
+behaviour copied such files through, which meant a caller following the
+documented protocol ("pass the output path to the consuming agent, never the
+original") passed on unscanned bytes while every check it could make passed.
 
 An `--affected-only` flag (CLI) or parameter (MCP) limits output to only
 files that had findings.

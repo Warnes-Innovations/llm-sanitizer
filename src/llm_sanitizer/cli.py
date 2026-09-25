@@ -7,9 +7,10 @@ from __future__ import annotations
 
 import argparse
 import json
-import shutil
 import sys
 from pathlib import Path
+
+from llm_sanitizer.redactor import REDACTION_MODES
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -88,9 +89,14 @@ def _build_parser() -> argparse.ArgumentParser:
     redact_parser.add_argument("-o", "--output", required=True, help="Output path (file or directory)")
     redact_parser.add_argument(
         "--mode",
-        choices=["strip", "comment", "highlight"],
+        choices=list(REDACTION_MODES),
         default="strip",
-        help="Redaction mode (default: strip)",
+        help=(
+            "Redaction mode (default: strip). placeholder replaces each "
+            "character of the matched text with a block character, so the "
+            "text is removed while every offset, line number and column in "
+            "the document stays where it was."
+        ),
     )
     redact_parser.add_argument("--glob", default="**/*", help="File pattern for directory redaction")
     redact_parser.add_argument(
@@ -113,13 +119,14 @@ def _build_parser() -> argparse.ArgumentParser:
         default="extract",
         help=(
             "How to handle content sniffed as binary, by content not "
-            "extension (default: extract). extract: scan embedded text via "
-            "markitdown, but always copy the original binary through "
-            "unchanged (redacted extracted text can't be written back into "
-            "e.g. a PDF). text: force raw bytes to be scanned *and "
-            "redacted* as literal text — only safe for files you already "
-            "know aren't genuinely binary. skip: copy binary files through "
-            "unscanned."
+            "extension (default: extract). extract: pull embedded text via "
+            "markitdown and write the REDACTED EXTRACTED TEXT — the original "
+            "bytes are never copied to the output, and in directory mode the "
+            "text lands under <name>.txt. text: force raw bytes to be scanned "
+            "*and* redacted as literal text — only safe for files you already "
+            "know aren't genuinely binary. skip: never read binary content, "
+            "so every binary input is REFUSED (nothing written) rather than "
+            "copied through unscanned."
         ),
     )
 
@@ -249,13 +256,37 @@ def _read_content(target: str, binary_mode: str = "extract") -> tuple[str | None
     content is None when target is a file sniffed as binary and binary_mode
     excludes it from scanning (see llm_sanitizer.scanner.read_scannable_content)."""
     if target == "-":
-        from llm_sanitizer.readers.text_reader import read_text
-        return read_text("-"), "<stdin>"
+        from llm_sanitizer.readers.text_reader import read_stdin
+        # May be None: piped binary that no extractor could read. The callers
+        # below already handle None for files and now get the same contract
+        # here, instead of a UnicodeDecodeError traceback (#55).
+        return read_stdin(), "<stdin>"
     if _is_url(target):
         from llm_sanitizer.readers.url_reader import read_url
         return read_url(target), target
     from llm_sanitizer.readers import read_file
     return read_file(target, binary_mode=binary_mode), target
+
+
+def _unreadable_reason(target: str, binary_mode: str) -> str:
+    """Explain why *target* yielded no scannable text.
+
+    A URL, piped stdin and a file all reach the same None for different
+    reasons. Quoting binary_mode for the first two would be wrong: they always
+    extract, so the flag is never consulted there (readers.url_reader.read_url
+    for #53, readers.text_reader.read_stdin for #55).
+    """
+    if _is_url(target):
+        return (
+            "the fetched content is a binary document no extractor could read, "
+            "or one that extracted to nothing"
+        )
+    if target == "-":
+        return (
+            "the piped content is a binary document no extractor could read, "
+            "or one that extracted to nothing"
+        )
+    return f"binary content, binary_mode={binary_mode!r}"
 
 
 def _filter_by_min_risk(result: object, min_risk_str: str) -> object:
@@ -326,7 +357,7 @@ def _cmd_scan(args: argparse.Namespace) -> None:
             if content is None:
                 print(
                     f"[llm-sanitize] Skipped: no scannable text content "
-                    f"(binary file, binary_mode={binary_mode!r}): {target}",
+                    f"({_unreadable_reason(target, binary_mode)}): {target}",
                     file=sys.stderr,
                 )
                 sys.exit(3)
@@ -374,14 +405,14 @@ def _cmd_redact(args: argparse.Namespace) -> None:
                 scanner, target, output, args.mode, args.glob,
                 args.affected_only, binary_mode, sensitivity,
             )
-        else:
-            from llm_sanitizer.scanner import _is_binary
-
+        elif output == "-" or target == "-" or _is_url(target):
+            # stdin/stdout and URLs have no file to copy through, so the
+            # binary contract below doesn't apply: read, redact, print.
             content, source = _read_content(target, binary_mode=binary_mode)
             if content is None:
                 print(
-                    f"[llm-sanitize] Skipped: no scannable text content "
-                    f"(binary file, binary_mode={binary_mode!r}): {target}",
+                    f"[llm-sanitize] Refused: no scannable text content "
+                    f"({_unreadable_reason(target, binary_mode)}): {target}",
                     file=sys.stderr,
                 )
                 sys.exit(3)
@@ -395,24 +426,52 @@ def _cmd_redact(args: argparse.Namespace) -> None:
             if output == "-":
                 print(redacted, end="")
             else:
-                is_binary_content = (
-                    binary_mode != "text"
-                    and target != "-"
-                    and not _is_url(target)
-                    and _is_binary(Path(target))
+                Path(output).write_text(redacted, encoding="utf-8")
+                print(
+                    f"[llm-sanitize] Redacted "
+                    f"{scan_result.summary.total_findings} finding(s) → {output}"
                 )
-                if is_binary_content:
-                    # A binary file's *extracted* text can be scanned for
-                    # findings, but a redacted version of that extracted text
-                    # can't be written back into the original binary format —
-                    # so binary files are copied through unmodified rather
-                    # than replaced with mangled text (mirrors
-                    # _redact_dir/redact_dir's handling of the same case).
-                    shutil.copy2(target, output)
-                else:
-                    Path(output).write_text(redacted, encoding="utf-8")
-                findings_count = scan_result.summary.total_findings
-                print(f"[llm-sanitize] Redacted {findings_count} finding(s) → {output}")
+        else:
+            # A real file to a real output path. Everything about what gets
+            # written — and the refusal to write unredacted binary — lives in
+            # redact_file_to, shared with the MCP server (issue #51).
+            from llm_sanitizer.redactor import redact_file_to
+
+            outcome = redact_file_to(
+                target,
+                output,
+                mode=args.mode,
+                binary_mode=binary_mode,
+                sensitivity=sensitivity,
+            )
+            if outcome.refused:
+                print(
+                    f"[llm-sanitize] Refused: {outcome.refusal_reason}",
+                    file=sys.stderr,
+                )
+                sys.exit(3)
+            note = (
+                " (redacted text extracted from a binary document)"
+                if outcome.output_format == "extracted-text"
+                else ""
+            )
+            print(
+                f"[llm-sanitize] Redacted {outcome.findings_redacted} finding(s) "
+                f"→ {outcome.output_path}{note}"
+            )
+            if outcome.redacted_binary_path:
+                print(
+                    "[llm-sanitize] Verified-clean rewrite in the original "
+                    f"format → {outcome.redacted_binary_path}"
+                )
+            elif outcome.binary_redaction == "refused":
+                # Loud, and on stderr: a rewrite was attempted, could not be
+                # proved clean, and was deleted. The text output still stands.
+                print(
+                    "[llm-sanitize] In-place rewrite REFUSED: "
+                    f"{outcome.binary_redaction_detail}",
+                    file=sys.stderr,
+                )
     except ExtractorUnavailableError as exc:
         print(
             f"[llm-sanitize] Extractor unavailable — cannot complete redact: {exc.hint}",
@@ -434,59 +493,58 @@ def _redact_dir(
     binary_mode: str = "extract",
     sensitivity: str = "medium",
 ) -> None:
-    from llm_sanitizer.redactor import redact_content
-    from llm_sanitizer.scanner import Scanner, _is_binary, iter_scannable_files, read_scannable_content
+    from llm_sanitizer.redactor import redact_file_to
+    from llm_sanitizer.scanner import Scanner, iter_scannable_files
 
     assert isinstance(scanner, Scanner)
     src_path = Path(src)
     dst_path = Path(dst)
     dst_path.mkdir(parents=True, exist_ok=True)
     files_written: list[str] = []
+    refused: list[dict[str, str | None]] = []
 
     files = iter_scannable_files(src_path, glob_pattern)
 
     for file_path in sorted(files):
         rel = file_path.relative_to(src_path)
         out_path = dst_path / rel
-        out_path.parent.mkdir(parents=True, exist_ok=True)
         try:
-            # A binary file's *extracted* text can be scanned for findings,
-            # but a redacted version of that extracted text can't be written
-            # back into the original binary format — so binary files with
-            # findings are still copied through unmodified rather than
-            # replaced with mangled text (mirrors server.py's redact_dir).
-            is_binary_content = binary_mode != "text" and _is_binary(file_path)
-            content = read_scannable_content(file_path, binary_mode=binary_mode)
-            if content is None:
-                # Never scanned (binary_mode="skip", or "extract" with
-                # extraction unavailable/failed) — still copy the original
-                # through so it isn't silently dropped from what's meant to
-                # be a drop-in replacement directory (matches the documented
-                # --binary-mode behavior for both "skip" and "extract").
-                if not affected_only:
-                    shutil.copy2(file_path, out_path)
-                    files_written.append(str(out_path))
-                continue
-            # Iterate scan/redact per file to a stable state (see
-            # _cmd_redact's single-file path for rationale).
-            redacted, scan_result = redact_content(
-                content, mode=mode, source=str(file_path), sensitivity=sensitivity
+            # The binary contract (never write unredacted binary; write the
+            # redacted extracted text as <name>.txt; refuse when there is no
+            # usable text) is shared with server.redact_dir — see
+            # redactor.redact_file_to. Do not re-decide it here (issue #51).
+            outcome = redact_file_to(
+                file_path,
+                out_path,
+                mode=mode,
+                binary_mode=binary_mode,
+                sensitivity=sensitivity,
+                text_suffix_for_binary=True,
+                skip_clean=affected_only,
             )
-            if scan_result.findings:
-                if is_binary_content:
-                    shutil.copy2(file_path, out_path)
-                else:
-                    out_path.write_text(redacted, encoding="utf-8")
-                files_written.append(str(out_path))
-            elif not affected_only:
-                shutil.copy2(file_path, out_path)
-                files_written.append(str(out_path))
         except OSError:
             continue
+        if outcome.refused:
+            refused.append({
+                "source": str(file_path),
+                "refusal_code": outcome.refusal_code,
+                "message": outcome.refusal_reason,
+            })
+            continue
+        if outcome.written and outcome.output_path is not None:
+            files_written.append(outcome.output_path)
+        if outcome.redacted_binary_path is not None:
+            files_written.append(outcome.redacted_binary_path)
 
     print(
         json.dumps(
-            {"status": "ok", "source": src, "output_dir": dst, "files_written": files_written},
+            {
+                "status": "ok",
+                "source": src,
+                "output_dir": dst,
+                "files_written": files_written,
+                "refused": refused,
+            },
             indent=2,
         )
     )

@@ -7,6 +7,265 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.0] — 2026-09-24
+
+### Fixed (piped stdin)
+
+- **`llm-sanitize scan -` / `redact -` now classify and extract piped binary instead of
+  decoding it as text** ([#55](https://github.com/Warnes-Innovations/llm-sanitizer/issues/55)) —
+  the third and last entry point in the family #51 and #53 closed.
+
+  `sys.stdin.read()` is text-mode by construction: the locale codec decodes the input
+  before any code can sniff it. Two consequences, and only the first was reported:
+
+  - A piped PDF with any non-UTF-8 byte raised an unhandled `UnicodeDecodeError`
+    traceback. Loud, and it misled nobody.
+  - A piped **pure-ASCII** PDF has no undecodable byte, so it did not crash — it was
+    scanned as the container's source. That is the quiet half, and it is the same
+    silent-wrong-verdict shape as #53.
+
+  Stdin is now read from `sys.stdin.buffer` and routed through the same classifier and
+  extractor the file path uses. It returns None — refuse — where there is no usable
+  text, which the CLI already handled for files (exit 3).
+
+  `read_text("-")` no longer reads stdin and raises `ValueError` naming `read_stdin()`.
+  Refusing loudly is deliberate: returning `str` from a function that cannot sniff is
+  what made this reachable in the first place.
+
+  **The staging logic is now shared, not copied.** `readers/bytes_reader.py` holds the
+  one implementation of "untrusted bytes → scannable text or a refusal", used by both
+  the URL path and stdin. In particular the temp file's suffix is derived from content
+  magic for both, which is load-bearing rather than cosmetic: `is_zip_based_document`
+  decides on the file **name**, so a suffix-less DOCX is refused as an archive before it
+  ever reaches the extractor, while a *wrong* suffix is worse still — a DOCX staged as
+  `.txt` extracts to 4 bytes with the injected sentence gone.
+
+### Fixed (scan deadline)
+
+- **The scan deadline is now observable *during* a rule, not only after its setup.**
+  Four rules built their line-offset table and split the input before consulting the
+  clock, so an expired deadline could not stop work that was already in flight — which
+  is precisely the window a large or hostile input widens
+  ([#56](https://github.com/Warnes-Innovations/llm-sanitizer/issues/56)).
+
+  Two independent causes, and the reported one turned out to be the smaller:
+
+  1. **`newline_offsets` was a per-character Python loop.** It read as the obvious O(n)
+     implementation — and is — but paid the whole n in interpreted iterations rather
+     than inside the C scanner. On the 5.28 MB single-line input the rules are
+     stress-tested with: **331 ms, against 0.3 ms** for the `str.find` scan that
+     replaces it. The cost tracked the input *length*, not the newline count, so the
+     worst case was the input with no newlines at all. Four rules call this helper.
+  2. **No rule checked the deadline before that setup.** `AgentConfigRule.detect()` spent
+     ~367 ms uninterruptibly before its first check; its YAML-frontmatter loop had no
+     check at all, while its sibling loop did. `agent_config`, `comment_directive`,
+     `semantic_intent` and `system_prompt` now return immediately on an expired deadline.
+
+  The issue named `sorted(... finditer ...)` as the cause; measured, that step is ~37 ms
+  of the ~367 ms. It is fixed by the early return along with the rest.
+
+  **Verified under load, because idle proves nothing here.** The existing guard
+  `test_every_rule_honors_the_scan_deadline` passes on an idle machine and fails under
+  contention. Against a controlled 32-process CPU load it failed **5 of 5** before and
+  passes **5 of 5** after, at a higher load average, with the run dropping from ~3.3 s to
+  ~0.6 s. New deterministic tests assert the same property by *counting* work instead of
+  timing it, so a loaded and an idle machine answer identically.
+
+  No behaviour change for any scan that completes within its deadline.
+
+### Changed
+
+- **`scan_url` and `redact_url` now return a different verdict for any binary document
+  fetched by URL.** This is the intended consequence of the fix below and is called out
+  separately because it moves results a caller may have pinned:
+
+  - `scan_url` on a PDF/DOCX now reports findings against the document's **text**. It
+    previously reported findings against the decoded container bytes — one measured
+    sample returned 11 CRITICAL `homoglyph` findings, every one matched against a PDF
+    **font width array**.
+  - `redact_url` on such a URL now writes the redacted **extracted text**; it previously
+    wrote a redacted decoding of the container bytes.
+  - Either endpoint now **refuses** — `{"status": "error", "refusal_code":
+    "no-extractable-text"}`, and for `redact_url` no file is written — when the fetched
+    document yields no usable text. `readers.read_url` therefore returns `str | None`
+    rather than `str`, matching `read_file`.
+
+  A caller treating "CRITICAL" as "refuse" will see previously-blocked PDF URLs start
+  returning real reports. That was the point: they were blocked by false positives, not
+  by analysis.
+
+### Fixed
+
+- **SECURITY: a binary document fetched by URL is now extracted, not decoded as text.**
+  `readers/url_reader.py` ended `b"".join(chunks).decode(encoding, errors="replace")` —
+  an unconditional byte-decode with no content-type sniffing, no extraction step, and
+  no way to return "I cannot read this". A PDF or DOCX fetched by URL was handed to the
+  rule engine as mojibake
+  ([#53](https://github.com/Warnes-Innovations/llm-sanitizer/issues/53)).
+
+  **Why this was not a safe default despite looking fail-closed.** Under the documented
+  protocol `max_risk: critical` means refuse, so a URL-fetched PDF *was* blocked — but
+  nothing had been scanned. The findings were homoglyph hits on font metrics. A PDF with
+  uncompressed streams and no font-width arrays returns **zero findings on a document
+  whose text was never read**: safety depended on the false positives firing.
+
+  The URL path now does what the file path does, by **delegating to the same code** —
+  `is_binary_content` for the classification, `sniff_rtf` for presentation markup, and
+  `read_scannable_content` for the extraction. No second implementation of any of those
+  decisions was added; a parallel copy of the binary rule is precisely what the previous
+  entry had to merge back together.
+
+  Details worth knowing:
+
+  - **The temp file's suffix is derived from the content's magic bytes only** — never
+    the URL path, Content-Type or Content-Disposition, all of which are
+    attacker-controlled here. Measured: a *wrong* suffix is worse than none, with a
+    DOCX written as `.txt` extracting to 4 bytes with the injected sentence gone. A
+    suffix is nonetheless required, because `is_zip_based_document` decides on the file
+    **name**: without `.docx` a fetched DOCX reads as a plain archive and is refused
+    before reaching the extractor.
+  - **An extraction that yields nothing is a refusal**, not empty content — the "clean
+    verdict on a document nobody read" case named above. An empty *text* body is still
+    empty text.
+  - **The SSRF guard, manual redirect re-validation and 10 MiB size cap are unchanged**,
+    and the cap still applies to the raw bytes before any extraction. `_read_capped` was
+    split into `_read_body_capped` (bytes) and `_scannable_text`; it was renamed rather
+    than changed in place so no stale caller could silently receive bytes where it
+    expected `str`.
+  - Text pages are unaffected and are still returned as raw markup, decoded with the
+    charset the response declared.
+
+  No new dependency, no new extra, no lockfile change.
+
+- **SECURITY: text-vs-binary classification no longer depends on an arbitrary byte
+  count.** `_is_binary` read the first 8000 bytes of a file and called it binary if one
+  of them was NUL. That failed in **both** directions:
+
+  - **The window.** A file whose first NUL sits at byte 8001 read as text.
+  - **The signal.** NUL-freeness is not textness. A short, simple PDF often contains no
+    NUL at all, so it read as text and the scanner scanned **raw PDF object
+    dictionaries and xref tables** instead of the document's words. A 600-byte
+    uncompressed PDF carrying a plain-text injection was classified as text; the same
+    two-line document built by a PDF library classified as text at 9,339 bytes and as
+    binary at 9,567, the only difference being how its deflate stream happened to
+    compress.
+
+  Both are now gone. Classification is two steps, neither with a byte budget:
+
+  1. **Magic bytes** — if `filetype` (already a core dependency) recognises the format,
+     it is binary because it says what it is. The library matches only binary
+     signatures and returns `None` for plain text and source, which is exactly the
+     property needed. A PDF is binary because it starts `%PDF-`.
+  2. **A whole-file control-character test** for anything unrecognised — text unless a
+     C0 control byte outside the usual whitespace appears. Read in chunks, but every
+     byte is examined and the chunk size cannot change the answer.
+
+  Control characters rather than UTF-8 decodability, deliberately: Latin-1 text
+  (`café au lait`) is not valid UTF-8, and a decodability test would call an ordinary
+  text file binary, route it into the extractor and refuse it.
+
+  **This was two copies of one rule** — `scanner._is_binary` and a private
+  `integrity_checks._is_binary_content`, the second carrying a comment saying it
+  mirrored the first. They are now one implementation, with the scanner delegating;
+  a test asserts both entry points return the same verdict.
+
+  No new dependency, no new extra, no lockfile change.
+
+- **SECURITY (fail-open at the trust boundary): the redact paths no longer write
+  unredacted binary.** For any input that sniffed as binary, `redact_file`,
+  `redact_dir`, `llm-sanitize redact <file>` and `llm-sanitize redact <dir>` wrote a
+  **byte-identical copy of the source** to the output path and returned
+  `{"status": "ok", "findings_redacted": N}`, where `N` counted the findings *left in*
+  the file. Nothing in the response distinguished that from a real redaction.
+
+  A caller following the documented protocol — "pass `output_path` to the consuming
+  agent, never the original path" — therefore handed a downstream model the unmodified
+  original while every guard it could apply passed: the status was `ok`, the fields were
+  present, the output file existed, and it even had the `.txt` name the caller chose.
+  Only `file` or `cmp` on the bytes revealed it. Observed live on a 6.3 MB PDF
+  ([#51](https://github.com/Warnes-Innovations/llm-sanitizer/issues/51)).
+
+  The scan already has the document's text — extracting it is how a binary gets scanned
+  at all. The redact paths now write that **redacted extracted text** instead of
+  discarding it, and name what they wrote:
+
+  ```json
+  {"status": "ok", "output_format": "extracted-text", "original_format": "binary",
+   "findings_redacted": 1}
+  ```
+
+  `findings_redacted` now counts findings **removed**, not findings left behind.
+
+  When there is genuinely no usable text — no extractor for the format, extraction
+  failed, a recognized archive, or `binary_mode="skip"` — the call is **refused and no
+  output file is created** (`status: "error"`, `error_type: "unredactable"`). Refusing
+  without writing is deliberate: the consuming protocol treats the output's existence
+  as evidence.
+
+  This was **seven `shutil.copy2` sites across two files**, not the one the issue
+  reported, with the behaviour stated as intent in a source comment and duplicated in
+  four docstrings. All redact entry points now route through a single
+  `redactor.redact_file_to()` so the policy cannot diverge again.
+
+### Changed
+
+- **BREAKING for `redact_dir` / `llm-sanitize redact <dir>`: the output is no longer a
+  drop-in replacement directory for binary members.** A binary member is written as
+  `<name>.txt` holding its redacted extracted text, and a member with no recoverable
+  text is not written at all. Both the MCP response and the CLI's JSON now carry a
+  `refused` array of `{source, refusal_code, message}`, so a skipped input is
+  enumerated rather than silently absent. Clean **text** files still pass through
+  byte-for-byte, which also stops non-UTF-8 content being re-encoded through
+  `errors="replace"` on the way out.
+
+  `--binary-mode skip` correspondingly **refuses** binary inputs rather than copying
+  them through unscanned.
+
+### Added
+
+- **`placeholder` redaction mode** — replaces each character of the matched text with
+  `█` (U+2588), so the instruction text is removed while every byte offset, line number
+  and column in the document stays where it was. Available on `redact`, `redact_file`,
+  `redact_dir`, `redact_url` and `llm-sanitize redact --mode placeholder`.
+
+  Note the deliberate trade-off: a same-length placeholder discloses the **length** of
+  what it replaced. That is unimportant for injected instruction text, and would not be
+  for a short secret.
+
+- **In-place PDF redaction, behind the new `[pdf-redact]` extra.** For a PDF input the
+  redact paths now *additionally* write a rewritten PDF — `<stem>.redacted.pdf`, beside
+  the text output — with the findings removed from the content stream, for callers who
+  need the original format back. The response carries `redacted_binary_path`,
+  `binary_redaction` (`ok` | `unavailable` | `refused` | `not-applicable`) and
+  `binary_redaction_detail`.
+
+  This never replaces or gates the redacted extracted text; that remains the contract.
+  Where a rewrite is impossible — PyMuPDF absent, an encrypted PDF, or a `comment` /
+  `highlight` mode whose whole purpose is to keep the matched text as a marker — the
+  text output stands alone and the response says why.
+
+  **The rewrite is published only after passing three independent checks**, and any
+  failure deletes the candidate and reports `refused`:
+
+  1. the project's own markitdown-extract-and-scan pipeline, at the caller's
+     sensitivity — nothing it flagged may survive;
+  2. a second, independent extractor (PyMuPDF's own `get_text`), scanned the same way;
+  3. the **decompressed content streams**, searched for each fragment in every encoding
+     a PDF plausibly stores it in.
+
+  Check 3 is not redundant with check 1. The classic failure of this whole category is a
+  "redaction" that draws a black rectangle over text and leaves the glyphs in the file:
+  it looks right in a viewer and in a screenshot, and the text copies straight back out.
+  `apply_redactions` does remove the glyphs — but it is verified per call rather than
+  trusted, because a rewrite that silently failed would be indistinguishable from one
+  that worked.
+
+  Check 3 also reports whether it had any **power** on the document — whether the
+  predicate could locate the fragment in the *unredacted* input. An earlier draft
+  searched only for UTF-8 bytes while MuPDF writes show-text operands as hex, so it
+  could never have matched and returned a clean-looking "absent" for every file. A
+  negative from an instrument that cannot produce a positive is not evidence.
+
 ## [0.6.0] — 2026-08-11
 
 Minor, not patch: this adds public API (`walk_scannable()` / `ExclusionStats`, three new

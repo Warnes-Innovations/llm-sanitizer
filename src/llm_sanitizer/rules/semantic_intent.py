@@ -95,6 +95,12 @@ class SemanticIntentRule(BaseRule):
             # Vendored model absent/malformed → contribute nothing (never crash).
             return []
 
+        # Before the input-proportional setup, not only inside the loop below
+        # — the deadline is only as fine-grained as the longest step between
+        # two checks (issue #56).
+        if deadline_exceeded():
+            return []
+
         findings: list[Finding] = []
         lines = content.splitlines()
         offsets = newline_offsets(content)

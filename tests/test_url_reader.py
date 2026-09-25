@@ -18,7 +18,7 @@ from llm_sanitizer.readers.url_reader import (
     FetchBlockedError,
     _assert_safe_url,
     _ip_is_blocked,
-    _read_capped,
+    _read_body_capped,
     read_url,
 )
 
@@ -91,22 +91,28 @@ class TestAssertSafeUrl:
         _assert_safe_url("http://example.com/")
 
 
-class TestReadCapped:
-    def test_reads_small_body(self) -> None:
+class TestReadBodyCapped:
+    """The cap is unchanged by #53; only the return type is. `_read_capped`
+    decoded to str, which left nowhere to sniff or extract the body — it is now
+    `_read_body_capped` and returns raw bytes, with decoding moved out to
+    `_scannable_text`. The rename is deliberate: a silent str→bytes change under
+    the old name would have failed somewhere far from here."""
+
+    def test_reads_small_body_as_bytes(self) -> None:
         resp = _FakeResponse([b"hello ", b"world"])
-        assert _read_capped(resp) == "hello world"
+        assert _read_body_capped(resp) == b"hello world"
 
     def test_rejects_declared_content_length_over_cap(self) -> None:
         huge = str(url_reader._MAX_RESPONSE_BYTES + 1)
         resp = _FakeResponse([b"x"], headers={"content-length": huge})
         with pytest.raises(RuntimeError, match="Content-Length"):
-            _read_capped(resp)
+            _read_body_capped(resp)
 
     def test_aborts_when_streamed_body_exceeds_cap(self, monkeypatch) -> None:
         monkeypatch.setattr(url_reader, "_MAX_RESPONSE_BYTES", 8)
         resp = _FakeResponse([b"1234", b"5678", b"9abc"])  # 12 bytes > 8
         with pytest.raises(RuntimeError, match="exceeds"):
-            _read_capped(resp)
+            _read_body_capped(resp)
 
 
 def test_read_url_blocks_before_request(monkeypatch) -> None:

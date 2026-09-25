@@ -37,10 +37,34 @@ Five risk levels: **info** (legitimate AI config) → **low** → **medium** →
 
 ### Redaction
 
-Non-destructive cleaning in three modes:
+Non-destructive cleaning in four modes:
 - **strip** — remove the instruction entirely
 - **comment** — replace with `[REDACTED: ...]` marker
 - **highlight** — wrap in visible markers for review
+- **placeholder** — replace each character with `█`, so the text is gone but
+  every byte offset, line number and column in the document is unchanged
+
+**Binary inputs never produce unredacted binary output.** Scanning a PDF,
+DOCX, PPTX or XLSX requires extracting its text, so that redacted text is what
+the redact tools write, and the response says so
+(`output_format: "extracted-text"`). The original bytes are never copied to an
+output path. Where no text can be recovered at all, the call is **refused and
+no file is written** — an unredacted copy is worse than no file, because a
+caller that checks only whether the output exists cannot tell the two apart.
+
+**PDFs can also be redacted in place**, with the `[pdf-redact]` extra:
+
+```bash
+uv pip install 'llm-sanitizer[pdf-redact]'
+```
+
+A rewritten `<stem>.redacted.pdf` is written beside the text output, with the
+findings removed from the **content stream** — not a black rectangle drawn
+over them, which leaves the text in the file and is the classic failure of
+this category. It is published only after being verified clean three ways
+(the project's extractor, a second independent extractor, and a raw
+content-stream search); a rewrite that cannot be proved clean is deleted and
+reported as `refused`, and the redacted text output still stands.
 
 ## Installation
 
@@ -49,6 +73,22 @@ pip install llm-sanitizer
 # or
 uv pip install llm-sanitizer
 ```
+
+### Platform notes
+
+The dependency chain `markitdown -> magika -> onnxruntime` needs binary wheels for
+`onnxruntime` on your platform and Python version.
+
+* **Intel macOS (x86_64):** onnxruntime dropped `macosx_x86_64` wheels entirely at
+  1.24.0, and the last Intel build (1.23.2) only ships wheels for Python ≤3.13. Use
+  Python 3.13 or older — with uv, pin the interpreter explicitly:
+  `uvx --python 3.13 --from llm-sanitizer[7z,rar] llm-sanitize ...`.
+* **Apple Silicon macOS:** works on macOS 14+ (onnxruntime 1.24+ wheels require
+  macOS 14); on macOS 13 or earlier use Python ≤3.13.
+* **Linux and Windows:** work on Python 3.11 through 3.14.
+
+We keep `requires-python = ">=3.11"` rather than capping it: a cap cannot carry
+platform markers and would regress the platforms where Python 3.14 resolves fine.
 
 ## Quick Start
 
