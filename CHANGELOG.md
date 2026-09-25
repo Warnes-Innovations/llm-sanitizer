@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] — 2026-09-25
+
 ### Security (denial of service in the scanner's own regexes)
 
 - **Six detection patterns backtracked quadratically, and `max_scan_seconds` could not
