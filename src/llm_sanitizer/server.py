@@ -424,7 +424,7 @@ def redact_dir(
         output.
     """
     from llm_sanitizer.redactor import redact_file_to
-    from llm_sanitizer.scanner import ExtractorUnavailableError, iter_scannable_files
+    from llm_sanitizer.scanner import ExtractorUnavailableError, WalkIssue, walk_with_issues
 
     from llm_sanitizer.redactor import refuse_overlapping_output
 
@@ -438,7 +438,16 @@ def redact_dir(
         files_written: list[str] = []
         refused: list[dict[str, str | None]] = []
 
-        files = iter_scannable_files(src_path, glob)
+        files, _exclusions, issues = walk_with_issues(src_path, glob)
+        # A path the walk refused is never opened and never written: list it
+        # as refused so nothing leaves the tree silently (0.7.2).
+        for issue in issues:
+            if issue.blocks:
+                refused.append({
+                    "source": str(issue.path),
+                    "refusal_code": issue.code,
+                    "message": issue.message,
+                })
 
         for file_path in sorted(files):
             rel = file_path.relative_to(src_path)
@@ -452,7 +461,16 @@ def redact_dir(
                     sensitivity=sensitivity,
                     text_suffix_for_binary=True,
                 )
-            except OSError:
+            except OSError as exc:
+                # Was a bare `continue`: the file vanished from the output AND
+                # the report (0.7.2). Refused, with the reason.
+                msg = f"could not read or write: {exc.strerror or exc}"
+                issues.append(WalkIssue(file_path, "unreadable", msg))
+                refused.append({
+                    "source": str(file_path),
+                    "refusal_code": "unreadable",
+                    "message": msg,
+                })
                 continue
             if outcome.refused:
                 refused.append({
@@ -472,6 +490,7 @@ def redact_dir(
             "output_dir": output_dir,
             "files_written": files_written,
             "refused": refused,
+            "walk_issues": [i.as_dict() for i in issues],
         })
     except ExtractorUnavailableError as exc:
         return json.dumps({"status": "error", "message": exc.hint})

@@ -494,7 +494,7 @@ def _redact_dir(
     sensitivity: str = "medium",
 ) -> None:
     from llm_sanitizer.redactor import redact_file_to, refuse_overlapping_output
-    from llm_sanitizer.scanner import Scanner, iter_scannable_files
+    from llm_sanitizer.scanner import Scanner, WalkIssue, walk_with_issues
 
     assert isinstance(scanner, Scanner)
     src_path = Path(src)
@@ -506,7 +506,16 @@ def _redact_dir(
     files_written: list[str] = []
     refused: list[dict[str, str | None]] = []
 
-    files = iter_scannable_files(src_path, glob_pattern)
+    files, _exclusions, issues = walk_with_issues(src_path, glob_pattern)
+    # A path the walk refused is never opened and never written: list it
+    # as refused so nothing leaves the tree silently (0.7.2).
+    for issue in issues:
+        if issue.blocks:
+            refused.append({
+                "source": str(issue.path),
+                "refusal_code": issue.code,
+                "message": issue.message,
+            })
 
     for file_path in sorted(files):
         rel = file_path.relative_to(src_path)
@@ -525,7 +534,16 @@ def _redact_dir(
                 text_suffix_for_binary=True,
                 skip_clean=affected_only,
             )
-        except OSError:
+        except OSError as exc:
+            # Was a bare `continue`: the file vanished from the output AND
+            # the report (0.7.2). Refused, with the reason.
+            msg = f"could not read or write: {exc.strerror or exc}"
+            issues.append(WalkIssue(file_path, "unreadable", msg))
+            refused.append({
+                "source": str(file_path),
+                "refusal_code": "unreadable",
+                "message": msg,
+            })
             continue
         if outcome.refused:
             refused.append({
@@ -547,6 +565,7 @@ def _redact_dir(
                 "output_dir": dst,
                 "files_written": files_written,
                 "refused": refused,
+                "walk_issues": [i.as_dict() for i in issues],
             },
             indent=2,
         )

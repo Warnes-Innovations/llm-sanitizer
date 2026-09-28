@@ -44,6 +44,7 @@ ARCHIVE_UNSUPPORTED = "archive_unsupported"
 INPUT_TOO_LARGE = "input_too_large"
 RESCAN_INCOMPLETE = "rescan_incomplete"
 SCAN_TIMEOUT = "scan_timeout"
+UNSCANNABLE_PATH = "unscannable_path"
 
 
 class TypeMismatchRule(BaseRule):
@@ -140,6 +141,23 @@ class InputTooLargeRule(BaseRule):
         return []
 
 
+class UnscannablePathRule(BaseRule):
+    rule_id = UNSCANNABLE_PATH
+    rule_name = "Unscannable Path"
+    category = "integrity"
+    default_risk = RiskLevel.critical
+    description = (
+        "A path met during a directory walk (or named directly) could not be "
+        "examined: a FIFO, socket or device; a symlink whose target resolves "
+        "outside the source root; a broken symlink; or a file or directory that "
+        "could not be read. Fail-closed: its content is unknown, so it is "
+        "surfaced rather than silently skipped."
+    )
+
+    def detect(self, content: str, source: str = "") -> list[Finding]:
+        return []
+
+
 _RULE_NAMES: dict[str, str] = {
     TYPE_MISMATCH: TypeMismatchRule.rule_name,
     CORRUPT_FILE: CorruptFileRule.rule_name,
@@ -147,6 +165,7 @@ _RULE_NAMES: dict[str, str] = {
     UNSCANNABLE_MEDIA: UnscannableMediaRule.rule_name,
     ARCHIVE_UNSUPPORTED: ArchiveUnsupportedRule.rule_name,
     INPUT_TOO_LARGE: InputTooLargeRule.rule_name,
+    UNSCANNABLE_PATH: UnscannablePathRule.rule_name,
     RESCAN_INCOMPLETE: "Re-scan Budget Exhausted",
     SCAN_TIMEOUT: "Scan Time Limit Reached",
 }
@@ -160,6 +179,7 @@ _RULE_RISKS: dict[str, RiskLevel] = {
     UNSCANNABLE_MEDIA: UnscannableMediaRule.default_risk,
     ARCHIVE_UNSUPPORTED: ArchiveUnsupportedRule.default_risk,
     INPUT_TOO_LARGE: InputTooLargeRule.default_risk,
+    UNSCANNABLE_PATH: UnscannablePathRule.default_risk,
     # MEDIUM: some obfuscated content could not be fully re-scanned, so a hidden
     # injection may have been missed — surfaced rather than silently dropped.
     RESCAN_INCOMPLETE: RiskLevel.medium,

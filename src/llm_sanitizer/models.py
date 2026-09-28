@@ -179,6 +179,11 @@ class DirScanResult(BaseModel):
     exclusions_specified: int = 0
     exclusion_names_matched: list[str] = Field(default_factory=list)
     dirs_pruned: int = 0
+    # Every path the walk did not silently accept (0.7.2): FIFOs/devices,
+    # symlinks escaping the root, unreadable files and directories — each also
+    # an `unscannable_path` finding — plus hardlinked files, processed and
+    # reported only. `{path, code, message}`; empty when nothing to report.
+    walk_issues: list[dict[str, str]] = Field(default_factory=list)
     # `summary` mirrors ScanResult.summary so a consumer can read
     # `result.summary.max_risk` / `.total_findings` uniformly across single-file
     # and directory scans (committee H3 — an agent that gated on summary.max_risk

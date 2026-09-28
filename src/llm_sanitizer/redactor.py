@@ -242,21 +242,6 @@ def _same(a: Path, b: Path) -> bool:
         return False
 
 
-def _within(inner: Path, outer: Path) -> bool:
-    """True when *inner* is *outer* or lies beneath it.
-
-    Compared by FILE IDENTITY on every existing ancestor, not by path string:
-    a string test calls `/x/src-out` a child of `/x/src`, and misses the same
-    directory reached through a symlink or with different case on a
-    case-insensitive filesystem. `inner` may not exist yet (an output about to
-    be created), so its missing tail is skipped and the nearest existing
-    ancestor is what gets compared.
-    """
-    candidate = inner.absolute()
-    for node in (candidate, *candidate.parents):
-        if _same(node, outer):
-            return True
-    return False
 
 
 def refuse_overlapping_output(source: str | Path, output: str | Path) -> None:
@@ -266,10 +251,12 @@ def refuse_overlapping_output(source: str | Path, output: str | Path) -> None:
     redacted text and reported success; output inside the source re-ingested
     its own earlier output on the next run; source inside the output let the
     mirror overwrite the input. Checked before anything is created or written.
-    Do not reduce this to a path-string comparison — see `_within`.
+    Do not reduce this to a path-string comparison — see `scanner.path_within`.
     """
+    from llm_sanitizer.scanner import path_within
+
     src, out = Path(source), Path(output)
-    if _within(out, src) or _within(src, out):
+    if path_within(out, src) or path_within(src, out):
         raise OutputOverlapError(
             f"output {output!s} overlaps source {source!s} (same directory, or "
             "one inside the other); refusing so the originals are not "
@@ -382,7 +369,13 @@ def redact_file_to(
     """
     from llm_sanitizer.scanner import _is_binary, read_scannable_content
 
+    from llm_sanitizer.scanner import admit_file
+
     src = Path(path)
+    # Admission BEFORE any open: a FIFO blocks forever on open (0.7.2).
+    issue = admit_file(src)
+    if issue is not None and issue.blocks:
+        return _refusal(str(path), issue.code, issue.message, "text")
     if _same(src, Path(output_path)):
         # Writing the redacted text over the input would destroy the original
         # (0.7.2 regression fix). A refusal, not an exception: no file written.

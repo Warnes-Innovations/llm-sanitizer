@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import stat
 import tempfile
 from dataclasses import dataclass
 import time
@@ -52,6 +53,7 @@ from llm_sanitizer.rules.integrity import (
     UNSCANNABLE_BINARY,
     UNSCANNABLE_MEDIA,
     make_integrity_finding,
+    UNSCANNABLE_PATH,
 )
 
 # Map sensitivity strings to minimum risk level to include in results
@@ -188,6 +190,184 @@ class ExclusionStats:
         )
 
 
+@dataclass(frozen=True)
+class WalkIssue:
+    """A path the walk met and did not silently accept.
+
+    `blocks` is True when the path's content was NOT examined (it becomes an
+    `unscannable_path` finding in a scan, a `refused` entry in a redaction);
+    False for paths that were processed but are worth reporting (`hardlinked`),
+    or that are duplicates of content walked elsewhere (`symlink-dir-inside-root`).
+    """
+
+    path: Path
+    code: str
+    message: str
+
+    _NON_BLOCKING = frozenset({"hardlinked", "symlink-dir-inside-root"})
+
+    @property
+    def blocks(self) -> bool:
+        return self.code not in self._NON_BLOCKING
+
+    def as_dict(self) -> dict[str, str]:
+        return {"path": str(self.path), "code": self.code, "message": self.message}
+
+
+def path_within(inner: Path, outer: Path) -> bool:
+    """True when *inner* is *outer* or lies beneath it, by FILE IDENTITY.
+
+    Every existing ancestor of *inner* is compared with `samefile`, so a
+    shared string prefix (`/x/src` vs `/x/src-out`), a symlinked alias, or a
+    case difference on a case-insensitive filesystem cannot fool it. A missing
+    tail of *inner* (an output about to be created) is skipped.
+    """
+    try:
+        if not outer.exists():
+            return False
+    except OSError:
+        return False
+    candidate = inner.absolute()
+    for node in (candidate, *candidate.parents):
+        try:
+            if node.exists() and node.samefile(outer):
+                return True
+        except OSError:
+            continue
+    return False
+
+
+def admit_file(path: Path, root: Path | None = None) -> WalkIssue | None:
+    """Decide whether *path* may be read, BEFORE anything opens it.
+
+    Opening a FIFO blocks forever, and following a symlink out of the tree
+    reads a file the caller never named — both measured on 0.7.1 (0.7.2 fix).
+    With *root* None (a file the caller named directly) the symlink-escape rule
+    does not apply: the caller chose that path. Returns a WalkIssue, or None
+    for an ordinary readable regular file.
+    """
+    try:
+        lst = path.lstat()
+    except FileNotFoundError:
+        # A path that does not exist is the CALLER's error (a typo), not a
+        # finding: re-raise so a named file keeps exiting 2. The walk catches
+        # this for a file that vanished between listing and admission.
+        raise
+    except OSError as exc:
+        return WalkIssue(path, "unreadable", f"could not stat: {exc.strerror or exc}")
+    if stat.S_ISLNK(lst.st_mode):
+        try:
+            target = path.resolve(strict=True)
+        except (OSError, RuntimeError) as exc:
+            return WalkIssue(path, "broken-symlink", f"symlink could not be resolved: {exc}")
+        if root is not None and not path_within(target, root):
+            return WalkIssue(
+                path, "symlink-outside-root",
+                f"symlink resolves outside the source root, to {target}; not read",
+            )
+    try:
+        st = path.stat()
+    except OSError as exc:
+        return WalkIssue(path, "unreadable", f"could not stat: {exc.strerror or exc}")
+    if not stat.S_ISREG(st.st_mode):
+        return WalkIssue(
+            path, "not-regular-file",
+            "not a regular file (FIFO, socket or device); opening it could block "
+            "or read an unbounded stream, so it was not read",
+        )
+    if not os.access(path, os.R_OK):
+        return WalkIssue(path, "unreadable", "permission denied")
+    if not stat.S_ISLNK(lst.st_mode) and st.st_nlink > 1:
+        return WalkIssue(
+            path, "hardlinked",
+            f"regular file with {st.st_nlink} hard links; processed, reported so "
+            "a caller can see content shared with paths outside this tree",
+        )
+    return None
+
+
+def walk_with_issues(
+    root: Path, glob_pattern: str = "**/*"
+) -> tuple[list[Path], ExclusionStats, list[WalkIssue]]:
+    """The one directory walk: admitted files, exclusion stats, and every path
+    that was NOT silently accepted.
+
+    Before 0.7.2 an unreadable directory (os.walk's default is to ignore the
+    error), a symlinked directory (not followed, not reported) and a FIFO
+    (opened later, blocking forever) all left no trace. Every such path now
+    produces a WalkIssue. Do not add a `continue` in here without one.
+    """
+    root_path = Path(root)
+    files: list[Path] = []
+    dir_issues: list[WalkIssue] = []
+    file_issues: list[WalkIssue] = []
+    matched: set[str] = set()
+    pruned = 0
+
+    def _on_error(err: OSError) -> None:
+        dir_issues.append(WalkIssue(
+            Path(err.filename or root_path), "unreadable-dir",
+            f"could not list directory: {err.strerror or err}; nothing beneath it was examined",
+        ))
+
+    for dirpath, dirnames, filenames in os.walk(root_path, onerror=_on_error):
+        keep = []
+        for d in dirnames:
+            if d in _EXCLUDED_DIR_NAMES:
+                matched.add(d)
+                pruned += 1
+                continue
+            dpath = Path(dirpath) / d
+            if dpath.is_symlink():
+                # Never descend through a link: a target inside the root is
+                # walked at its real path anyway, and one outside must not be.
+                try:
+                    target = dpath.resolve(strict=True)
+                except (OSError, RuntimeError) as exc:
+                    dir_issues.append(WalkIssue(dpath, "broken-symlink", f"symlink could not be resolved: {exc}"))
+                    continue
+                if path_within(target, root_path):
+                    dir_issues.append(WalkIssue(
+                        dpath, "symlink-dir-inside-root",
+                        f"symlinked directory not followed; its target {target} is inside the root and walked there",
+                    ))
+                else:
+                    dir_issues.append(WalkIssue(
+                        dpath, "symlink-outside-root",
+                        f"symlinked directory resolves outside the source root, to {target}; nothing beneath it was examined",
+                    ))
+                continue
+            keep.append(d)
+        dirnames[:] = keep
+        for name in filenames:
+            fpath = Path(dirpath) / name
+            try:
+                issue = admit_file(fpath, root_path)
+            except FileNotFoundError:
+                issue = WalkIssue(fpath, "unreadable", "vanished during the walk")
+            if issue is not None:
+                file_issues.append(issue)
+                if issue.blocks:
+                    continue
+            files.append(fpath)
+
+    if glob_pattern != "**/*":
+        # Same filter for admitted files and for FILE-level issues, so a glob
+        # never reports a path it would not have scanned. Directory-level
+        # issues are kept regardless: the glob cannot know what an unwalked
+        # directory held.
+        pattern = glob_pattern.lstrip("**/")
+        files = [p for p in files if fnmatch.fnmatch(p.name, pattern)]
+        file_issues = [i for i in file_issues if fnmatch.fnmatch(i.path.name, pattern)]
+    issues = dir_issues + file_issues
+    stats = ExclusionStats(
+        specified=len(_EXCLUDED_DIR_NAMES),
+        matched=frozenset(matched),
+        pruned_dirs=pruned,
+    )
+    return files, stats, issues
+
+
 def walk_scannable(
     root: Path, glob_pattern: str = "**/*"
 ) -> tuple[list[Path], ExclusionStats]:
@@ -198,29 +378,8 @@ def walk_scannable(
     assertions, and this package is released. A caller that wants the M0 report
     asks for it; every existing caller keeps its exact return type.
     """
-    files: list[Path] = []
-    matched: set[str] = set()
-    pruned = 0
-    for dirpath, dirnames, filenames in os.walk(root):
-        keep = []
-        for d in dirnames:
-            if d in _EXCLUDED_DIR_NAMES:
-                matched.add(d)
-                pruned += 1
-            else:
-                keep.append(d)
-        dirnames[:] = keep
-        for name in filenames:
-            files.append(Path(dirpath) / name)
-
-    if glob_pattern != "**/*":
-        files = [p for p in files if fnmatch.fnmatch(p.name, glob_pattern.lstrip("**/"))]
-    return files, ExclusionStats(
-        specified=len(_EXCLUDED_DIR_NAMES),
-        matched=frozenset(matched),
-        pruned_dirs=pruned,
-    )
-
+    files, stats, _ = walk_with_issues(root, glob_pattern)
+    return files, stats
 
 def iter_scannable_files(root: Path, glob_pattern: str = "**/*") -> list[Path]:
     """Recursively collect files under root for directory scan/redact
@@ -276,7 +435,8 @@ def _recognized_media_kind(path: Path) -> str | None:
 # pass silently, defeating the whole point of the finding.
 _INTEGRITY_RULE_IDS: frozenset[str] = frozenset(
     {TYPE_MISMATCH, CORRUPT_FILE, UNSCANNABLE_BINARY, UNSCANNABLE_MEDIA,
-     ARCHIVE_UNSUPPORTED, INPUT_TOO_LARGE, RESCAN_INCOMPLETE, SCAN_TIMEOUT}
+     ARCHIVE_UNSUPPORTED, INPUT_TOO_LARGE, RESCAN_INCOMPLETE, SCAN_TIMEOUT,
+     UNSCANNABLE_PATH}
 )
 
 
@@ -771,6 +931,14 @@ class Scanner:
         p = Path(path)
         src = source if source is not None else str(p)
 
+        # Admission BEFORE any open: a FIFO blocks forever on open (0.7.2).
+        issue = admit_file(p)
+        if issue is not None and issue.blocks:
+            return self._result_from_findings(
+                src, sensitivity,
+                [make_integrity_finding(UNSCANNABLE_PATH, src, issue.message)],
+            )
+
         if binary_mode == "extract" and self._should_handle_as_archive(p):
             findings = self._scan_node(p, src, sensitivity, depth=0, cumulative=0)
             return self._result_from_findings(src, sensitivity, findings)
@@ -1175,20 +1343,37 @@ class Scanner:
         results: list[ScanResult] = []
         files_skipped_binary = 0
 
-        files, exclusions = walk_scannable(root, glob_pattern)
+        files, exclusions, issues = walk_with_issues(root, glob_pattern)
+        # A path the walk refused was never examined: fail closed with a
+        # finding so max_risk cannot read "nothing found" over it (0.7.2).
+        unexamined: list[Finding] = [
+            make_integrity_finding(UNSCANNABLE_PATH, str(i.path), i.message)
+            for i in issues if i.blocks
+        ]
 
         for file_path in sorted(files):
             try:
                 result = self.scan_file(
                     file_path, sensitivity=sensitivity, binary_mode=binary_mode
                 )
-            except OSError:
+            except OSError as exc:
+                # Admitted, then failed to read. Was a bare `continue` — the
+                # file vanished from the result with no trace (0.7.2).
+                msg = f"could not read: {exc.strerror or exc}"
+                issues.append(WalkIssue(file_path, "unreadable", msg))
+                unexamined.append(
+                    make_integrity_finding(UNSCANNABLE_PATH, str(file_path), msg)
+                )
                 continue
             if result is None:
                 files_skipped_binary += 1
                 continue
             results.append(result)
 
+        if unexamined:
+            results.append(
+                self._result_from_findings(str(root), sensitivity, unexamined)
+            )
         all_findings = [f for r in results for f in r.findings]
         summary = _build_summary(all_findings)
 
@@ -1200,6 +1385,7 @@ class Scanner:
             exclusions_specified=exclusions.specified,
             exclusion_names_matched=sorted(exclusions.matched),
             dirs_pruned=exclusions.pruned_dirs,
+            walk_issues=[i.as_dict() for i in issues],
             summary=summary,
             total_findings=summary.total_findings,
             max_risk=summary.max_risk,
