@@ -23,7 +23,7 @@ from llm_sanitizer.server import redact_file
 
 pymupdf = pytest.importorskip("pymupdf", reason="needs the [pdf-redact] extra")
 
-from tests.test_pdf_in_place_redaction import INJECTION, build_pdf  # noqa: E402
+from tests.test_pdf_in_place_redaction import INJECTION, build_pdf
 
 # Deliberately DIFFERENT from the body injection, so it can never be removed
 # merely because it shares a needle with a body finding.

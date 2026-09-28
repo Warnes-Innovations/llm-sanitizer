@@ -423,10 +423,12 @@ def redact_dir(
         `{source, refusal_code, message}` for every input that produced no
         output.
     """
-    from llm_sanitizer.redactor import redact_file_to
-    from llm_sanitizer.scanner import ExtractorUnavailableError, WalkIssue, walk_with_issues
-
-    from llm_sanitizer.redactor import refuse_overlapping_output
+    from llm_sanitizer.redactor import redact_file_to, refuse_overlapping_output
+    from llm_sanitizer.scanner import (
+        ExtractorUnavailableError,
+        WalkIssue,
+        walk_with_issues,
+    )
 
     src_path = Path(path)
     dst_path = Path(output_dir)

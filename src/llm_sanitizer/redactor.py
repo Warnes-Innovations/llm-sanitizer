@@ -367,9 +367,7 @@ def redact_file_to(
         ExtractorUnavailableError: markitdown is required but absent. Allowed
             to propagate — a systemic coverage gap, not a per-file decision.
     """
-    from llm_sanitizer.scanner import _is_binary, read_scannable_content
-
-    from llm_sanitizer.scanner import admit_file
+    from llm_sanitizer.scanner import _is_binary, admit_file, read_scannable_content
 
     src = Path(path)
     # Admission BEFORE any open: a FIFO blocks forever on open (0.7.2).

@@ -32,7 +32,7 @@ SPLIT = (
 def _scan(path: Path) -> dict[str, object]:
     r = subprocess.run(
         [sys.executable, "-m", "llm_sanitizer.cli", "scan", str(path), "--format", "json"],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     return json.loads(r.stdout)["summary"]
 
@@ -64,10 +64,10 @@ def test_redacted_output_does_not_carry_the_hidden_payload(tmp_path: Path) -> No
     out = tmp_path / "out.md"
     r = subprocess.run(
         [sys.executable, "-m", "llm_sanitizer.cli", "redact", str(src), "-o", str(out)],
-        capture_output=True, text=True,
+        capture_output=True, text=True, check=False,
     )
     assert r.returncode == 0, r.stderr
     written = out.read_bytes()
     assert b"\xad" not in written, "raw splitter bytes were copied through"
-    decoded = written.decode("utf-8", "replace").replace("�", "")
+    decoded = written.decode("utf-8", "replace").replace("\ufffd", "")
     assert "ignore all previous" not in decoded.lower(), decoded

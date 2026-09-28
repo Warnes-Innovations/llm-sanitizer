@@ -117,6 +117,7 @@ dev = [
 	# RUNS tests/test_pdf_in_place_redaction.py instead of skipping it — an
 	# optional feature whose tests silently skip in CI is an untested feature.
 	"pymupdf>=1.24,<2",
+	"ruff>=0.6",
 ]
 
 [project.optional-dependencies]

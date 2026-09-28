@@ -29,6 +29,7 @@ def _cli(*args: str) -> subprocess.CompletedProcess[str]:
         [sys.executable, "-m", "llm_sanitizer.cli", *args],
         capture_output=True,
         text=True,
+        check=False,
     )
 
 

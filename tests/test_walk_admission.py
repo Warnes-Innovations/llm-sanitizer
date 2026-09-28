@@ -35,7 +35,7 @@ AS_ROOT = hasattr(os, "geteuid") and os.geteuid() == 0
 def _cli(*args: str, timeout: int = 30) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         [sys.executable, "-m", "llm_sanitizer.cli", *args],
-        capture_output=True, text=True, timeout=timeout,
+        capture_output=True, text=True, check=False, timeout=timeout,
     )
 
 

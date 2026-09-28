@@ -35,7 +35,7 @@ def _tar(tmp_path: Path) -> Path:
 def _scan(archive: Path, cwd: Path) -> dict[str, object]:
     r = subprocess.run(
         [sys.executable, "-m", "llm_sanitizer.cli", "scan", str(archive), "--format", "json"],
-        capture_output=True, text=True, cwd=cwd,
+        capture_output=True, text=True, check=False, cwd=cwd,
     )
     return json.loads(r.stdout)
 
