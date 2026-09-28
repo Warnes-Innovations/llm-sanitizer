@@ -251,6 +251,7 @@ def redact_pdf_in_place(
                 # the verification below proves it per call.
                 page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE)
 
+            _strip_unverified_carriers(doc)
             doc.save(str(candidate), garbage=4, deflate=True, clean=True)
         finally:
             doc.close()
@@ -280,6 +281,77 @@ def redact_pdf_in_place(
             candidate.unlink(missing_ok=True)
         except OSError:
             pass
+
+
+def _strip_unverified_carriers(doc: Any) -> None:
+    """Remove every place text can live that the page-text checks do not read.
+
+    REGRESSION (0.7.2): the rewrite cleaned the page content streams and
+    verified only page text and page streams, so a payload in the info title,
+    XMP, an embedded file, an annotation or an outline entry survived into a
+    rewrite reported ``ok``. The rewrite exists to give back the DOCUMENT; its
+    attachments and metadata are not part of that promise, and keeping them
+    unverified is what made "verified-clean" false. Stripped here, then
+    re-checked across the whole file by `_residue_anywhere`.
+    """
+    for i in reversed(range(doc.embfile_count())):
+        doc.embfile_del(i)
+    doc.set_metadata({})
+    doc.del_xml_metadata()
+    doc.set_toc([])
+    for pno in range(doc.page_count):
+        page = doc[pno]
+        for widget in list(page.widgets() or ()):
+            page.delete_widget(widget)
+        annot = page.first_annot
+        while annot is not None:
+            nxt = annot.next
+            page.delete_annot(annot)
+            annot = nxt
+
+
+def _residue_anywhere(doc: Any, needles: Sequence[str], *, sensitivity: str) -> str | None:
+    """Check EVERY object and decompressed stream, not only the page streams.
+
+    Two questions per object: does any needle appear in any encoding, and does
+    the object's text trip a rule on its own? The second is what catches a
+    payload that never became a needle — e.g. one that lives only in the title,
+    which the body-text scan that produced the findings never saw. Image
+    streams are skipped (binary pixels, not text); page content streams are
+    covered by the needle search and by the two extractor scans in `_verify`,
+    and are not rule-scanned raw because their operators are not prose.
+    """
+    from llm_sanitizer.scanner import Scanner
+
+    content_xrefs = {
+        xref for pno in range(doc.page_count) for xref in doc[pno].get_contents()
+    }
+    scanner = Scanner()
+    for xref in range(1, doc.xref_length()):
+        try:
+            source = doc.xref_object(xref, compressed=False)
+        except Exception:  # noqa: BLE001 — a free or broken slot holds nothing
+            continue
+        data = None
+        if doc.xref_is_stream(xref):
+            if "/Subtype /Image" in source or "/Subtype/Image" in source:
+                continue
+            try:
+                data = doc.xref_stream(xref)
+            except Exception:  # noqa: BLE001 — undecodable: cannot vouch for it
+                return f"object {xref} has a stream that could not be decoded, so it cannot be verified"
+        blob = source.encode("latin-1", "replace") + (data or b"")
+        for needle in needles:
+            if any(form in blob for form in _needle_byte_forms(needle)):
+                return f"a redacted fragment is still present in PDF object {xref}"
+        if xref in content_xrefs:
+            continue
+        text = blob.decode("latin-1")
+        if scanner.scan(
+            text, source=f"pdf-object-{xref}", sensitivity=sensitivity
+        ).summary.total_findings:
+            return f"PDF object {xref} (outside the page text) still trips a detection rule"
+    return None
 
 
 def _verify(candidate: Path, needles: Sequence[str], *, sensitivity: str) -> str | None:
@@ -326,5 +398,18 @@ def _verify(candidate: Path, needles: Sequence[str], *, sensitivity: str) -> str
     # 3. The decompressed content streams.
     if leftover_streams:
         return "a redacted fragment is still present in a decompressed content stream"
+
+    # 4. Every other object in the file — metadata, attachments, annotations,
+    # outlines, anything a future PyMuPDF keeps. Checks 1-3 read page text only.
+    try:
+        doc = pymupdf.open(str(candidate))
+        try:
+            residue = _residue_anywhere(doc, needles, sensitivity=sensitivity)
+        finally:
+            doc.close()
+    except Exception as exc:  # noqa: BLE001
+        return f"the whole-file check could not read the rewritten PDF: {exc}"
+    if residue is not None:
+        return residue
 
     return None
