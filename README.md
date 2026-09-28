@@ -61,10 +61,12 @@ uv pip install 'llm-sanitizer[pdf-redact]'
 A rewritten `<stem>.redacted.pdf` is written beside the text output, with the
 findings removed from the **content stream** — not a black rectangle drawn
 over them, which leaves the text in the file and is the classic failure of
-this category. It is published only after being verified clean three ways
-(the project's extractor, a second independent extractor, and a raw
-content-stream search); a rewrite that cannot be proved clean is deleted and
-reported as `refused`, and the redacted text output still stands.
+this category. The rewrite drops embedded files, document metadata,
+annotations, form fields and outlines. It is published only after four checks
+pass: the project's extractor, a second independent extractor, a raw
+content-stream search, and a whole-file check over every other object in the
+PDF. A rewrite that cannot be proved clean is deleted and reported as
+`refused`, and the redacted text output still stands.
 
 ## Installation
 

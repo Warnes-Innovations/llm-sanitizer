@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.2] — 2026-09-28
+
+> **Consumers pinning an immutable tag must bump the pin** (flow-guard pins `@vX.Y.Z`).
+> `uvx --refresh` cannot deliver these fixes to a tag-pinned consumer.
+
+### Security
+
+- **`redact <dir> -o <same dir>` destroyed the originals.** With the output equal to the
+  source, every file was overwritten with its redacted text, the run exited 0 and the
+  report said `status: ok`. An output inside the source, or a source inside the output,
+  was not refused either. All three are now refused before anything is created: the CLI
+  exits 2 and MCP `redact_dir` returns `status: "error"`. Overlap is decided by file
+  identity, so a symlinked alias or a case difference cannot slip past it. `redact_file`
+  also refuses an output path that is the source file itself.
+- **The in-place PDF rewrite could be reported "verified-clean" while still carrying the
+  payload.** Its checks read only page text and page content streams, so an injection in
+  the document title, an embedded file, an annotation or an outline survived into
+  `<stem>.redacted.pdf` under `binary_redaction: "ok"`. The rewrite now strips embedded
+  files, info and XMP metadata, annotations, form widgets and outlines, and a fourth
+  check reads every non-image object and stream in the file. It searches for each
+  redacted fragment in every encoding, and runs the rules over text outside the page
+  streams, so a payload the body scan never saw also blocks `"ok"`.
+- **`scan` silently stopped expanding an archive at the cumulative size budget.** Members
+  past `archive.max_cumulative_bytes` were dropped with no finding, so a payload in a
+  later member scanned `max_risk: null`. It now emits a critical `corrupt_file` finding
+  naming the member where expansion stopped. This only triggers with a non-default budget.
+- **A FIFO in the tree hung `scan` and `redact` forever.** Non-regular files (FIFOs,
+  sockets, devices) are now refused before anything opens them, both in a directory
+  walk and when named directly.
+- **Symlinks were followed out of the tree.** A symlinked file pointing outside the source
+  root was read and its target copied into the redacted output; a symlinked directory
+  was silently skipped. Symlinks, file or directory, are now followed only when the
+  target resolves inside the source root. Otherwise they are refused and reported.
+- **Unreadable files and directories vanished from `scan` and `redact` without a trace.**
+  They are now reported.
+- **An invalid byte inside each trigger word hid an injection.** A raw `0xAD` byte (a
+  soft hyphen in Latin-1) became U+FFFD on read, which no rule stripped. The file
+  scanned clean and was copied through byte-exact. U+FFFD is now a splitter for the
+  zero-width rule: stripped, re-scanned, and flagged only if that reveals an injection.
+  Innocent Latin-1 text stays clean.
+
+### Added
+
+- Integrity rule **`unscannable_path`** (critical): a path the walk could not examine,
+  such as a FIFO or device, a symlink escaping the root, a broken symlink, or an
+  unreadable file or directory. Like the other integrity rules it bypasses the
+  sensitivity filter.
+- **`walk_issues`** on `scan_dir` results and on MCP/CLI `redact_dir` responses, as
+  `[{path, code, message}]`. It lists every path the walk did not silently accept.
+  **Hardlinked files** are processed and listed here with code `hardlinked`, not refused.
+  They are common in backups and deduplicated trees, and neither git nor the archive
+  reader can deliver one.
+- `redact_dir`'s `refused` list now also carries walk refusals, with the refusal codes
+  `not-regular-file`, `symlink-outside-root`, `broken-symlink`, `unreadable` and
+  `unreadable-dir`.
+
 ## [0.7.1] — 2026-09-25
 
 ### Security (denial of service in the scanner's own regexes)

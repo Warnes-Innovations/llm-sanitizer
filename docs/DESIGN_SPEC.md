@@ -997,6 +997,18 @@ extractor for the format, extraction failed, a recognized archive, or
 `binary_mode="skip"` — is not written at all and is enumerated in the
 response's `refused` array with a reason.
 
+**Every path the walk meets is admitted, refused or reported (0.7.2).**
+FIFOs, sockets and devices are refused before anything opens them. Symlinks,
+file or directory, are followed only when the target resolves inside the source
+root. Unreadable files and directories are reported rather than skipped. Each
+refusal appears in `refused` and in `walk_issues`, and in a scan as a critical
+`unscannable_path` finding. Hardlinked files are processed and listed in
+`walk_issues` only.
+
+**An output directory that overlaps the source is refused (0.7.2)**, whether it
+is the same directory or one lies inside the other. The check runs before
+anything is created, and compares file identity rather than path strings.
+
 This trades the drop-in property for the guarantee that nothing the scanner
 could not read is handed onward under a successful status. The previous
 behaviour copied such files through, which meant a caller following the
