@@ -330,8 +330,11 @@ def _residue_anywhere(doc: Any, needles: Sequence[str], *, sensitivity: str) -> 
     for xref in range(1, doc.xref_length()):
         try:
             source = doc.xref_object(xref, compressed=False)
-        except Exception:  # noqa: BLE001 — a free or broken slot holds nothing
-            continue
+        except Exception as exc:  # noqa: BLE001
+            # An object the checker cannot read is one it cannot vouch for.
+            # Skipping it would make this verifier fail OPEN on exactly the
+            # objects a crafted file would hide a payload in.
+            return f"PDF object {xref} could not be read ({exc}), so it cannot be verified"
         data = None
         if doc.xref_is_stream(xref):
             if "/Subtype /Image" in source or "/Subtype/Image" in source:
