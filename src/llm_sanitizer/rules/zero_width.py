@@ -41,6 +41,14 @@ _ZERO_WIDTH_CODEPOINTS = [
     0x00AD,  # Soft Hyphen
     0x034F,  # Combining Grapheme Joiner
     0x180E,  # Mongolian Vowel Separator (formatting character)
+    # REPLACEMENT CHARACTER — not invisible in itself, but it is what an
+    # undecodable byte becomes when a file is read with errors="replace". A raw
+    # 0xAD byte (SOFT HYPHEN in Latin-1/cp1252) inside each trigger word
+    # arrives here as U+FFFD, and without this entry nothing stripped it, so the
+    # split payload scanned clean and was copied through byte-exact (0.7.2).
+    # Same contract as every entry above: flagged only if stripping reveals an
+    # injection, so an innocent Latin-1 file (café, naïve) stays clean.
+    0xFFFD,
 ]
 _ZERO_WIDTH_CHARS = [chr(cp) for cp in _ZERO_WIDTH_CODEPOINTS]
 
