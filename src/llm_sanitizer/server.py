@@ -426,10 +426,14 @@ def redact_dir(
     from llm_sanitizer.redactor import redact_file_to
     from llm_sanitizer.scanner import ExtractorUnavailableError, iter_scannable_files
 
+    from llm_sanitizer.redactor import refuse_overlapping_output
+
     src_path = Path(path)
     dst_path = Path(output_dir)
 
     try:
+        # BEFORE the mkdir — see redactor.refuse_overlapping_output.
+        refuse_overlapping_output(src_path, dst_path)
         dst_path.mkdir(parents=True, exist_ok=True)
         files_written: list[str] = []
         refused: list[dict[str, str | None]] = []

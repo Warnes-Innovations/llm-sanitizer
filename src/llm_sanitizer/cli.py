@@ -493,12 +493,15 @@ def _redact_dir(
     binary_mode: str = "extract",
     sensitivity: str = "medium",
 ) -> None:
-    from llm_sanitizer.redactor import redact_file_to
+    from llm_sanitizer.redactor import redact_file_to, refuse_overlapping_output
     from llm_sanitizer.scanner import Scanner, iter_scannable_files
 
     assert isinstance(scanner, Scanner)
     src_path = Path(src)
     dst_path = Path(dst)
+    # BEFORE the mkdir: an overlapping output must leave nothing behind.
+    # OutputOverlapError is a ValueError, so _cmd_redact exits 2.
+    refuse_overlapping_output(src_path, dst_path)
     dst_path.mkdir(parents=True, exist_ok=True)
     files_written: list[str] = []
     refused: list[dict[str, str | None]] = []
