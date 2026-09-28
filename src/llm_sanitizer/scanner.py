@@ -1075,7 +1075,22 @@ class Scanner:
             for name, data in members:
                 running += len(data)
                 if running > settings.max_cumulative_bytes:
-                    break  # cumulative bomb guard across nested levels
+                    # Cumulative bomb guard across nested levels. Fail closed
+                    # AND loud, like the per-archive guard above: the members
+                    # from here on are never examined, so a bare `break` made
+                    # an unexamined remainder read as "scanned clean" (0.7.2
+                    # regression fix). Do not turn this back into a silent stop.
+                    findings.append(
+                        make_integrity_finding(
+                            CORRUPT_FILE,
+                            source,
+                            f"Archive expansion stopped at member '{name}': the "
+                            f"cumulative uncompressed size exceeds the "
+                            f"{settings.max_cumulative_bytes}-byte budget. The "
+                            "remaining members were NOT scanned.",
+                        )
+                    )
+                    break
                 member_source = f"{source}::{name}"
                 with tempfile.NamedTemporaryFile(
                     suffix="_" + Path(name).name, delete=False
