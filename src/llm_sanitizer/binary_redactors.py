@@ -16,6 +16,7 @@ output path.
 from __future__ import annotations
 
 import importlib
+import re
 from collections.abc import Iterable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -175,9 +176,11 @@ def redact_pdf_in_place(
 ) -> BinaryRedaction:
     """Rewrite *src* to *dst* with every finding's text removed, or write nothing.
 
-    The rewrite is only ever published after passing THREE independent checks,
-    run against the candidate output. Any failure deletes the candidate and
-    returns ``refused``:
+    The rewrite is built from the redacted PAGES ONLY (a fresh document, so no
+    catalog-level carrier comes along), stripped of attachments, metadata,
+    annotations, form widgets and outlines, and published only after passing
+    FOUR independent checks run against the candidate output. Any failure
+    deletes the candidate and returns ``refused``:
 
     1. **The project's own pipeline** — markitdown extraction into `Scanner`,
        at the caller's sensitivity. Apples-to-apples with the scan that
@@ -190,6 +193,10 @@ def redact_pdf_in_place(
        every plausible encoding, and this check reports whether it had any
        POWER on this document rather than letting a vacuous negative pass for
        evidence.
+    4. **Every other object in the file** — each non-image object and stream,
+       with PDF string syntax decoded (hex, literal, UTF-16), searched for the
+       needles and run through the rules. Catches a payload the body scan never
+       saw.
 
     Never raises for an expected condition; returns a status instead, because
     the caller's fallback (write the redacted extracted text) is a normal
@@ -251,8 +258,17 @@ def redact_pdf_in_place(
                 # the verification below proves it per call.
                 page.apply_redactions(images=pymupdf.PDF_REDACT_IMAGE_NONE)
 
-            _strip_unverified_carriers(doc)
-            doc.save(str(candidate), garbage=4, deflate=True, clean=True)
+            # Publish PAGES ONLY: copy them into a fresh document so no
+            # catalog-level carrier (custom keys, the structure tree with its
+            # /Alt text, names/JavaScript, OpenAction) comes along — the strip
+            # list below cannot enumerate every such key (0.7.2 review).
+            fresh = pymupdf.open()
+            try:
+                fresh.insert_pdf(doc)
+                _strip_unverified_carriers(fresh)
+                fresh.save(str(candidate), garbage=4, deflate=True, clean=True)
+            finally:
+                fresh.close()
         finally:
             doc.close()
 
@@ -268,8 +284,9 @@ def redact_pdf_in_place(
         candidate.replace(dst)
         return BinaryRedaction(
             _OK,
-            "findings removed from the PDF content stream and verified absent "
-            "by re-extraction and a raw-stream check",
+            "findings removed from the PDF content stream; rebuilt from pages "
+            "only and verified absent by re-extraction, a raw-stream check and "
+            "a whole-file check",
             output_path=str(dst),
             stream_check="verified" if had_power else "no-power",
         )
@@ -310,6 +327,61 @@ def _strip_unverified_carriers(doc: Any) -> None:
             annot = nxt
 
 
+_HEX_STRING = re.compile(r"<([0-9A-Fa-f\s]+)>")
+_LITERAL_STRING = re.compile(r"\((?:[^()\\]|\\.)*\)", re.S)
+_LITERAL_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f",
+                    "(": "(", ")": ")", "\\": "\\"}
+
+
+def _pdf_string_text(raw: bytes) -> str:
+    if raw.startswith(b"\xfe\xff"):
+        return raw[2:].decode("utf-16-be", "replace")
+    if raw.startswith(b"\xff\xfe"):
+        return raw[2:].decode("utf-16-le", "replace")
+    return raw.decode("latin-1")
+
+
+def _decode_pdf_strings(syntax: str) -> str:
+    """The TEXT of every hex `<...>` and literal `(...)` string in *syntax*.
+
+    Best-effort and deliberately over-inclusive: it only feeds a check that
+    refuses, so decoding something that was not really a string costs at most a
+    spurious refusal, never a missed payload. `<<` dictionary brackets never
+    match the hex pattern (they contain `<`, not hex digits).
+    """
+    out: list[str] = []
+    for m in _HEX_STRING.finditer(syntax):
+        digits = re.sub(r"\s", "", m.group(1))
+        if len(digits) % 2:
+            digits += "0"
+        try:
+            out.append(_pdf_string_text(bytes.fromhex(digits)))
+        except ValueError:
+            continue
+    for m in _LITERAL_STRING.finditer(syntax):
+        body = m.group(0)[1:-1]
+        chars: list[str] = []
+        i = 0
+        while i < len(body):
+            c = body[i]
+            if c == "\\" and i + 1 < len(body):
+                nxt = body[i + 1]
+                if nxt in "01234567":
+                    j = i + 1
+                    while j < len(body) and j < i + 4 and body[j] in "01234567":
+                        j += 1
+                    chars.append(chr(int(body[i + 1:j], 8) & 0xFF))
+                    i = j
+                    continue
+                chars.append(_LITERAL_ESCAPES.get(nxt, nxt))
+                i += 2
+                continue
+            chars.append(c)
+            i += 1
+        out.append(_pdf_string_text("".join(chars).encode("latin-1", "replace")))
+    return "\n".join(out)
+
+
 def _residue_anywhere(doc: Any, needles: Sequence[str], *, sensitivity: str) -> str | None:
     """Check EVERY object and decompressed stream, not only the page streams.
 
@@ -337,19 +409,30 @@ def _residue_anywhere(doc: Any, needles: Sequence[str], *, sensitivity: str) -> 
             return f"PDF object {xref} could not be read ({exc}), so it cannot be verified"
         data = None
         if doc.xref_is_stream(xref):
-            if "/Subtype /Image" in source or "/Subtype/Image" in source:
+            # Read the KEY, never a substring of the dictionary's text: a stream
+            # whose dictionary merely CONTAINS "/Subtype /Image" (in a string,
+            # say) was skipped entirely (0.7.2 review).
+            if doc.xref_get_key(xref, "Subtype") == ("name", "/Image"):
                 continue
             try:
                 data = doc.xref_stream(xref)
             except Exception:  # noqa: BLE001 — undecodable: cannot vouch for it
                 return f"object {xref} has a stream that could not be decoded, so it cannot be verified"
-        blob = source.encode("latin-1", "replace") + (data or b"")
+        # Decode PDF string syntax too: `<FEFF...>` hex and `(...)` literals
+        # hold text the raw syntax does not show, and the rules must see the
+        # text, not its encoding (0.7.2 review).
+        decoded = _decode_pdf_strings(source + (data or b"").decode("latin-1"))
+        blob = (
+            source.encode("latin-1", "replace")
+            + (data or b"")
+            + decoded.encode("utf-8", "replace")
+        )
         for needle in needles:
             if any(form in blob for form in _needle_byte_forms(needle)):
                 return f"a redacted fragment is still present in PDF object {xref}"
         if xref in content_xrefs:
             continue
-        text = blob.decode("latin-1")
+        text = blob.decode("latin-1") + "\n" + decoded
         if scanner.scan(
             text, source=f"pdf-object-{xref}", sensitivity=sensitivity
         ).summary.total_findings:

@@ -119,12 +119,17 @@ def test_unknown_carrier_is_caught_by_the_whole_file_check(tmp_path: Path) -> No
     Without this, `_strip_unverified_carriers` alone makes the tests above pass
     and the whole-file check (`_residue_anywhere`) is never observed firing.
     """
+    # An UNDRAWN Form XObject in the page's own resources: it survives the
+    # pages-only rebuild (a catalog-level carrier would not), so only the
+    # whole-file check stands between it and an "ok".
     src = tmp_path / "in.pdf"
     build_pdf(src)
     doc = pymupdf.open(str(src))
     xref = doc.get_new_xref()
-    doc.update_object(xref, f"<< /Note ({SIDE}) >>")
-    doc.xref_set_key(doc.pdf_catalog(), "CustomData", f"{xref} 0 R")
+    doc.update_object(xref, "<< /Type /XObject /Subtype /Form /BBox [0 0 10 10] >>")
+    doc.update_stream(xref, f"BT ({SIDE}) Tj ET".encode())
+    res_xref = int(doc.xref_get_key(doc[0].xref, "Resources")[1].split()[0])
+    doc.xref_set_key(res_xref, "XObject/FxHidden", f"{xref} 0 R")
     tmp = src.with_suffix(".tmp.pdf")
     doc.save(str(tmp), garbage=4, deflate=True)
     doc.close()
@@ -132,8 +137,12 @@ def test_unknown_carrier_is_caught_by_the_whole_file_check(tmp_path: Path) -> No
     assert anywhere_in_file(src, SIDE), "fixture must carry the payload"
     payload = json.loads(redact_file(str(src), str(tmp_path / "out.txt")))
     rewrite = payload.get("redacted_binary_path")
-    assert rewrite is None or not anywhere_in_file(Path(rewrite), SIDE), payload
-    assert payload["binary_redaction"] != "ok", payload
+    # The property: an "ok" rewrite never carries the payload. (The pages-only
+    # rebuild plus `clean=True` drops this undrawn XObject, so "ok" with a
+    # clean file is correct; the whole-file check itself is pinned directly by
+    # the TestResidueCheck unit tests below.)
+    if payload["binary_redaction"] == "ok":
+        assert rewrite and not anywhere_in_file(Path(rewrite), SIDE), payload
 
 
 def test_known_carriers_are_stripped_so_the_rewrite_is_still_delivered(tmp_path: Path) -> None:
@@ -145,3 +154,117 @@ def test_known_carriers_are_stripped_so_the_rewrite_is_still_delivered(tmp_path:
     payload = json.loads(redact_file(str(src), str(tmp_path / "out.txt")))
     assert payload["binary_redaction"] == "ok", payload
     assert payload["redacted_binary_path"], payload
+
+
+def _with_catalog_object(path: Path, obj: str, *, stream: bytes | None = None) -> None:
+    doc = pymupdf.open(str(path))
+    xref = doc.get_new_xref()
+    doc.update_object(xref, obj)
+    if stream is not None:
+        doc.update_stream(xref, stream)
+    doc.xref_set_key(doc.pdf_catalog(), "CustomData", f"{xref} 0 R")
+    tmp = path.with_suffix(".tmp.pdf")
+    doc.save(str(tmp), garbage=4, deflate=True)
+    doc.close()
+    tmp.replace(path)
+
+
+def _never_ok_with_payload(src: Path, tmp_path: Path) -> None:
+    assert anywhere_in_file(src, SIDE), "fixture must carry the payload"
+    payload = json.loads(redact_file(str(src), str(tmp_path / "out.txt")))
+    rewrite = payload.get("redacted_binary_path")
+    if payload["binary_redaction"] == "ok":
+        assert rewrite and not anywhere_in_file(Path(rewrite), SIDE), payload
+
+
+def test_utf16_hex_string_payload_is_caught(tmp_path: Path) -> None:
+    """Review pass 2: the whole-file check read raw syntax, so a UTF-16 hex
+    string `<FEFF...>` never matched a rule."""
+    src = tmp_path / "in.pdf"
+    build_pdf(src)
+    hexed = ("﻿" + SIDE).encode("utf-16-be").hex().upper()
+    _with_catalog_object(src, f"<< /Note <{hexed}> >>")
+    _never_ok_with_payload(src, tmp_path)
+
+
+def test_fake_image_stream_is_not_skipped(tmp_path: Path) -> None:
+    """Review pass 2: a substring test for '/Subtype /Image' skipped any stream
+    whose dictionary merely CONTAINED that text."""
+    src = tmp_path / "in.pdf"
+    build_pdf(src)
+    _with_catalog_object(src, "<< /Note (/Subtype /Image) /Length 0 >>", stream=SIDE.encode())
+    _never_ok_with_payload(src, tmp_path)
+
+
+def test_tagged_pdf_alt_text_is_not_published(tmp_path: Path) -> None:
+    src = tmp_path / "in.pdf"
+    build_pdf(src)
+    doc = pymupdf.open(str(src))
+    elem = doc.get_new_xref()
+    doc.update_object(elem, f"<< /Type /StructElem /S /Figure /Alt ({SIDE}) >>")
+    root = doc.get_new_xref()
+    doc.update_object(root, f"<< /Type /StructTreeRoot /K {elem} 0 R >>")
+    doc.xref_set_key(doc.pdf_catalog(), "StructTreeRoot", f"{root} 0 R")
+    tmp = src.with_suffix(".tmp.pdf")
+    doc.save(str(tmp), garbage=4, deflate=True)
+    doc.close()
+    tmp.replace(src)
+    _never_ok_with_payload(src, tmp_path)
+
+
+class TestResidueCheck:
+    """`_residue_anywhere` on crafted documents, directly.
+
+    After the pages-only rebuild no end-to-end fixture reliably reaches this
+    layer, so without these a regression in it would go unseen.
+    """
+
+    @staticmethod
+    def _doc_with(obj: str, stream: bytes | None = None) -> object:
+        doc = pymupdf.open()
+        doc.new_page()
+        xref = doc.get_new_xref()
+        doc.update_object(xref, obj)
+        if stream is not None:
+            doc.update_stream(xref, stream)
+        doc.xref_set_key(doc.pdf_catalog(), "CustomData", f"{xref} 0 R")
+        return doc
+
+    def _residue(self, doc: object) -> str | None:
+        from llm_sanitizer.binary_redactors import _residue_anywhere
+
+        return _residue_anywhere(doc, [], sensitivity="medium")
+
+    def test_control_clean_document_passes(self) -> None:
+        assert self._residue(self._doc_with("<< /Note (quarterly figures) >>")) is None
+
+    def test_literal_string_payload_is_caught(self) -> None:
+        assert self._residue(self._doc_with(f"<< /Note ({SIDE}) >>")) is not None
+
+    def test_utf16_hex_string_payload_is_caught(self) -> None:
+        hexed = ("\ufeff" + SIDE).encode("utf-16-be").hex().upper()
+        assert self._residue(self._doc_with(f"<< /Note <{hexed}> >>")) is not None
+
+    def test_stream_merely_mentioning_image_is_still_checked(self) -> None:
+        doc = self._doc_with("<< /Note (/Subtype /Image) >>", stream=SIDE.encode())
+        assert self._residue(doc) is not None
+
+    def test_real_image_stream_is_skipped(self) -> None:
+        """Control for the structural test: genuine pixel data is not text."""
+        doc = self._doc_with(
+            "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
+            "/ColorSpace /DeviceGray /BitsPerComponent 8 >>",
+            stream=SIDE.encode(),
+        )
+        assert self._residue(doc) is None
+
+    def test_verify_runs_the_whole_file_check(self, tmp_path: Path) -> None:
+        """`_verify` must CALL the whole-file check: a candidate whose page text
+        is clean but which carries a catalog-level payload must be refused."""
+        from llm_sanitizer.binary_redactors import _verify
+
+        doc = self._doc_with(f"<< /Note ({SIDE}) >>")
+        candidate = tmp_path / "candidate.pdf"
+        doc.save(str(candidate))  # type: ignore[attr-defined]
+        verdict = _verify(candidate, ["quarterly"], sensitivity="medium")
+        assert verdict is not None, "whole-file check was not run by _verify"
