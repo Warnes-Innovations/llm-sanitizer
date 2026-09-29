@@ -75,12 +75,22 @@ LEGITIMATE_FILE_PATTERNS: list[str] = [
 ]
 
 
+def _strip_dot_slash(path: str) -> str:
+    while path.startswith("./"):
+        path = path[2:]
+    return path
+
+
 def is_legitimate_file(path: str) -> bool:
     """Return True if the given path matches a known legitimate AI instruction file."""
-    # Normalise path separators
-    normalised = path.replace("\\", "/").lstrip("./")
+    # Normalise path separators, then drop leading "./" SEGMENTS only.
+    # NOT lstrip("./"): that strips the CHARACTERS "." and "/", so ".cursorrules"
+    # and the undotted lookalike "cursorrules" normalised identically and the
+    # lookalike passed as a legitimate file — fail-open on an allowlist
+    # (0.7.1 defect, fixed in 0.7.2).
+    normalised = _strip_dot_slash(path.replace("\\", "/"))
     for pattern in LEGITIMATE_FILE_PATTERNS:
-        pat = pattern.lstrip("./")
+        pat = _strip_dot_slash(pattern)
         if fnmatch.fnmatch(normalised, pat):
             return True
         # Also try matching the basename for simple filenames
