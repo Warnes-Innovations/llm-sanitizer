@@ -205,21 +205,88 @@ def redact_content(
     # "placeholder" belongs with "strip", not with the marker modes: the
     # matched text is gone (replaced by block characters), so the loop
     # converges, and a layered attack needs the same peeling.
-    if mode in ("strip", "placeholder"):
+    rescans = mode in ("strip", "placeholder")
+    # CONVERGED MEANS A RE-SCAN CAME BACK EMPTY — nothing weaker. 0.7.1 also
+    # stopped when the text merely stopped CHANGING, or when the pass budget ran
+    # out, and returned the result as if clean. A finding redaction cannot
+    # anchor (homoglyph's normalised span never occurs in the original) leaves
+    # the text unchanged AND the payload in place (0.7.2 fix, ported from the
+    # redesign branch).
+    converged = not first_result.findings
+    if not rescans:
+        # Single-pass modes keep the matched text as a marker, so a re-scan
+        # always re-detects it and cannot be the test. Ask instead whether
+        # each finding could be placed at its own location; one that could
+        # not was never acted on.
+        converged = not [
+            f for f in first_result.findings
+            if f.matched_raw and f.location.line != 0
+            and _finding_offset(content, f) is None
+        ]
+    else:
+        original = content
         for _ in range(max_passes - 1):
             if current == content:
-                break
+                break  # stable is NOT clean — fall through to the residual scan
             content = current
             next_result = scan_text(current, source=source, sensitivity=sensitivity)
             if not next_result.findings:
+                converged = True
                 break
             all_findings.extend(next_result.findings)
             current = redact(current, next_result, mode=mode)
+        content = original
+
+    if not converged:
+        from llm_sanitizer.rules.integrity import (
+            INPUT_TOO_LARGE,
+            RESCAN_INCOMPLETE,
+            SCAN_TIMEOUT,
+            make_integrity_finding,
+        )
+
+        residual = scan_text(current, source=source, sensitivity=sensitivity)
+        # A PATH-anchored finding (line 0, matched == source: the
+        # legitimate-file marker, most integrity facts) describes the file and
+        # has nothing in the text to remove; counting it as residue would call
+        # every clean CLAUDE.md unsanitised. The budget refusals are the
+        # exception — they mean the text was never fully examined.
+        incomplete = {INPUT_TOO_LARGE, SCAN_TIMEOUT, RESCAN_INCOMPLETE}
+        actionable = [
+            f for f in residual.findings
+            if not (f.location.line == 0 and f.matched == source)
+            or f.rule in incomplete
+        ]
+        if actionable:
+            if rescans:
+                all_findings.extend(actionable)
+            all_findings.append(
+                make_integrity_finding(
+                    RESCAN_INCOMPLETE,
+                    source,
+                    f"Redaction did not converge: {len(actionable)} finding(s) "
+                    "REMAIN IN THE OUTPUT. The written content is not clean; do "
+                    "not treat it as sanitised.",
+                    finding_id=len(all_findings) + 1,
+                )
+            )
 
     combined = first_result.model_copy(
         update={"findings": all_findings, "summary": _build_summary(all_findings)}
     )
     return current, combined
+
+
+NOT_CONVERGED_MESSAGE = (
+    "redaction did not converge: the redacted text still contains at least one "
+    "finding (e.g. an injection that could not be located in the original "
+    "text), so no output was written. Inspect it with the scan tools."
+)
+
+
+def not_converged(result: ScanResult) -> bool:
+    """True when `redact_content` reported that its output is not clean."""
+    return "rescan_incomplete" in result.summary.rules_triggered
 
 
 # --- File-level redaction policy (issue #51) ---------------------------------
@@ -472,6 +539,13 @@ def redact_file_to(
     clean, result = redact_content(
         content, mode=mode, source=str(path), sensitivity=sensitivity
     )
+    if not_converged(result):
+        # The output would still carry a finding. Write NOTHING: an output
+        # file's existence is read downstream as "sanitised" (#51), so an
+        # unclean one is worse than none (Dr. Greg, 2026-09-28).
+        return _refusal(
+            str(path), "not-converged", NOT_CONVERGED_MESSAGE, original_format
+        )
     findings = result.summary.total_findings
 
     if skip_clean and findings == 0:

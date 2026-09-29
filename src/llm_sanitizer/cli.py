@@ -390,7 +390,11 @@ def _cmd_scan(args: argparse.Namespace) -> None:
 
 
 def _cmd_redact(args: argparse.Namespace) -> None:
-    from llm_sanitizer.redactor import redact_content
+    from llm_sanitizer.redactor import (
+        NOT_CONVERGED_MESSAGE,
+        not_converged,
+        redact_content,
+    )
     from llm_sanitizer.scanner import ExtractorUnavailableError, Scanner
 
     scanner = Scanner()
@@ -423,6 +427,10 @@ def _cmd_redact(args: argparse.Namespace) -> None:
             redacted, scan_result = redact_content(
                 content, mode=args.mode, source=source, sensitivity=sensitivity
             )
+            if not_converged(scan_result):
+                # Print and write NOTHING: the text still carries a finding.
+                print(f"[llm-sanitize] Refused: {NOT_CONVERGED_MESSAGE}", file=sys.stderr)
+                sys.exit(3)
             if output == "-":
                 print(redacted, end="")
             else:

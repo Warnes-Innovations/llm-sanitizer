@@ -211,14 +211,22 @@ def redact(content: str, mode: str = "strip", sensitivity: str = "medium") -> st
         (committee H4). (Previously the error path returned a JSON string that a
         caller could not distinguish from cleaned content.)
     """
-    from llm_sanitizer.redactor import redact_content
+    from llm_sanitizer.redactor import (
+        NOT_CONVERGED_MESSAGE,
+        not_converged,
+        redact_content,
+    )
 
     # Let ValueError propagate: MCPServer returns it as an MCP error response,
     # which is distinguishable from a successful text return. Do NOT catch it
     # and return a look-alike JSON string.
-    clean, _ = redact_content(
+    clean, result = redact_content(
         content, mode=mode, source="<inline>", sensitivity=sensitivity
     )
+    if not_converged(result):
+        # This tool returns BARE TEXT, so it has no field to say "not clean":
+        # raising is the only way not to hand back the payload as sanitised.
+        raise ValueError(NOT_CONVERGED_MESSAGE)
     return clean
 
 
@@ -332,7 +340,11 @@ def redact_url(url: str, output_path: str, mode: str = "strip", sensitivity: str
     """
     from llm_sanitizer.readers.url_reader import FetchBlockedError
     from llm_sanitizer.readers.url_reader import read_url as _read_url
-    from llm_sanitizer.redactor import redact_content
+    from llm_sanitizer.redactor import (
+        NOT_CONVERGED_MESSAGE,
+        not_converged,
+        redact_content,
+    )
 
     try:
         content = _read_url(url)
@@ -357,6 +369,17 @@ def redact_url(url: str, output_path: str, mode: str = "strip", sensitivity: str
         clean, result = redact_content(
             content, mode=mode, source=url, sensitivity=sensitivity
         )
+        if not_converged(result):
+            # Same contract as redact_file: an unclean output is worse than
+            # none, so nothing is written (0.7.2).
+            return json.dumps({
+                "status": "error",
+                "error_type": "unredactable",
+                "refusal_code": "not-converged",
+                "source": url,
+                "output_written": False,
+                "message": NOT_CONVERGED_MESSAGE,
+            })
         Path(output_path).write_text(clean, encoding="utf-8")
         return json.dumps({
             "status": "ok",
