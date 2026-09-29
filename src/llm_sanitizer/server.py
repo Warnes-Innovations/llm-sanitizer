@@ -341,9 +341,10 @@ def redact_url(url: str, output_path: str, mode: str = "strip", sensitivity: str
     from llm_sanitizer.readers.url_reader import FetchBlockedError
     from llm_sanitizer.readers.url_reader import read_url as _read_url
     from llm_sanitizer.redactor import (
-        NOT_CONVERGED_MESSAGE,
         not_converged,
+        publish_text,
         redact_content,
+        refusal_for,
     )
 
     try:
@@ -372,15 +373,16 @@ def redact_url(url: str, output_path: str, mode: str = "strip", sensitivity: str
         if not_converged(result):
             # Same contract as redact_file: an unclean output is worse than
             # none, so nothing is written (0.7.2).
+            code, message = refusal_for(result)
             return json.dumps({
                 "status": "error",
                 "error_type": "unredactable",
-                "refusal_code": "not-converged",
+                "refusal_code": code,
                 "source": url,
                 "output_written": False,
-                "message": NOT_CONVERGED_MESSAGE,
+                "message": message,
             })
-        Path(output_path).write_text(clean, encoding="utf-8")
+        publish_text(output_path, clean)
         return json.dumps({
             "status": "ok",
             "source": url,
@@ -486,6 +488,7 @@ def redact_dir(
                     sensitivity=sensitivity,
                     text_suffix_for_binary=True,
                     source_root=src_path,
+                    output_root=dst_path,
                 )
             except OSError as exc:
                 # Was a bare `continue`: the file vanished from the output AND

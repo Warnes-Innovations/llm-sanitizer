@@ -391,9 +391,10 @@ def _cmd_scan(args: argparse.Namespace) -> None:
 
 def _cmd_redact(args: argparse.Namespace) -> None:
     from llm_sanitizer.redactor import (
-        NOT_CONVERGED_MESSAGE,
         not_converged,
+        publish_text,
         redact_content,
+        refusal_for,
     )
     from llm_sanitizer.scanner import ExtractorUnavailableError, Scanner
 
@@ -429,12 +430,12 @@ def _cmd_redact(args: argparse.Namespace) -> None:
             )
             if not_converged(scan_result):
                 # Print and write NOTHING: the text still carries a finding.
-                print(f"[llm-sanitize] Refused: {NOT_CONVERGED_MESSAGE}", file=sys.stderr)
+                print(f"[llm-sanitize] Refused: {refusal_for(scan_result)[1]}", file=sys.stderr)
                 sys.exit(3)
             if output == "-":
                 print(redacted, end="")
             else:
-                Path(output).write_text(redacted, encoding="utf-8")
+                publish_text(output, redacted)
                 print(
                     f"[llm-sanitize] Redacted "
                     f"{scan_result.summary.total_findings} finding(s) → {output}"
@@ -542,6 +543,7 @@ def _redact_dir(
                 text_suffix_for_binary=True,
                 skip_clean=affected_only,
                 source_root=src_path,
+                output_root=dst_path,
             )
         except OSError as exc:
             # Was a bare `continue`: the file vanished from the output AND
@@ -597,6 +599,8 @@ def _cmd_merge(args: argparse.Namespace) -> None:
     each loaded result's `source` is overridden to CURRENT_PATH before it's
     included in the report.
     """
+    from llm_sanitizer.scanner import require_admitted
+
     from llm_sanitizer.formatters import format_output
     from llm_sanitizer.models import DirScanResult, RiskLevel, ScanResult
 
@@ -604,6 +608,9 @@ def _cmd_merge(args: argparse.Namespace) -> None:
         manifest_text = sys.stdin.read()
     else:
         try:
+            # Admission before the open: a FIFO here blocked `merge` forever
+            # (0.7.2 review). PathNotAdmittedError is an OSError -> exit 2.
+            require_admitted(Path(args.manifest))
             manifest_text = Path(args.manifest).read_text(encoding="utf-8")
         except OSError as exc:
             print(f"[llm-sanitize] Error: {exc}", file=sys.stderr)
@@ -624,6 +631,7 @@ def _cmd_merge(args: argparse.Namespace) -> None:
             sys.exit(2)
         json_path, current_path = parts
         try:
+            require_admitted(Path(json_path))
             data = json.loads(Path(json_path).read_text(encoding="utf-8"))
             # `scan --format json` renders risk levels as human-readable
             # names (via model_dump_json_friendly) rather than the raw

@@ -8,6 +8,8 @@ from __future__ import annotations
 import os
 import secrets
 import shutil
+import stat
+import tempfile
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -218,10 +220,20 @@ def redact_content(
         # always re-detects it and cannot be the test. Ask instead whether
         # each finding could be placed at its own location; one that could
         # not was never acted on.
+        # And a budget refusal (input_too_large, scan_timeout, the scanner's own
+        # rescan_incomplete) means the text was never fully examined, which no
+        # marker can fix — strip mode already treated these as residue; the
+        # marker modes wrote the file with exit 0 (0.7.2 review, pass 2).
+        from llm_sanitizer.rules import integrity
+
+        never_examined = {
+            integrity.INPUT_TOO_LARGE, integrity.SCAN_TIMEOUT, integrity.RESCAN_INCOMPLETE,
+        }
         converged = not [
             f for f in first_result.findings
-            if f.matched_raw and f.location.line != 0
-            and _finding_offset(content, f) is None
+            if (f.matched_raw and f.location.line != 0
+                and _finding_offset(content, f) is None)
+            or f.rule in never_examined
         ]
     else:
         original = content
@@ -277,6 +289,20 @@ def redact_content(
     return current, combined
 
 
+NOT_FULLY_SCANNED_MESSAGE = (
+    "the content was not fully scanned (it exceeded the scan size or time "
+    "budget), so it cannot be verified clean and no output was written."
+)
+
+
+def refusal_for(result: ScanResult) -> tuple[str, str]:
+    """(refusal_code, message) for an unclean result, naming the real cause."""
+    triggered = set(result.summary.rules_triggered)
+    if triggered & {"input_too_large", "scan_timeout"}:
+        return "not-fully-scanned", NOT_FULLY_SCANNED_MESSAGE
+    return "not-converged", NOT_CONVERGED_MESSAGE
+
+
 NOT_CONVERGED_MESSAGE = (
     "redaction did not converge: the redacted text still contains at least one "
     "finding (e.g. an injection that could not be located in the original "
@@ -314,7 +340,7 @@ def _same(a: Path, b: Path) -> bool:
 
 
 def _output_refusal(
-    src: Path, out: Path, source_root: Path | None
+    src: Path, out: Path, source_root: Path | None, output_root: Path | None = None
 ) -> RedactedFile | None:
     """Refuse an output that would land on the source, judged on the RESOLVED path.
 
@@ -342,7 +368,27 @@ def _output_refusal(
             "refusing to write into the input",
             "text",
         )
+    if output_root is not None and not path_within(resolved, output_root):
+        # A directory symlink planted in the output tree resolved this write
+        # somewhere else entirely — it overwrote an unrelated file (0.7.2
+        # review, pass 2). A mirror entry must stay inside the mirror.
+        return _refusal(
+            str(src), "output-escapes-root",
+            f"output {out!s} resolves to {resolved}, outside the output "
+            "directory; refusing to write there",
+            "text",
+        )
     return None
+
+
+def publish_text(out: str | Path, text: str) -> None:
+    """Write *text* to *out* the same way every redact output is written.
+
+    For writers that have no source file (stdin, a URL): they still must not
+    write THROUGH a link or into a FIFO sitting at the output path (0.7.2
+    review, pass 2 — both did).
+    """
+    _publish(Path(out), lambda tmp: tmp.write_text(text, encoding="utf-8"))
 
 
 def _publish(out: Path, write: Callable[[Path], object]) -> None:
@@ -447,6 +493,7 @@ def redact_file_to(
     text_suffix_for_binary: bool = False,
     skip_clean: bool = False,
     source_root: Path | None = None,
+    output_root: Path | None = None,
 ) -> RedactedFile:
     """Redact one file to *output_path*, never writing unredacted binary.
 
@@ -490,8 +537,6 @@ def redact_file_to(
             to propagate — a systemic coverage gap, not a per-file decision.
     """
     from llm_sanitizer.scanner import (
-        _is_binary,
-        read_scannable_content,
         require_admitted,
     )
 
@@ -501,7 +546,7 @@ def redact_file_to(
     # loop records the file as refused. `source_root` re-applies the walk's
     # symlink-escape rule to a file swapped after the walk admitted it.
     require_admitted(src, source_root)
-    refusal = _output_refusal(src, Path(output_path), source_root)
+    refusal = _output_refusal(src, Path(output_path), source_root, output_root)
     if refusal is not None:
         return refusal
     if _same(src, Path(output_path)):
@@ -514,10 +559,71 @@ def redact_file_to(
             "to overwrite the original",
             "text",
         )
-    is_binary_content = binary_mode != "text" and _is_binary(src)
+    # PUBLISH WHAT WAS SCANNED. Everything below reads one private snapshot
+    # of the source, taken right after admission: re-opening the source to
+    # copy or rewrite it published whatever was there by then, which a swap
+    # after the scan made unscanned bytes (0.7.2 review, pass 2).
+    snapdir = Path(tempfile.mkdtemp(prefix="llm-sanitizer-snap-"))
+    try:
+        snap = snapdir / src.name
+        _snapshot(src, snap)
+        return _redact_snapshot(
+            path, src, snap, Path(output_path),
+            mode=mode, binary_mode=binary_mode, sensitivity=sensitivity,
+            text_suffix_for_binary=text_suffix_for_binary, skip_clean=skip_clean,
+            source_root=source_root, output_root=output_root,
+        )
+    finally:
+        shutil.rmtree(snapdir, ignore_errors=True)
+
+
+def _snapshot(src: Path, snap: Path) -> None:
+    """Copy *src* to *snap* through ONE descriptor, checked after opening.
+
+    O_NONBLOCK so a file swapped for a FIFO after admission cannot block the
+    open, and `fstat` on the descriptor itself — not the path — so the check
+    describes the file actually being read.
+    """
+    from llm_sanitizer.scanner import PathNotAdmittedError, WalkIssue
+
+    fd = os.open(src, os.O_RDONLY | os.O_NONBLOCK)
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise PathNotAdmittedError(WalkIssue(
+                src, "not-regular-file",
+                "not a regular file when opened (changed after admission); not read",
+            ))
+        with os.fdopen(fd, "rb", closefd=False) as fin, open(snap, "wb") as fout:
+            shutil.copyfileobj(fin, fout)
+    finally:
+        os.close(fd)
+    shutil.copystat(src, snap)
+
+
+def _redact_snapshot(
+    path: str | Path,
+    src: Path,
+    snap: Path,
+    output_path: Path,
+    *,
+    mode: str,
+    binary_mode: str,
+    sensitivity: str,
+    text_suffix_for_binary: bool,
+    skip_clean: bool,
+    source_root: Path | None,
+    output_root: Path | None,
+) -> RedactedFile:
+    """The body of `redact_file_to`, reading only the snapshot *snap*.
+
+    *src* is the real source, used only for identity checks against outputs.
+    """
+    from llm_sanitizer.scanner import _is_binary, read_scannable_content
+
+    is_binary_content = binary_mode != "text" and _is_binary(snap)
     original_format = "binary" if is_binary_content else "text"
 
-    content = read_scannable_content(src, binary_mode=binary_mode)
+    content = read_scannable_content(snap, binary_mode=binary_mode)
     if content is None:
         if binary_mode == "skip":
             return _refusal(
@@ -543,9 +649,8 @@ def redact_file_to(
         # The output would still carry a finding. Write NOTHING: an output
         # file's existence is read downstream as "sanitised" (#51), so an
         # unclean one is worse than none (Dr. Greg, 2026-09-28).
-        return _refusal(
-            str(path), "not-converged", NOT_CONVERGED_MESSAGE, original_format
-        )
+        code, message = refusal_for(result)
+        return _refusal(str(path), code, message, original_format)
     findings = result.summary.total_findings
 
     if skip_clean and findings == 0:
@@ -576,7 +681,7 @@ def redact_file_to(
     out.parent.mkdir(parents=True, exist_ok=True)
     # AGAIN, on the FINAL path, after mkdir and the suffix: the check above ran
     # on the requested path, and the path actually written can differ.
-    refusal = _output_refusal(src, out, source_root)
+    refusal = _output_refusal(src, out, source_root, output_root)
     if refusal is not None:
         return refusal
 
@@ -585,7 +690,7 @@ def redact_file_to(
         # binary copy-through: the content was read, scanned and found clean,
         # and copying preserves an encoding that `errors="replace"` would
         # otherwise mangle on the way back out.
-        _publish(out, lambda tmp: shutil.copy2(src, tmp))
+        _publish(out, lambda tmp: shutil.copy2(snap, tmp))
         return RedactedFile(
             source=str(path),
             written=True,
@@ -607,7 +712,7 @@ def redact_file_to(
     # is not written at all (see binary_redactors), so its absence is safe and
     # its presence is verified.
     binary = _maybe_redact_binary_in_place(
-        src, out, result.findings, mode=mode, sensitivity=sensitivity
+        snap, out, result.findings, mode=mode, sensitivity=sensitivity
     )
 
     return RedactedFile(
