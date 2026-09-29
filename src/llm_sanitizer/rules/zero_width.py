@@ -16,6 +16,8 @@ are left clean.
 
 from __future__ import annotations
 
+import bisect
+import contextvars
 import re
 from collections import Counter
 
@@ -26,18 +28,33 @@ from llm_sanitizer.rules._rescan import scan_deobfuscated
 # Zero-width and invisible Unicode characters, defined by codepoint so the
 # source stays pure-ASCII and each entry is unambiguous (the characters are, by
 # definition, invisible and unsafe to embed literally).
-# EVERY Unicode format character (category Cf), plus the other code points
-# that render as nothing: fillers, variation selectors, C0/C1 controls, and
-# U+FFFD. A hand-picked list of "the zero-width ones" missed U+2066 (bidi
-# isolate), U+061C, U+180B, U+3164, U+FE0F and the C0 controls, and each one
-# hid a split keyword (0.7.2 review, pass 2). The Cf ranges are Unicode 15.1;
-# tests/test_splitters.py::test_every_format_character_is_a_splitter
-# checks them against the running interpreter's unicodedata, so a Unicode
-# upgrade that adds a Cf character fails a test instead of opening a gap.
+# THREE CLASSES of character, because they hide text in different ways.
 #
-# Stripping any of these is harmless on its own: the rule flags only when the
-# stripped text trips a rule the raw text did not (emoji ZWJ sequences,
-# Arabic letter marks and bidi controls in ordinary text stay clean).
+# ZERO-WIDTH: renders as nothing. Removed in every view. Built from Unicode's
+# Default_Ignorable_Code_Point property and the whole Cf (format) category,
+# plus C0/C1 controls — a hand-remembered list missed U+2066, U+061C, U+180B,
+# U+17B4, U+2065, U+FFF0.. and the C0 controls, each of which hid a split
+# keyword (0.7.2 review, passes 2 and 3). The Cf part is checked against the
+# running interpreter's unicodedata by
+# tests/test_splitters.py::test_every_format_character_is_a_splitter.
+#
+# SPACE-LIKE: renders as a blank gap (Hangul fillers, blank Braille, U+FFFD
+# standing in for an undecodable byte). Could be a hidden SPACE or glue inside a
+# word, so one view removes it and another reads it as a space.
+#
+# LINE-ENDING characters other than LF / CRLF (VT, FF, FS/GS/RS, NEL, U+2028,
+# U+2029, a bare CR): `splitlines` cuts a word in two at them. Between two word
+# characters they are treated like SPACE-LIKE (removed in one view, a space in
+# the other); elsewhere they are left alone as real line breaks.
+#
+# Removing or spacing any of these is harmless on its own: the rule fires only
+# when a view trips a rule the original text did not.
+_DEFAULT_IGNORABLE_RANGES = [
+    (0x00AD, 0x00AD), (0x034F, 0x034F), (0x061C, 0x061C), (0x17B4, 0x17B5),
+    (0x180B, 0x180F), (0x200B, 0x200F), (0x202A, 0x202E), (0x2060, 0x206F),
+    (0xFE00, 0xFE0F), (0xFEFF, 0xFEFF), (0xFFF0, 0xFFF8), (0x1BCA0, 0x1BCA3),
+    (0x1D173, 0x1D17A), (0xE0000, 0xE0FFF),
+]
 _FORMAT_RANGES = [
     (0x00AD, 0x00AD), (0x0600, 0x0605), (0x061C, 0x061C), (0x06DD, 0x06DD),
     (0x070F, 0x070F), (0x0890, 0x0891), (0x08E2, 0x08E2), (0x180E, 0x180E),
@@ -46,40 +63,71 @@ _FORMAT_RANGES = [
     (0x13430, 0x1343F), (0x1BCA0, 0x1BCA3), (0x1D173, 0x1D17A),
     (0xE0001, 0xE0001), (0xE0020, 0xE007F),
 ]
-_OTHER_INVISIBLE_RANGES = [
-    (0x034F, 0x034F),    # Combining Grapheme Joiner
-    (0x115F, 0x1160),    # Hangul Choseong/Jungseong fillers
-    (0x3164, 0x3164),    # Hangul Filler
-    (0xFFA0, 0xFFA0),    # Halfwidth Hangul Filler
-    (0x180B, 0x180D),    # Mongolian free variation selectors
-    (0x180F, 0x180F),    # Mongolian free variation selector four
-    (0xFE00, 0xFE0F),    # variation selectors
-    (0xE0100, 0xE01EF),  # variation selectors supplement
-    # C0 and C1 controls that do NOT end a line. Tab, LF and CR are ordinary
-    # text; the line-ending controls are handled by _MIDWORD_LINE_SEPARATOR.
+_CONTROL_RANGES = [
+    # C0/C1 controls that neither are ordinary whitespace (TAB, LF, CR) nor end
+    # a line (those are the LINE-ENDING class).
     (0x0000, 0x0008), (0x000E, 0x001B), (0x001F, 0x001F),
     (0x007F, 0x0084), (0x0086, 0x009F),
-    # REPLACEMENT CHARACTER: what an undecodable byte becomes on a lossy read.
-    # A raw 0xAD byte (a soft hyphen in Latin-1) inside each trigger word
-    # arrived as U+FFFD, which nothing stripped (0.7.2).
-    (0xFFFD, 0xFFFD),
+    (0x1D159, 0x1D159),  # MUSICAL SYMBOL NULL NOTEHEAD — renders as nothing
 ]
-_ZERO_WIDTH_CODEPOINTS = [
-    cp for lo, hi in _FORMAT_RANGES + _OTHER_INVISIBLE_RANGES for cp in range(lo, hi + 1)
-]
+_SPACE_LIKE_CODEPOINTS = [0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0xFFFD]
+_LINE_ENDING = "\x0b\x0c\x1c\x1d\x1e\x85  "
+
+
+def _expand(ranges: list[tuple[int, int]]) -> set[int]:
+    return {cp for lo, hi in ranges for cp in range(lo, hi + 1)}
+
+
+_ZERO_WIDTH_SET = (
+    _expand(_DEFAULT_IGNORABLE_RANGES) | _expand(_FORMAT_RANGES) | _expand(_CONTROL_RANGES)
+) - set(_SPACE_LIKE_CODEPOINTS)
+#: Every character this rule treats as a possible splitter (both classes).
+_ZERO_WIDTH_CODEPOINTS = sorted(_ZERO_WIDTH_SET | set(_SPACE_LIKE_CODEPOINTS))
 _ZERO_WIDTH_CHARS = [chr(cp) for cp in _ZERO_WIDTH_CODEPOINTS]
 
-_ZERO_WIDTH_PATTERN = re.compile(
-    "[" + "".join(re.escape(c) for c in _ZERO_WIDTH_CHARS) + "]+"
+
+def _char_class(codepoints: set[int] | list[int]) -> str:
+    """A regex character-class BODY for *codepoints*, as ranges. Listing 4,000+
+    code points one by one (the whole E0000 plane among them) made the run
+    pattern ~50x slower than the same set written as ranges."""
+    cps = sorted(set(codepoints))
+    parts: list[str] = []
+    i = 0
+    while i < len(cps):
+        j = i
+        while j + 1 < len(cps) and cps[j + 1] == cps[j] + 1:
+            j += 1
+        lo, hi = re.escape(chr(cps[i])), re.escape(chr(cps[j]))
+        parts.append(lo if i == j else f"{lo}-{hi}")
+        i = j + 1
+    return "".join(parts)
+
+
+_ZW = _char_class(_ZERO_WIDTH_SET)
+_SP = _char_class(_SPACE_LIKE_CODEPOINTS)
+_SP_NO_FFFD = _char_class([cp for cp in _SPACE_LIKE_CODEPOINTS if cp != 0xFFFD])
+_SEP = re.escape(_LINE_ENDING)
+_RUN_WITH_FFFD = re.compile(f"(?:[{_ZW}{_SP}{_SEP}]|\\r(?!\\n))+")
+_RUN_WITHOUT_FFFD = re.compile(f"(?:[{_ZW}{_SP_NO_FFFD}{_SEP}]|\\r(?!\\n))+")
+_ONLY_ZERO_WIDTH = re.compile(f"[{_ZW}]+")
+_LINE_END_IN_RUN = re.compile(f"[{_SEP}]|\\r")
+
+#: Set by the scanner while it scans a file's raw-bytes (Latin-1) view: the
+#: bytes behind each U+FFFD are then examined faithfully there, so reading
+#: U+FFFD as a splitter here would only double the work (0.7.2 review, pass 3:
+#: a clean legacy-encoded file was re-scanned per line until the shared budget
+#: ran out, and refused).
+fffd_examined_elsewhere: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "llm_sanitizer_fffd_examined_elsewhere", default=False
 )
 
-# Characters `str.splitlines` treats as line ends, other than LF/CR. Inside a
-# word they split it across two "lines", so the per-line pass below never sees
-# the word whole (0.7.2 review: NEL, U+2028, VT, FF). Only a separator with a
-# word character on BOTH sides is treated as a splitter.
-_MIDWORD_LINE_SEPARATOR = re.compile(
-    "(?<=\\w)[\x0b\x0c\x1c\x1d\x1e\x85\u2028\u2029]+(?=\\w)"
-)
+
+def _line_starts(text: str) -> list[int]:
+    starts, offset = [], 0
+    for piece in text.splitlines(keepends=True):
+        starts.append(offset)
+        offset += len(piece)
+    return starts or [0]
 
 
 @register_rule
@@ -95,46 +143,135 @@ class ZeroWidthRule(BaseRule):
     )
 
     def detect(self, content: str, source: str = "") -> list[Finding]:
-        findings: list[Finding] = []
-        lines = content.splitlines()
-        fid = 1
+        run_re = _RUN_WITHOUT_FFFD if fffd_examined_elsewhere.get() else _RUN_WITH_FFFD
+        runs = [m for m in run_re.finditer(content) if self._is_splitter(content, m)]
+        if not runs:
+            return []
 
-        # Evaluate each line independently: strip the invisible characters on
-        # THIS line and compare what it trips against the raw line. Only when
-        # stripping reveals an injection the raw line did not already trip do we
-        # flag this line's invisible-character runs. Per-line (not whole-doc)
-        # so a benign invisible character on one line is never flagged just
-        # because a real keyword-split exists on a different line.
-        fid = self._midword_line_separators(content, lines, source, findings, fid)
-        for line_idx, line in enumerate(lines):
+        # REGIONS: the LF-delimited lines holding a run, merged when adjacent.
+        # Only these are transformed and re-scanned, ONCE each per view — not a
+        # full ruleset per line, which was quadratic and exhausted the shared
+        # budget on large clean files (0.7.2 review, pass 3).
+        regions: list[list[int]] = []  # [start, end) offsets into content
+        for m in runs:
+            a = content.rfind("\n", 0, m.start()) + 1
+            b = content.find("\n", m.end())
+            b = len(content) if b == -1 else b + 1
+            if regions and a <= regions[-1][1]:
+                regions[-1][1] = max(regions[-1][1], b)
+            else:
+                regions.append([a, b])
+
+        views = {"removed": self._view(content, regions, runs, space=False)}
+        if any(self._has_space_role(content, m) for m in runs):
+            views["spaced"] = self._view(content, regions, runs, space=True)
+
+        newly_by_region: dict[int, dict[str, Finding]] = {}
+        baselines: dict[int, Counter[str]] = {}
+        for text, region_starts in views.values():
             if deadline_exceeded():
-                return findings
-            stripped = _ZERO_WIDTH_PATTERN.sub("", line)
-            if stripped == line:
-                continue  # no invisible characters on this line
-            # TWO readings of the line. Removed: `ig<ZWSP>nore` -> `ignore`.
-            # U+FFFD as a SPACE: an invalid byte standing in for the space
-            # between words (`ignore<0xA0>all`) must not glue the words into
-            # one token no rule matches (0.7.2 review, pass 2).
-            spaced = _ZERO_WIDTH_PATTERN.sub("", line.replace("\ufffd", " "))
-            revealed: list[Finding] = []
-            for variant in {stripped, spaced}:
-                revealed.extend(scan_deobfuscated(variant, source))
-            if not revealed:
+                return []
+            found = scan_deobfuscated(text, source, linear=True)
+            if not found:
                 continue
-            baseline = Counter(f.rule for f in scan_deobfuscated(line, source))
-            newly = self._newly(revealed, baseline)
-            if not newly:
-                continue
+            view_lines = _line_starts(text)
+            per_region: dict[int, list[Finding]] = {}
+            for f in found:
+                line = min(max(f.location.line - 1, 0), len(view_lines) - 1)
+                idx = bisect.bisect_right(region_starts, view_lines[line]) - 1
+                per_region.setdefault(max(idx, 0), []).append(f)
+            for idx, fs in per_region.items():
+                if deadline_exceeded():
+                    return []
+                if idx not in baselines:
+                    a, b = regions[idx]
+                    baselines[idx] = Counter(
+                        f.rule for f in scan_deobfuscated(content[a:b], source, linear=True)
+                    )
+                counts = Counter(f.rule for f in fs)
+                for rule, n in counts.items():
+                    # Compare each VIEW with the original on its own. Summing
+                    # the views double-counted and flagged a line that merely
+                    # carried a plain injection and a U+FFFD (review pass 3).
+                    if n > baselines[idx].get(rule, 0):
+                        worst = max((f for f in fs if f.rule == rule), key=lambda f: f.risk.value)
+                        prev = newly_by_region.setdefault(idx, {}).get(rule)
+                        if prev is None or worst.risk.value > prev.risk.value:
+                            newly_by_region[idx][rule] = worst
 
-            risk = max(
-                (f.risk for f in revealed if f.rule in newly),
-                key=lambda r: r.value,
-            )
+        return self._findings(content, regions, runs, newly_by_region)
+
+    # --- helpers ------------------------------------------------------------
+
+    @staticmethod
+    def _is_splitter(content: str, m: re.Match[str]) -> bool:
+        """A run with a line-ending in it counts only BETWEEN word characters —
+        elsewhere it is an ordinary line break."""
+        if not _LINE_END_IN_RUN.search(m.group(0)):
+            return True
+        before = content[m.start() - 1] if m.start() else ""
+        after = content[m.end()] if m.end() < len(content) else ""
+        return bool(before and after and (before.isalnum() or before == "_")
+                    and (after.isalnum() or after == "_"))
+
+    @staticmethod
+    def _has_space_role(content: str, m: re.Match[str]) -> bool:
+        return _ONLY_ZERO_WIDTH.fullmatch(m.group(0)) is None
+
+    @staticmethod
+    def _replacement(m: re.Match[str], space: bool) -> str:
+        if space and _ONLY_ZERO_WIDTH.fullmatch(m.group(0)) is None:
+            return " "
+        return ""
+
+    def _view(
+        self, content: str, regions: list[list[int]], runs: list[re.Match[str]], *, space: bool
+    ) -> tuple[str, list[int]]:
+        """The affected regions, transformed, joined by LF; and where each
+        region starts in the view."""
+        pieces: list[str] = []
+        starts: list[int] = []
+        offset = 0
+        r = 0
+        for a, b in regions:
+            starts.append(offset)
+            out: list[str] = []
+            pos = a
+            while r < len(runs) and runs[r].start() < b:
+                m = runs[r]
+                out.append(content[pos:m.start()])
+                out.append(self._replacement(m, space))
+                pos = m.end()
+                r += 1
+            out.append(content[pos:b])
+            text = "".join(out)
+            if not text.endswith("\n"):
+                text += "\n"
+            pieces.append(text)
+            offset += len(text)
+        return "".join(pieces), starts
+
+    def _findings(
+        self, content: str, regions: list[list[int]], runs: list[re.Match[str]],
+        newly_by_region: dict[int, dict[str, Finding]],
+    ) -> list[Finding]:
+        if not newly_by_region:
+            return []
+        lines = content.splitlines()
+        starts = _line_starts(content)
+        findings: list[Finding] = []
+        fid = 1
+        for idx, newly in sorted(newly_by_region.items()):
+            a, b = regions[idx]
+            risk = max((f.risk for f in newly.values()), key=lambda r: r.value)
             tripped = ", ".join(sorted(newly))
-            before, line_text, after = self._build_context(lines, line_idx)
-            for m in _ZERO_WIDTH_PATTERN.finditer(line):
-                chars_found = sorted({hex(ord(c)) for c in m.group(0)})
+            for m in runs:
+                if not (a <= m.start() < b):
+                    continue
+                line_idx = bisect.bisect_right(starts, m.start()) - 1
+                col = m.start() - starts[line_idx] + 1
+                before, line_text, after = self._build_context(lines, min(line_idx, len(lines) - 1))
+                chars = ", ".join(sorted({hex(ord(c)) for c in m.group(0)}))
                 findings.append(
                     self._make_finding(
                         finding_id=fid,
@@ -142,82 +279,20 @@ class ZeroWidthRule(BaseRule):
                         rule_name=self.rule_name,
                         risk=risk,
                         line_no=line_idx + 1,
-                        col=m.start() + 1,
-                        end_col=m.end() + 1,
+                        col=col,
+                        end_col=col + len(m.group(0)),
                         matched=repr(m.group(0)),
                         matched_raw=m.group(0),
                         before=before,
                         line_text=line_text,
                         after=after,
                         explanation=(
-                            "Invisible characters "
-                            f"({', '.join(chars_found)}) split text that, once "
-                            f"removed, is flagged by {tripped} — the characters "
-                            "are being used to evade keyword detection."
+                            f"Invisible or line-breaking characters ({chars}) split "
+                            f"text that, once removed or read as spaces, is flagged "
+                            f"by {tripped} — they are being used to evade keyword "
+                            "detection."
                         ),
                     )
                 )
                 fid += 1
-
         return findings
-
-    @staticmethod
-    def _newly(revealed: list[Finding], baseline: Counter[str]) -> set[str]:
-        counts = Counter(f.rule for f in revealed)
-        return {rule for rule, n in counts.items() if n > baseline.get(rule, 0)}
-
-    def _midword_line_separators(
-        self, content: str, lines: list[str], source: str,
-        findings: list[Finding], fid: int,
-    ) -> int:
-        """Line-ending characters used INSIDE a word, judged on the whole text."""
-        matches = list(_MIDWORD_LINE_SEPARATOR.finditer(content))
-        if not matches:
-            return fid
-        joined = _MIDWORD_LINE_SEPARATOR.sub("", content)
-        revealed = scan_deobfuscated(joined, source)
-        if not revealed:
-            return fid
-        newly = self._newly(
-            revealed, Counter(f.rule for f in scan_deobfuscated(content, source))
-        )
-        if not newly:
-            return fid
-        risk = max((f.risk for f in revealed if f.rule in newly), key=lambda r: r.value)
-        tripped = ", ".join(sorted(newly))
-        # Line-start offsets under splitlines' OWN notion of a line, so the
-        # reported line and column point at the separator itself (it ends the
-        # fragment it follows).
-        starts: list[int] = []
-        offset = 0
-        for piece in content.splitlines(keepends=True):
-            starts.append(offset)
-            offset += len(piece)
-        for m in matches:
-            line_idx = max(i for i, st in enumerate(starts) if st <= m.start())
-            col = m.start() - starts[line_idx] + 1
-            before, line_text, after = self._build_context(lines, line_idx)
-            findings.append(
-                self._make_finding(
-                    finding_id=fid,
-                    rule_id=self.rule_id,
-                    rule_name=self.rule_name,
-                    risk=risk,
-                    line_no=line_idx + 1,
-                    col=col,
-                    end_col=col + len(m.group(0)),
-                    matched=repr(m.group(0)),
-                    matched_raw=m.group(0),
-                    before=before,
-                    line_text=line_text,
-                    after=after,
-                    explanation=(
-                        "Line-separator characters "
-                        f"({', '.join(sorted({hex(ord(c)) for c in m.group(0)}))}) "
-                        f"inside a word split text that, once joined, is flagged "
-                        f"by {tripped}."
-                    ),
-                )
-            )
-            fid += 1
-        return fid

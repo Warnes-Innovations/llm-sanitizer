@@ -7,11 +7,12 @@ from __future__ import annotations
 
 import fnmatch
 import os
+import re
 import stat
 import tempfile
-from dataclasses import dataclass
 import time
 import zipfile
+from dataclasses import dataclass
 from pathlib import Path
 
 import filetype
@@ -39,8 +40,8 @@ from llm_sanitizer.readers.integrity_checks import (
 )
 from llm_sanitizer.rules import BaseRule, get_all_rules, is_legitimate_file
 from llm_sanitizer.rules._rescan import (
-    reset_rescan_budget,
     rescan_budget_exhausted,
+    reset_rescan_budget,
     set_scan_deadline,
 )
 from llm_sanitizer.rules.integrity import (
@@ -52,8 +53,8 @@ from llm_sanitizer.rules.integrity import (
     TYPE_MISMATCH,
     UNSCANNABLE_BINARY,
     UNSCANNABLE_MEDIA,
-    make_integrity_finding,
     UNSCANNABLE_PATH,
+    make_integrity_finding,
 )
 
 # Map sensitivity strings to minimum risk level to include in results
@@ -204,7 +205,7 @@ class WalkIssue:
     code: str
     message: str
 
-    _NON_BLOCKING = frozenset({"hardlinked", "symlink-dir-inside-root"})
+    _NON_BLOCKING = frozenset({"hardlinked", "symlink-dir-inside-root", "glob-matched-nothing"})
 
     @property
     def blocks(self) -> bool:
@@ -240,28 +241,70 @@ def path_within(inner: Path, outer: Path) -> bool:
     return False
 
 
-def _glob_match(path: Path, root: Path, pattern: str) -> bool:
-    """Does *path* (under *root*) match a `--glob` *pattern*?
+def _glob_patterns(glob_pattern: str, root: Path) -> list[str]:
+    """Normalise a `--glob` into lower-case, root-relative patterns.
 
-    A pattern without "/" matches the file NAME at any depth (`*.md`). A
-    pattern with "/" matches the path relative to the root, or any trailing
-    part of it, so `docs/*.md` and `**/docs/*.md` find `a/docs/x.md` (0.7.2
-    review: matching the basename only selected nothing for these).
-
-    CASE-INSENSITIVE on purpose: a scan scoped to `*.md` must not skip
-    `EVIL.MD`. Selecting more than asked is the safe direction for a scope
-    filter; selecting less reports unexamined files as clean.
+    `./docs/*.md`, an absolute pattern under the root, `docs/` (a directory:
+    everything below it) and `*.{md,txt}` (simple braces) all selected NOTHING
+    and reported clean (0.7.2 review, pass 3). A leading `**/` is dropped
+    because every pattern already matches at any depth.
     """
-    pat = pattern.lower()
-    if "/" not in pat:
-        return fnmatch.fnmatchcase(path.name.lower(), pat)
+    pat = glob_pattern.replace("\\", "/") if os.sep == "\\" else glob_pattern
+    if os.path.isabs(pat):
+        root_real = os.path.realpath(root)
+        cand = os.path.realpath(pat) if "*" not in pat and "?" not in pat else pat
+        for base in (root_real, str(root.absolute())):
+            if cand == base or cand.startswith(base.rstrip("/") + "/"):
+                pat = cand[len(base):].lstrip("/") or "**"
+                break
+    while pat.startswith("./"):
+        pat = pat[2:]
+    if pat.endswith("/"):
+        pat += "**"
+    while pat.startswith("**/"):
+        pat = pat[3:]
+    expanded = [pat]
+    brace = re.compile(r"\{([^{}]*)\}")
+    for _ in range(8):  # bounded: nested/multiple braces
+        nxt = []
+        for p in expanded:
+            m = brace.search(p)
+            if m is None:
+                nxt.append(p)
+            else:
+                nxt.extend(p[:m.start()] + alt + p[m.end():] for alt in m.group(1).split(","))
+        if nxt == expanded:
+            break
+        expanded = nxt
+    return [p.lower() for p in expanded if p]
+
+
+def _segments_match(pat: list[str], parts: list[str]) -> bool:
+    """fnmatch per path segment, with `**` matching ZERO or more segments —
+    so `docs/**/*.md` selects `docs/a.md` as well as `docs/x/a.md`."""
+    if not pat:
+        return not parts
+    if pat[0] == "**":
+        return any(_segments_match(pat[1:], parts[i:]) for i in range(len(parts) + 1))
+    return bool(parts) and fnmatch.fnmatchcase(parts[0], pat[0]) and _segments_match(pat[1:], parts[1:])
+
+
+def _glob_match(path: Path, root: Path, pattern: str) -> bool:
+    """Does *path* (under *root*) match one normalised *pattern*?
+
+    Without "/" the pattern matches the file NAME at any depth; with "/" it
+    matches the root-relative path from any directory down. CASE-INSENSITIVE
+    on purpose: a scope of `*.md` must not skip `EVIL.MD` — selecting more than
+    asked is the safe direction for a scope filter.
+    """
+    if "/" not in pattern:
+        return fnmatch.fnmatchcase(path.name.lower(), pattern)
     try:
         parts = path.relative_to(root).as_posix().lower().split("/")
     except ValueError:
         parts = path.as_posix().lower().split("/")
-    return any(
-        fnmatch.fnmatchcase("/".join(parts[i:]), pat) for i in range(len(parts))
-    )
+    segs = pattern.split("/")
+    return any(_segments_match(segs, parts[i:]) for i in range(len(parts)))
 
 
 def _under_excluded(target: Path, root: Path) -> bool:
@@ -320,6 +363,54 @@ def admit_file(path: Path, root: Path | None = None) -> WalkIssue | None:
             "a caller can see content shared with paths outside this tree",
         )
     return None
+
+
+def _valid_utf8(raw: bytes) -> bool:
+    try:
+        raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return False
+    return True
+
+
+def legacy_byte_findings(
+    raw: bytes, base: list[Finding], source: str, sensitivity: str,
+    scanner: Scanner | None = None,
+) -> list[Finding]:
+    """Findings visible only in the Latin-1 reading of *raw*'s invalid lines.
+
+    Compares rule counts on the SAME lines (so a plain injection elsewhere in
+    the file cannot mask a hidden one here), and returns the view's findings
+    for any rule it trips more often than the UTF-8 reading did, relabelled so
+    a reader knows where they were seen.
+    """
+    from collections import Counter
+
+    lines = raw.split(b"\n")
+    affected = [i for i, line in enumerate(lines) if not _valid_utf8(line)]
+    if not affected:
+        return []
+    view = "\n".join(lines[i].decode("latin-1") for i in affected)
+    found = (scanner or Scanner()).scan(view, source=source, sensitivity=sensitivity).findings
+    if not found:
+        return []
+    affected_lines = {i + 1 for i in affected}
+    base_counts = Counter(f.rule for f in base if f.location.line in affected_lines)
+    view_counts = Counter(f.rule for f in found)
+    newly = {rule for rule, n in view_counts.items() if n > base_counts.get(rule, 0)}
+    out: list[Finding] = []
+    for f in found:
+        if f.rule not in newly:
+            continue
+        k = min(max(f.location.line - 1, 0), len(affected) - 1)
+        out.append(f.model_copy(update={
+            "location": f.location.model_copy(update={"line": affected[k] + 1}),
+            "explanation": (
+                "Seen in the Latin-1 reading of bytes that are not valid UTF-8 "
+                "(what a legacy-encoding consumer displays): " + f.explanation
+            ),
+        }))
+    return out
 
 
 class PathNotAdmittedError(OSError):
@@ -423,9 +514,20 @@ def walk_with_issues(
         # "*.md" both became ".md" and matched nothing — every glob starting
         # with `*` scanned zero files and reported clean (0.7.1 defect, fixed
         # in 0.7.2). Do not "simplify" this back.
-        pattern = glob_pattern.removeprefix("**/")
-        files = [p for p in files if _glob_match(p, root_path, pattern)]
-        file_issues = [i for i in file_issues if _glob_match(i.path, root_path, pattern)]
+        patterns = _glob_patterns(glob_pattern, root_path)
+        before = len(files) + len(file_issues)
+        files = [p for p in files if any(_glob_match(p, root_path, q) for q in patterns)]
+        file_issues = [
+            i for i in file_issues if any(_glob_match(i.path, root_path, q) for q in patterns)
+        ]
+        if before and not files and not file_issues:
+            # Nothing selected is almost always a mistyped scope, and "0 files,
+            # no findings" reads exactly like a clean result (0.7.2 review).
+            dir_issues.append(WalkIssue(
+                root_path, "glob-matched-nothing",
+                f"--glob {glob_pattern!r} selected none of the {before} file(s) "
+                "under the root; nothing was scanned",
+            ))
     issues = dir_issues + file_issues
     stats = ExclusionStats(
         specified=len(_EXCLUDED_DIR_NAMES),
@@ -1167,6 +1269,28 @@ class Scanner:
                 return [make_integrity_finding(CORRUPT_FILE, source, corrupt)]
         return self._scan_plain(path, source, sensitivity, binary_mode)
 
+    def _scan_text_bytes(self, raw: bytes, source: str, sensitivity: str) -> list[Finding]:
+        """Scan text bytes: the UTF-8 reading, plus — when some bytes are not
+        valid UTF-8 — the Latin-1 reading of the lines they are on.
+
+        An invalid byte becomes U+FFFD in the UTF-8 reading, which says nothing
+        about what it was. A Latin-1 consumer sees 0xAD as an invisible soft
+        hyphen and 0xA0 as a space, so a payload split by one AND spaced by the
+        other hid from every guess made on U+FFFD alone (0.7.2 review, pass 3).
+        The Latin-1 reading is what such a consumer actually reads.
+        """
+        from llm_sanitizer.rules.zero_width import fffd_examined_elsewhere
+
+        content = raw.decode("utf-8", errors="replace")
+        if "\ufffd" not in content or _valid_utf8(raw):
+            return self.scan(content, source=source, sensitivity=sensitivity).findings
+        token = fffd_examined_elsewhere.set(True)
+        try:
+            base = self.scan(content, source=source, sensitivity=sensitivity).findings
+        finally:
+            fffd_examined_elsewhere.reset(token)
+        return base + legacy_byte_findings(raw, base, source, sensitivity, self)
+
     def _scan_plain(
         self, path: Path, source: str, sensitivity: str, binary_mode: str
     ) -> list[Finding] | None:
@@ -1219,12 +1343,10 @@ class Scanner:
                 ).findings
 
         if not _is_binary(path):
-            content = path.read_text(encoding="utf-8", errors="replace")
-            return self.scan(content, source=source, sensitivity=sensitivity).findings
+            return self._scan_text_bytes(path.read_bytes(), source, sensitivity)
 
         if binary_mode == "text":
-            content = path.read_text(encoding="utf-8", errors="replace")
-            return self.scan(content, source=source, sensitivity=sensitivity).findings
+            return self._scan_text_bytes(path.read_bytes(), source, sensitivity)
         if binary_mode == "skip":
             return None
         # binary_mode == "extract"

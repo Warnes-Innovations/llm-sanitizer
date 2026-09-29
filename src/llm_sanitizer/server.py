@@ -212,9 +212,9 @@ def redact(content: str, mode: str = "strip", sensitivity: str = "medium") -> st
         caller could not distinguish from cleaned content.)
     """
     from llm_sanitizer.redactor import (
-        NOT_CONVERGED_MESSAGE,
         not_converged,
         redact_content,
+        refusal_for,
     )
 
     # Let ValueError propagate: MCPServer returns it as an MCP error response,
@@ -226,7 +226,7 @@ def redact(content: str, mode: str = "strip", sensitivity: str = "medium") -> st
     if not_converged(result):
         # This tool returns BARE TEXT, so it has no field to say "not clean":
         # raising is the only way not to hand back the payload as sanitised.
-        raise ValueError(NOT_CONVERGED_MESSAGE)
+        raise ValueError(refusal_for(result)[1])
     return clean
 
 

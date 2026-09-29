@@ -143,16 +143,23 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
 
     if path is not None:
         cfg_path = Path(path)
+        if not os.path.lexists(cfg_path):
+            # A NAMED config that is missing is an error, never "use defaults":
+            # the caller asked for a policy and would silently get another.
+            raise ConfigError(f"{cfg_path} does not exist; refusing to fall back to defaults.")
     else:
-        # Walk up from cwd looking for config file
+        # Walk up from cwd looking for config file. `lexists`, not `exists`: a
+        # DANGLING symlink named .llm-sanitizer.yml is not "no config here" —
+        # skipping it silently used a parent's (or the default) policy instead
+        # (0.7.2 review, pass 3). It is found here and refused below.
         search = Path(os.getcwd())
         for candidate in [search, *search.parents]:
             p = candidate / ".llm-sanitizer.yml"
-            if p.exists():
+            if os.path.lexists(p):
                 cfg_path = p
                 break
 
-    if cfg_path is None or not cfg_path.exists():
+    if cfg_path is None:
         return SanitizerConfig()
 
     if not _YAML_AVAILABLE:

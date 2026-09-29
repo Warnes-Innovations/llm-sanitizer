@@ -328,7 +328,11 @@ def _strip_unverified_carriers(doc: Any) -> None:
 
 
 _HEX_STRING = re.compile(r"<([0-9A-Fa-f\s]+)>")
-_LITERAL_STRING = re.compile(r"\((?:[^()\\]|\\.)*\)", re.DOTALL)
+# A PDF name: `/` then regular characters, where `#xx` spells a byte. A payload
+# written as `/Disregard#20your#20...` is a name, not a string, and the string
+# decoder never saw it (0.7.2 review, pass 3).
+_NAME = re.compile(r"/([^\s/\[\]()<>{}%]*#[0-9A-Fa-f]{2}[^\s/\[\]()<>{}%]*)")
+_NAME_ESCAPE = re.compile(r"#([0-9A-Fa-f]{2})")
 _LITERAL_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f",
                     "(": "(", ")": ")", "\\": "\\"}
 
@@ -341,8 +345,64 @@ def _pdf_string_text(raw: bytes) -> str:
     return raw.decode("latin-1")
 
 
+def _literal_strings(syntax: str) -> list[str]:
+    """Bodies of `(...)` literal strings, honouring BALANCED nested parentheses
+    and backslash escapes — a regex stopped at the first `)` and cut
+    `(a (b) c)` short (0.7.2 review, pass 3)."""
+    out: list[str] = []
+    i, n = 0, len(syntax)
+    while i < n:
+        if syntax[i] != "(":
+            i += 1
+            continue
+        depth, j, body = 1, i + 1, []
+        while j < n and depth:
+            c = syntax[j]
+            if c == "\\" and j + 1 < n:
+                body.append(syntax[j:j + 2])
+                j += 2
+                continue
+            if c == "(":
+                depth += 1
+            elif c == ")":
+                depth -= 1
+                if not depth:
+                    break
+            body.append(c)
+            j += 1
+        out.append("".join(body))
+        i = j + 1
+    return out
+
+
+def _unescape_literal(body: str) -> str:
+    chars: list[str] = []
+    i = 0
+    while i < len(body):
+        c = body[i]
+        if c == "\\" and i + 1 < len(body):
+            nxt = body[i + 1]
+            if nxt in "01234567":
+                j = i + 1
+                while j < len(body) and j < i + 4 and body[j] in "01234567":
+                    j += 1
+                chars.append(chr(int(body[i + 1:j], 8) & 0xFF))
+                i = j
+                continue
+            if nxt == "\n":  # a backslash-newline continues the string
+                i += 2
+                continue
+            chars.append(_LITERAL_ESCAPES.get(nxt, nxt))
+            i += 2
+            continue
+        chars.append(c)
+        i += 1
+    return "".join(chars)
+
+
 def _decode_pdf_strings(syntax: str) -> str:
-    """The TEXT of every hex `<...>` and literal `(...)` string in *syntax*.
+    """The TEXT of every hex `<...>` string, literal `(...)` string and
+    `#xx`-escaped name in *syntax*.
 
     Best-effort and deliberately over-inclusive: it only feeds a check that
     refuses, so decoding something that was not really a string costs at most a
@@ -358,27 +418,11 @@ def _decode_pdf_strings(syntax: str) -> str:
             out.append(_pdf_string_text(bytes.fromhex(digits)))
         except ValueError:
             continue
-    for m in _LITERAL_STRING.finditer(syntax):
-        body = m.group(0)[1:-1]
-        chars: list[str] = []
-        i = 0
-        while i < len(body):
-            c = body[i]
-            if c == "\\" and i + 1 < len(body):
-                nxt = body[i + 1]
-                if nxt in "01234567":
-                    j = i + 1
-                    while j < len(body) and j < i + 4 and body[j] in "01234567":
-                        j += 1
-                    chars.append(chr(int(body[i + 1:j], 8) & 0xFF))
-                    i = j
-                    continue
-                chars.append(_LITERAL_ESCAPES.get(nxt, nxt))
-                i += 2
-                continue
-            chars.append(c)
-            i += 1
-        out.append(_pdf_string_text("".join(chars).encode("latin-1", "replace")))
+    for body in _literal_strings(syntax):
+        out.append(_pdf_string_text(_unescape_literal(body).encode("latin-1", "replace")))
+    for m in _NAME.finditer(syntax):
+        spelled = _NAME_ESCAPE.sub(lambda e: chr(int(e.group(1), 16)), m.group(1))
+        out.append(_pdf_string_text(spelled.encode("latin-1", "replace")))
     return "\n".join(out)
 
 

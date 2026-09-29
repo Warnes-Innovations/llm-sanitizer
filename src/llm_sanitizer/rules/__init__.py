@@ -7,6 +7,8 @@ from __future__ import annotations
 
 import bisect
 import fnmatch
+import os
+import posixpath
 from abc import ABC, abstractmethod
 from typing import ClassVar
 
@@ -88,7 +90,17 @@ def is_legitimate_file(path: str) -> bool:
     # and the undotted lookalike "cursorrules" normalised identically and the
     # lookalike passed as a legitimate file — fail-open on an allowlist
     # (0.7.1 defect, fixed in 0.7.2).
-    normalised = _strip_dot_slash(path.replace("\\", "/"))
+    # A BACKSLASH is a separator only on Windows. On POSIX it is an ordinary
+    # filename character, so `evil\\CLAUDE.md` is ONE file whose name merely
+    # looks like a path ending in CLAUDE.md — not the agent file (0.7.2 review,
+    # pass 3). And normalise `..` BEFORE matching, so `.claude/../evil.md`
+    # cannot borrow the `.claude/` entry for a file outside it.
+    if "\\" in path and os.sep != "\\":
+        return False
+    normalised = posixpath.normpath(path.replace("\\", "/"))
+    if normalised == ".." or normalised.startswith("../"):
+        return False
+    normalised = _strip_dot_slash(normalised)
     for pattern in LEGITIMATE_FILE_PATTERNS:
         pat = _strip_dot_slash(pattern)
         if fnmatch.fnmatch(normalised, pat):

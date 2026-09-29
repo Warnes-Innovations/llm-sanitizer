@@ -10,7 +10,7 @@ import secrets
 import shutil
 import stat
 import tempfile
-from collections.abc import Callable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -235,6 +235,18 @@ def redact_content(
                 and _finding_offset(content, f) is None)
             or f.rule in never_examined
         ]
+        if converged and first_result.findings:
+            # LOCATED IS NOT APPLIED. `redact()` skips an edit that overlaps an
+            # earlier one, so a finding can be placeable and still left in the
+            # output (0.7.2 review, pass 3). The text a marker mode leaves
+            # OUTSIDE its markers is exactly what strip mode leaves after the
+            # same edits — so re-scan that. Anything text-anchored left there
+            # is payload the markers did not cover.
+            outside = redact(content, first_result, mode="strip")
+            converged = not [
+                f for f in scan_text(outside, source=source, sensitivity=sensitivity).findings
+                if f.location.line != 0
+            ]
     else:
         original = content
         for _ in range(max_passes - 1):
@@ -388,23 +400,26 @@ def publish_text(out: str | Path, text: str) -> None:
     write THROUGH a link or into a FIFO sitting at the output path (0.7.2
     review, pass 2 — both did).
     """
-    _publish(Path(out), lambda tmp: tmp.write_text(text, encoding="utf-8"))
+    _publish(Path(out), text.encode("utf-8"))
 
 
-def _publish(out: Path, write: Callable[[Path], object]) -> None:
-    """Write via a temp file in the same directory, then `os.replace` it in.
+def _publish(out: Path, data: bytes, *, copystat_from: Path | None = None) -> None:
+    """Write *data* via a temp file in the same directory, then `os.replace` it in.
 
     `os.replace` swaps the DIRECTORY ENTRY: a symlink or hardlink already
     sitting at *out* is replaced, never written through. Writing in place
-    followed such links onto whatever they pointed at (0.7.2 review). The temp
-    file is created with `os.open(..., 0o666)` so the umask applies and the
-    published file gets the same mode an ordinary write would.
+    followed such links onto whatever they pointed at (0.7.2 review). The bytes
+    go through the descriptor `O_EXCL` created — never a re-open by name, which
+    left a window for the temp path to be swapped (review pass 2). Created with
+    mode 0o666 so the umask applies, as for an ordinary write.
     """
     tmp = out.with_name(f".{out.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
     fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
-    os.close(fd)
     try:
-        write(tmp)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        if copystat_from is not None:
+            shutil.copystat(copystat_from, tmp)
         os.replace(tmp, out)
     except BaseException:
         tmp.unlink(missing_ok=True)
@@ -642,9 +657,25 @@ def _redact_snapshot(
             original_format,
         )
 
+    raw = snap.read_bytes()
     clean, result = redact_content(
         content, mode=mode, source=str(path), sensitivity=sensitivity
     )
+    if not is_binary_content:
+        from llm_sanitizer.scanner import legacy_byte_findings
+
+        hidden = legacy_byte_findings(raw, result.findings, str(path), sensitivity)
+        if hidden:
+            # A payload only a Latin-1 reading of the invalid bytes shows: the
+            # UTF-8 text cannot be redacted to remove it, and a clean copy
+            # would publish the bytes byte-for-byte (0.7.2 review, pass 3).
+            return _refusal(
+                str(path), "hidden-in-invalid-bytes",
+                "the bytes that are not valid UTF-8 read, in Latin-1, as text "
+                f"that trips {', '.join(sorted({f.rule for f in hidden}))}; no "
+                "output was written.",
+                original_format,
+            )
     if not_converged(result):
         # The output would still carry a finding. Write NOTHING: an output
         # file's existence is read downstream as "sanitised" (#51), so an
@@ -690,7 +721,7 @@ def _redact_snapshot(
         # binary copy-through: the content was read, scanned and found clean,
         # and copying preserves an encoding that `errors="replace"` would
         # otherwise mangle on the way back out.
-        _publish(out, lambda tmp: shutil.copy2(snap, tmp))
+        _publish(out, snap.read_bytes(), copystat_from=snap)
         return RedactedFile(
             source=str(path),
             written=True,
@@ -703,7 +734,7 @@ def _redact_snapshot(
             refusal_reason=None,
         )
 
-    _publish(out, lambda tmp: tmp.write_text(clean, encoding="utf-8"))
+    _publish(out, clean.encode("utf-8"))
 
     # ALSO rewrite the original format where that is possible and provable.
     # This never changes what `out` holds and never gates it: the redacted text

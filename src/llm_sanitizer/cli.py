@@ -305,9 +305,20 @@ def _filter_by_min_risk(result: object, min_risk_str: str) -> object:
 
 def main() -> None:
     """CLI entry point."""
+    from llm_sanitizer.config import ConfigError
+
     parser = _build_parser()
     args = parser.parse_args()
+    try:
+        _dispatch(parser, args)
+    except ConfigError as exc:
+        # A config problem is a usage error: exit 2 with the message, not a
+        # traceback and exit 1 (which means "dangerous input" to the gates).
+        print(f"[llm-sanitize] Configuration error: {exc}", file=sys.stderr)
+        sys.exit(2)
 
+
+def _dispatch(parser: argparse.ArgumentParser, args: argparse.Namespace) -> None:
     if args.command == "scan":
         _cmd_scan(args)
     elif args.command == "redact":
@@ -599,10 +610,9 @@ def _cmd_merge(args: argparse.Namespace) -> None:
     each loaded result's `source` is overridden to CURRENT_PATH before it's
     included in the report.
     """
-    from llm_sanitizer.scanner import require_admitted
-
     from llm_sanitizer.formatters import format_output
     from llm_sanitizer.models import DirScanResult, RiskLevel, ScanResult
+    from llm_sanitizer.scanner import require_admitted
 
     if args.manifest == "-":
         manifest_text = sys.stdin.read()

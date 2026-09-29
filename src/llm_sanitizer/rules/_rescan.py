@@ -152,9 +152,16 @@ def deadline_exceeded() -> bool:
     return d is not None and time.monotonic() > d
 
 
-def scan_deobfuscated(text: str, source: str = "") -> list[Finding]:
+def scan_deobfuscated(text: str, source: str = "", *, linear: bool = False) -> list[Finding]:
     """Run every registered rule over already-de-obfuscated *text* and return
     their findings (empty if the de-obfuscated text is clean).
+
+    ``linear=True`` is for a caller that builds ONE view of a whole document,
+    proportional to its size — the zero-width rule's document views. That work
+    is bounded by construction, not by fan-out, so it does not draw on the
+    shared byte budget: drawing on it made a large CLEAN file exhaust the
+    budget and be reported (and refused) as not fully scanned (0.7.2 review,
+    pass 3). Depth, the memo and the scan deadline still apply.
 
     Callers pass text they have themselves decoded/normalized; this function
     does not de-obfuscate. Recursion is bounded by ``_MAX_DEOBFUSCATION_DEPTH``
@@ -184,10 +191,11 @@ def scan_deobfuscated(text: str, source: str = "") -> list[Finding]:
         if cached is not None:
             return cached
 
-    if _scanned_bytes.get() + len(text) > _MAX_RESCAN_BYTES:
-        _budget_exhausted.set(True)
-        return []
-    _scanned_bytes.set(_scanned_bytes.get() + len(text))
+    if not linear:
+        if _scanned_bytes.get() + len(text) > _MAX_RESCAN_BYTES:
+            _budget_exhausted.set(True)
+            return []
+        _scanned_bytes.set(_scanned_bytes.get() + len(text))
 
     token = _depth.set(depth + 1)
     try:
