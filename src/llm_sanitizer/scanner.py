@@ -240,6 +240,30 @@ def path_within(inner: Path, outer: Path) -> bool:
     return False
 
 
+def _glob_match(path: Path, root: Path, pattern: str) -> bool:
+    """Does *path* (under *root*) match a `--glob` *pattern*?
+
+    A pattern without "/" matches the file NAME at any depth (`*.md`). A
+    pattern with "/" matches the path relative to the root, or any trailing
+    part of it, so `docs/*.md` and `**/docs/*.md` find `a/docs/x.md` (0.7.2
+    review: matching the basename only selected nothing for these).
+
+    CASE-INSENSITIVE on purpose: a scan scoped to `*.md` must not skip
+    `EVIL.MD`. Selecting more than asked is the safe direction for a scope
+    filter; selecting less reports unexamined files as clean.
+    """
+    pat = pattern.lower()
+    if "/" not in pat:
+        return fnmatch.fnmatchcase(path.name.lower(), pat)
+    try:
+        parts = path.relative_to(root).as_posix().lower().split("/")
+    except ValueError:
+        parts = path.as_posix().lower().split("/")
+    return any(
+        fnmatch.fnmatchcase("/".join(parts[i:]), pat) for i in range(len(parts))
+    )
+
+
 def _under_excluded(target: Path, root: Path) -> bool:
     """True when *target* lies beneath an excluded directory name inside *root*."""
     try:
@@ -400,8 +424,8 @@ def walk_with_issues(
         # with `*` scanned zero files and reported clean (0.7.1 defect, fixed
         # in 0.7.2). Do not "simplify" this back.
         pattern = glob_pattern.removeprefix("**/")
-        files = [p for p in files if fnmatch.fnmatch(p.name, pattern)]
-        file_issues = [i for i in file_issues if fnmatch.fnmatch(i.path.name, pattern)]
+        files = [p for p in files if _glob_match(p, root_path, pattern)]
+        file_issues = [i for i in file_issues if _glob_match(i.path, root_path, pattern)]
     issues = dir_issues + file_issues
     stats = ExclusionStats(
         specified=len(_EXCLUDED_DIR_NAMES),

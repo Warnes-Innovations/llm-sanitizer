@@ -1,7 +1,7 @@
 # Copyright (C) 2026 Gregory R. Warnes
 # SPDX-License-Identifier: AGPL-3.0-or-later
 
-"""A `--glob` starting with `*` must match (0.7.1 defect, fixed in 0.7.2).
+"""A `--glob` must select what it names (0.7.1 defects, fixed in 0.7.2).
 
 `glob_pattern.lstrip("**/")` strips CHARACTERS, not a prefix, so "**/*.md" and
 "*.md" both became ".md" and matched nothing: the scan examined zero files and
@@ -37,3 +37,23 @@ def test_glob_starting_with_star_matches(tmp_path: Path, glob: str) -> None:
     payload = json.loads(r.stdout)
     assert payload["files_scanned"] == 1, payload
     assert payload["summary"]["max_risk"] is not None
+
+
+# --- review pass 2: directory parts and case ----------------------------------
+
+
+@pytest.mark.parametrize("glob", ["docs/*.md", "**/docs/*.md", "*/evil.md", "docs/**", "*.md"])
+def test_glob_with_directory_part_matches(tmp_path: Path, glob: str) -> None:
+    root = tmp_path / "src"
+    (root / "docs").mkdir(parents=True)
+    (root / "docs" / "evil.md").write_text(PAYLOAD)
+    r = _cli("scan", str(root), "--glob", glob, "--format", "json")
+    assert json.loads(r.stdout)["files_scanned"] == 1, (glob, r.stdout)
+
+
+def test_glob_matches_regardless_of_case(tmp_path: Path) -> None:
+    root = tmp_path / "src"
+    root.mkdir()
+    (root / "EVIL.MD").write_text(PAYLOAD)
+    r = _cli("scan", str(root), "--glob", "*.md", "--format", "json")
+    assert json.loads(r.stdout)["files_scanned"] == 1, r.stdout
