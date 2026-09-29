@@ -268,3 +268,35 @@ class TestResidueCheck:
         doc.save(str(candidate))  # type: ignore[attr-defined]
         verdict = _verify(candidate, ["quarterly"], sensitivity="medium")
         assert verdict is not None, "whole-file check was not run by _verify"
+
+    def test_image_dictionary_payload_is_caught(self) -> None:
+        """Review pass 2: the image test skipped the whole object, dictionary
+        included; only the PIXEL DATA is exempt."""
+        doc = self._doc_with(
+            "<< /Type /XObject /Subtype /Image /Width 1 /Height 1 "
+            f"/ColorSpace /DeviceGray /BitsPerComponent 8 /Foo ({SIDE}) >>",
+            stream=b"\x00",
+        )
+        assert self._residue(doc) is not None
+
+    def test_actualtext_in_a_content_stream_is_caught(self) -> None:
+        """Review pass 2: page content streams were only needle-searched, so a
+        payload in marked-content /ActualText (read by neither extractor)
+        reached an "ok" rewrite."""
+        doc = pymupdf.open()
+        page = doc.new_page()
+        page.insert_text((72, 72), "quarterly figures")
+        xref = page.get_contents()[0]
+        body = doc.xref_stream(xref)
+        doc.update_stream(
+            xref,
+            f"/Span << /ActualText ({SIDE}) >> BDC ".encode() + body + b" EMC",
+        )
+        assert self._residue(doc) is not None
+
+    def test_ordinary_page_text_is_not_a_residue(self) -> None:
+        """Control: rule-scanning content-stream strings must not refuse a
+        clean page."""
+        doc = pymupdf.open()
+        doc.new_page().insert_text((72, 72), "Quarterly revenue increased by 12 percent.")
+        assert self._residue(doc) is None

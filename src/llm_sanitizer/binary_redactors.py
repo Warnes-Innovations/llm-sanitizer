@@ -388,10 +388,11 @@ def _residue_anywhere(doc: Any, needles: Sequence[str], *, sensitivity: str) -> 
     Two questions per object: does any needle appear in any encoding, and does
     the object's text trip a rule on its own? The second is what catches a
     payload that never became a needle — e.g. one that lives only in the title,
-    which the body-text scan that produced the findings never saw. Image
-    streams are skipped (binary pixels, not text); page content streams are
-    covered by the needle search and by the two extractor scans in `_verify`,
-    and are not rule-scanned raw because their operators are not prose.
+    which the body-text scan that produced the findings never saw. An image's
+    PIXEL DATA is not treated as text, but its dictionary is checked like any
+    other object. Page content streams are needle-searched, and the strings in
+    them (show-text operands, /ActualText) are rule-scanned; their raw
+    operators are not, because operators are not prose.
     """
     from llm_sanitizer.scanner import Scanner
 
@@ -408,12 +409,12 @@ def _residue_anywhere(doc: Any, needles: Sequence[str], *, sensitivity: str) -> 
             # objects a crafted file would hide a payload in.
             return f"PDF object {xref} could not be read ({exc}), so it cannot be verified"
         data = None
-        if doc.xref_is_stream(xref):
-            # Read the KEY, never a substring of the dictionary's text: a stream
-            # whose dictionary merely CONTAINS "/Subtype /Image" (in a string,
-            # say) was skipped entirely (0.7.2 review).
-            if doc.xref_get_key(xref, "Subtype") == ("name", "/Image"):
-                continue
+        # Read the KEY, never a substring of the dictionary's text: a stream
+        # whose dictionary merely CONTAINS "/Subtype /Image" was skipped (0.7.2
+        # review). And exempt only the PIXELS: skipping the whole object let a
+        # payload in the image's DICTIONARY through (review pass 2).
+        is_image = doc.xref_get_key(xref, "Subtype") == ("name", "/Image")
+        if doc.xref_is_stream(xref) and not is_image:
             try:
                 data = doc.xref_stream(xref)
             except Exception:  # noqa: BLE001 — undecodable: cannot vouch for it
@@ -431,12 +432,17 @@ def _residue_anywhere(doc: Any, needles: Sequence[str], *, sensitivity: str) -> 
             if any(form in blob for form in _needle_byte_forms(needle)):
                 return f"a redacted fragment is still present in PDF object {xref}"
         if xref in content_xrefs:
-            continue
-        text = blob.decode("latin-1") + "\n" + decoded
+            # Operators are not prose, so a content stream's raw syntax is not
+            # rule-scanned — but the STRINGS in it are text: show-text operands
+            # and marked-content /ActualText, which neither extractor reads
+            # (review pass 2). Rule-scan those.
+            text = decoded
+        else:
+            text = blob.decode("latin-1") + "\n" + decoded
         if scanner.scan(
             text, source=f"pdf-object-{xref}", sensitivity=sensitivity
         ).summary.total_findings:
-            return f"PDF object {xref} (outside the page text) still trips a detection rule"
+            return f"PDF object {xref} still trips a detection rule"
     return None
 
 
