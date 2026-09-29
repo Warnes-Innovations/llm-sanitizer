@@ -53,7 +53,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result. A run now counts as converged only when a re-scan comes back empty; anything
   left is reported as `rescan_incomplete`. **An unconverged file is refused and nothing
   is written.** This applies to `redact_file`, `redact_dir`, `redact_url` and the CLI:
-  refusal code `not-converged`, CLI exit 3. The inline `redact` tool raises.
+  refusal code `not-converged` (or `not-fully-scanned` when the scan hit its size or
+  time budget). For a single file the CLI exits 3; in directory mode the file is listed
+  under `refused` and the run still exits 0, as other refusals do. The inline `redact`
+  tool raises.
 - **`--glob` patterns starting with `*` matched nothing.** `lstrip("**/")` strips
   characters, not a prefix, so `*.md` and `**/*.md` scanned zero files and reported
   clean.
@@ -69,21 +72,40 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The PDF rewrite is rebuilt from the redacted pages only.** Catalog-level carriers
   (custom keys, the structure tree with its alt text, names, actions) never reach it. The
   whole-file check decodes hex, literal and UTF-16 PDF strings, and skips a stream as an
-  image only when its `/Subtype` really is `/Image`.
+  image only when its `/Subtype` really is `/Image`. Only an image's pixel data is
+  exempt: its dictionary is checked like any other object. Strings inside page content
+  streams, including `/ActualText`, are run through the rules.
+- **More invisible splitters.** Every Unicode format character (category Cf), Hangul
+  fillers, variation selectors and C0/C1 controls are now treated like the original
+  zero-width list, and so are line-ending characters used inside a word (NEL, U+2028,
+  VT, FF). An invalid byte standing in for the space between words is read as a space.
+  All are flagged only when removing them reveals an injection.
+- **`--glob` with a directory part, or in another case, selected nothing.** `docs/*.md`
+  and `**/docs/*.md` now match the path relative to the root, and matching is
+  case-insensitive, so a scope of `*.md` includes `EVIL.MD`.
+- **Directory-mode writes are confined to the output directory.** A directory symlink
+  planted in the output tree could send a write elsewhere, and it overwrote an
+  unrelated file (`output-escapes-root`). Writers with no source file (stdin, a URL)
+  now publish atomically too, so they no longer write through a link at the output
+  path or block on a FIFO there.
 
 ### Changed
 
 - **A named path that cannot be opened is an error (exit 2), as in 0.7.1.** This covers
-  a FIFO, device, escaping symlink or unreadable file, whether passed to `scan`,
-  `redact`, `redact -o -` or MCP `scan_file`/`redact_file`. Inside a directory walk it
-  is a finding or refusal instead. A config file that is not a regular file is a
-  configuration error.
+  a FIFO, device, broken symlink or unreadable file, whether passed to `scan`, `redact`,
+  `redact -o -`, `merge` or MCP `scan_file`/`redact_file`. Inside a directory walk it is
+  a finding or refusal instead. A symlink you name directly is followed wherever it
+  points, because you chose it; the outside-the-root rule applies only inside a walk. A
+  config file that is not a regular file is a configuration error.
 
 ### Known limitations
 
 - A local process that swaps a file between the walk admitting it and its open can
-  still get it read. The window is narrowed, not closed, and closing it needs
-  descriptor-based reads throughout.
+  still get it read in `scan`. `redact` narrows this further: it reads one snapshot of
+  the source through a checked descriptor, and publishes exactly the bytes it scanned.
+  Closing it fully needs descriptor-based reads throughout.
+- The wider splitter set costs roughly 40% more scan time on text where most lines
+  carry one (measured: 1.6 MB with U+FFFD on every line, 4.0 s to 5.5 s).
 - The cumulative archive budget is not shared across sibling nested archives.
 - Hardlinked files are processed and reported, not refused (see `walk_issues`).
 
