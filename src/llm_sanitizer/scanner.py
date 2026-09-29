@@ -356,7 +356,11 @@ def walk_with_issues(
         # never reports a path it would not have scanned. Directory-level
         # issues are kept regardless: the glob cannot know what an unwalked
         # directory held.
-        pattern = glob_pattern.lstrip("**/")
+        # removeprefix, NOT lstrip: lstrip strips CHARACTERS, so "**/*.md" and
+        # "*.md" both became ".md" and matched nothing — every glob starting
+        # with `*` scanned zero files and reported clean (0.7.1 defect, fixed
+        # in 0.7.2). Do not "simplify" this back.
+        pattern = glob_pattern.removeprefix("**/")
         files = [p for p in files if fnmatch.fnmatch(p.name, pattern)]
         file_issues = [i for i in file_issues if fnmatch.fnmatch(i.path.name, pattern)]
     issues = dir_issues + file_issues
