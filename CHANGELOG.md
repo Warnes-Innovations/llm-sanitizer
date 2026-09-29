@@ -47,6 +47,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   scanned clean and was copied through byte-exact. U+FFFD is now a splitter for the
   zero-width rule: stripped, re-scanned, and flagged only if that reveals an injection.
   Innocent Latin-1 text stays clean.
+- **A redaction that did not converge was returned as if clean.** The loop stopped when
+  the text stopped changing or the pass budget ran out. A finding that redaction cannot
+  locate, such as homoglyph's normalised span, left the payload in place under a normal
+  result. A run now counts as converged only when a re-scan comes back empty; anything
+  left is reported as `rescan_incomplete`. **An unconverged file is refused and nothing
+  is written.** This applies to `redact_file`, `redact_dir`, `redact_url` and the CLI:
+  refusal code `not-converged`, CLI exit 3. The inline `redact` tool raises.
+- **`--glob` patterns starting with `*` matched nothing.** `lstrip("**/")` strips
+  characters, not a prefix, so `*.md` and `**/*.md` scanned zero files and reported
+  clean.
+- **An undotted lookalike passed the legitimate-file allowlist.** `cursorrules`
+  normalised to the same string as `.cursorrules`.
+- **Output paths are resolved before use, and published atomically.** An output such as
+  `src/nope/../a.md` resolved onto the source, and a link already present in an output
+  directory redirected writes onto source files. Output paths are now resolved and
+  checked twice: before anything is created, and again on the final path. In directory
+  mode, any output resolving inside the source tree is refused (`output-inside-source`).
+  Files are written to a temporary name and moved into place with `os.replace`, so a
+  link at the destination is replaced, never written through.
+- **The PDF rewrite is rebuilt from the redacted pages only.** Catalog-level carriers
+  (custom keys, the structure tree with its alt text, names, actions) never reach it. The
+  whole-file check decodes hex, literal and UTF-16 PDF strings, and skips a stream as an
+  image only when its `/Subtype` really is `/Image`.
+
+### Changed
+
+- **A named path that cannot be opened is an error (exit 2), as in 0.7.1.** This covers
+  a FIFO, device, escaping symlink or unreadable file, whether passed to `scan`,
+  `redact`, `redact -o -` or MCP `scan_file`/`redact_file`. Inside a directory walk it
+  is a finding or refusal instead. A config file that is not a regular file is a
+  configuration error.
+
+### Known limitations
+
+- A local process that swaps a file between the walk admitting it and its open can
+  still get it read. The window is narrowed, not closed, and closing it needs
+  descriptor-based reads throughout.
+- The cumulative archive budget is not shared across sibling nested archives.
+- Hardlinked files are processed and reported, not refused (see `walk_issues`).
 
 ### Added
 
