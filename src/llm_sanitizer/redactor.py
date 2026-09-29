@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import os
+import secrets
 import shutil
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -244,6 +246,58 @@ def _same(a: Path, b: Path) -> bool:
 
 
 
+def _output_refusal(
+    src: Path, out: Path, source_root: Path | None
+) -> RedactedFile | None:
+    """Refuse an output that would land on the source, judged on the RESOLVED path.
+
+    REGRESSION (0.7.2 review): `-o src/nope/../a.md` names `src/a.md`, and a
+    link already present in an output directory can point anywhere; comparing
+    the requested path let both write over originals. Resolving first closes
+    both. With *source_root* (directory mode) an output resolving anywhere
+    inside the source tree is refused too — that is how a planted
+    `out/sub -> src` would have written new files into the source.
+    """
+    from llm_sanitizer.scanner import path_within
+
+    resolved = Path(os.path.realpath(out))
+    if _same(src, resolved):
+        return _refusal(
+            str(src), "output-is-source",
+            f"output {out!s} resolves to the source file itself; refusing to "
+            "overwrite the original",
+            "text",
+        )
+    if source_root is not None and path_within(resolved, source_root):
+        return _refusal(
+            str(src), "output-inside-source",
+            f"output {out!s} resolves to {resolved}, inside the source tree; "
+            "refusing to write into the input",
+            "text",
+        )
+    return None
+
+
+def _publish(out: Path, write: Callable[[Path], object]) -> None:
+    """Write via a temp file in the same directory, then `os.replace` it in.
+
+    `os.replace` swaps the DIRECTORY ENTRY: a symlink or hardlink already
+    sitting at *out* is replaced, never written through. Writing in place
+    followed such links onto whatever they pointed at (0.7.2 review). The temp
+    file is created with `os.open(..., 0o666)` so the umask applies and the
+    published file gets the same mode an ordinary write would.
+    """
+    tmp = out.with_name(f".{out.name}.{os.getpid()}.{secrets.token_hex(4)}.tmp")
+    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
+    os.close(fd)
+    try:
+        write(tmp)
+        os.replace(tmp, out)
+    except BaseException:
+        tmp.unlink(missing_ok=True)
+        raise
+
+
 def refuse_overlapping_output(source: str | Path, output: str | Path) -> None:
     """Raise OutputOverlapError if a directory redaction's output overlaps its source.
 
@@ -325,6 +379,7 @@ def redact_file_to(
     sensitivity: str = "medium",
     text_suffix_for_binary: bool = False,
     skip_clean: bool = False,
+    source_root: Path | None = None,
 ) -> RedactedFile:
     """Redact one file to *output_path*, never writing unredacted binary.
 
@@ -367,13 +422,21 @@ def redact_file_to(
         ExtractorUnavailableError: markitdown is required but absent. Allowed
             to propagate — a systemic coverage gap, not a per-file decision.
     """
-    from llm_sanitizer.scanner import _is_binary, admit_file, read_scannable_content
+    from llm_sanitizer.scanner import (
+        _is_binary,
+        read_scannable_content,
+        require_admitted,
+    )
 
     src = Path(path)
-    # Admission BEFORE any open: a FIFO blocks forever on open (0.7.2).
-    issue = admit_file(src)
-    if issue is not None and issue.blocks:
-        return _refusal(str(path), issue.code, issue.message, "text")
+    # Admission BEFORE any open: a FIFO blocks forever on open (0.7.2). Raises
+    # an OSError, so a named path is a caller error (exit 2) and a directory
+    # loop records the file as refused. `source_root` re-applies the walk's
+    # symlink-escape rule to a file swapped after the walk admitted it.
+    require_admitted(src, source_root)
+    refusal = _output_refusal(src, Path(output_path), source_root)
+    if refusal is not None:
+        return refusal
     if _same(src, Path(output_path)):
         # Writing the redacted text over the input would destroy the original
         # (0.7.2 regression fix). A refusal, not an exception: no file written.
@@ -437,13 +500,18 @@ def redact_file_to(
         # round, since it is the file that was actually redacted as itself.
         out = out.with_name(out.name + ".txt")
     out.parent.mkdir(parents=True, exist_ok=True)
+    # AGAIN, on the FINAL path, after mkdir and the suffix: the check above ran
+    # on the requested path, and the path actually written can differ.
+    refusal = _output_refusal(src, out, source_root)
+    if refusal is not None:
+        return refusal
 
     if not is_binary_content and findings == 0:
         # Byte-exact passthrough for an untouched text file. This is NOT the
         # binary copy-through: the content was read, scanned and found clean,
         # and copying preserves an encoding that `errors="replace"` would
         # otherwise mangle on the way back out.
-        shutil.copy2(src, out)
+        _publish(out, lambda tmp: shutil.copy2(src, tmp))
         return RedactedFile(
             source=str(path),
             written=True,
@@ -456,7 +524,7 @@ def redact_file_to(
             refusal_reason=None,
         )
 
-    out.write_text(clean, encoding="utf-8")
+    _publish(out, lambda tmp: tmp.write_text(clean, encoding="utf-8"))
 
     # ALSO rewrite the original format where that is possible and provable.
     # This never changes what `out` holds and never gates it: the redacted text

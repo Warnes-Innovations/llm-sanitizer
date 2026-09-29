@@ -183,6 +183,13 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
             "deliberately."
         )
 
+    # A FIFO named .llm-sanitizer.yml blocked every command forever (0.7.2):
+    # refuse anything that is not a regular file, like any other bad config.
+    if not Path(cfg_path).is_file():
+        raise ConfigError(
+            f"{cfg_path} is not a regular file (FIFO, socket, device or directory); "
+            "refusing to read it as configuration."
+        )
     with open(cfg_path) as fh:
         raw: dict[str, Any] = yaml.safe_load(fh) or {}
 

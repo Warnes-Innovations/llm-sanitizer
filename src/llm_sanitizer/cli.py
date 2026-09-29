@@ -533,6 +533,7 @@ def _redact_dir(
                 sensitivity=sensitivity,
                 text_suffix_for_binary=True,
                 skip_clean=affected_only,
+                source_root=src_path,
             )
         except OSError as exc:
             # Was a bare `continue`: the file vanished from the output AND

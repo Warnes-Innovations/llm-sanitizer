@@ -227,7 +227,10 @@ def path_within(inner: Path, outer: Path) -> bool:
             return False
     except OSError:
         return False
-    candidate = inner.absolute()
+    # realpath FIRST: `src/nope/../a.md` names `src/a.md` although `nope` does
+    # not exist, and a symlinked alias names its target. Comparing the
+    # unresolved path let both through (0.7.2 review, pass 2).
+    candidate = Path(os.path.realpath(inner))
     for node in (candidate, *candidate.parents):
         try:
             if node.exists() and node.samefile(outer):
@@ -235,6 +238,15 @@ def path_within(inner: Path, outer: Path) -> bool:
         except OSError:
             continue
     return False
+
+
+def _under_excluded(target: Path, root: Path) -> bool:
+    """True when *target* lies beneath an excluded directory name inside *root*."""
+    try:
+        rel = Path(os.path.realpath(target)).relative_to(os.path.realpath(root))
+    except ValueError:
+        return False
+    return any(part in _EXCLUDED_DIR_NAMES for part in rel.parts)
 
 
 def admit_file(path: Path, root: Path | None = None) -> WalkIssue | None:
@@ -286,6 +298,26 @@ def admit_file(path: Path, root: Path | None = None) -> WalkIssue | None:
     return None
 
 
+class PathNotAdmittedError(OSError):
+    """A path failed admission (see `admit_file`). An OSError on purpose, so
+    every existing `except OSError` — the CLI's exit 2, a directory loop's
+    per-file refusal — handles it without a new branch."""
+
+    def __init__(self, issue: WalkIssue) -> None:
+        super().__init__(f"{issue.code}: {issue.path}: {issue.message}")
+        self.issue = issue
+
+
+def require_admitted(path: Path, root: Path | None = None) -> None:
+    """Raise PathNotAdmittedError unless *path* may be opened. For entry points
+    that open a path the caller named: a FIFO, device, escaping symlink or
+    unreadable file is a caller-facing ERROR there, as it was in 0.7.1 for an
+    unreadable file — not a finding with exit 0."""
+    issue = admit_file(path, root)
+    if issue is not None and issue.blocks:
+        raise PathNotAdmittedError(issue)
+
+
 def walk_with_issues(
     root: Path, glob_pattern: str = "**/*"
 ) -> tuple[list[Path], ExclusionStats, list[WalkIssue]]:
@@ -326,7 +358,14 @@ def walk_with_issues(
                 except (OSError, RuntimeError) as exc:
                     dir_issues.append(WalkIssue(dpath, "broken-symlink", f"symlink could not be resolved: {exc}"))
                     continue
-                if path_within(target, root_path):
+                if path_within(target, root_path) and _under_excluded(target, root_path):
+                    # Inside the root, but under a PRUNED directory: its target
+                    # is never walked, so "walked there" would be false.
+                    dir_issues.append(WalkIssue(
+                        dpath, "symlink-to-excluded",
+                        f"symlinked directory resolves into an excluded directory ({target}); nothing beneath it was examined",
+                    ))
+                elif path_within(target, root_path):
                     dir_issues.append(WalkIssue(
                         dpath, "symlink-dir-inside-root",
                         f"symlinked directory not followed; its target {target} is inside the root and walked there",
@@ -906,6 +945,8 @@ class Scanner:
         source: str | None = None,
         sensitivity: str = "medium",
         binary_mode: str = "extract",
+        *,
+        walk_root: Path | None = None,
     ) -> ScanResult | None:
         """Scan a single file, expanding recognized archives in place and
         applying content-integrity checks.
@@ -936,12 +977,9 @@ class Scanner:
         src = source if source is not None else str(p)
 
         # Admission BEFORE any open: a FIFO blocks forever on open (0.7.2).
-        issue = admit_file(p)
-        if issue is not None and issue.blocks:
-            return self._result_from_findings(
-                src, sensitivity,
-                [make_integrity_finding(UNSCANNABLE_PATH, src, issue.message)],
-            )
+        # Raises (an OSError) for a named path; scan_dir turns that into an
+        # unscannable_path finding for the file it was walking.
+        require_admitted(p, walk_root)
 
         if binary_mode == "extract" and self._should_handle_as_archive(p):
             findings = self._scan_node(p, src, sensitivity, depth=0, cumulative=0)
@@ -1358,7 +1396,8 @@ class Scanner:
         for file_path in sorted(files):
             try:
                 result = self.scan_file(
-                    file_path, sensitivity=sensitivity, binary_mode=binary_mode
+                    file_path, sensitivity=sensitivity, binary_mode=binary_mode,
+                    walk_root=root,
                 )
             except OSError as exc:
                 # Admitted, then failed to read. Was a bare `continue` — the

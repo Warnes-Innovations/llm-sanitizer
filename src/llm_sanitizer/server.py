@@ -462,6 +462,7 @@ def redact_dir(
                     binary_mode=binary_mode,
                     sensitivity=sensitivity,
                     text_suffix_for_binary=True,
+                    source_root=src_path,
                 )
             except OSError as exc:
                 # Was a bare `continue`: the file vanished from the output AND

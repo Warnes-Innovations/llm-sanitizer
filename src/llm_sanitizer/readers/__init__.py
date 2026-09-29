@@ -17,7 +17,11 @@ def read_file(path: str | Path, binary_mode: str = "extract") -> str | None:
     scanning entirely (binary content, extraction unavailable/failed or
     binary_mode="skip").
     """
-    from llm_sanitizer.scanner import read_scannable_content
+    from llm_sanitizer.scanner import read_scannable_content, require_admitted
+
+    # Admission before the open: this is the reader behind `redact -o -` and
+    # the stdin/URL-free CLI paths, and a FIFO blocked it forever (0.7.2).
+    require_admitted(Path(path))
     return read_scannable_content(Path(path), binary_mode=binary_mode)
 
 
