@@ -44,9 +44,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   They are now reported.
 - **An invalid byte inside each trigger word hid an injection.** A raw `0xAD` byte (a
   soft hyphen in Latin-1) became U+FFFD on read, which no rule stripped. The file
-  scanned clean and was copied through byte-exact. U+FFFD is now a splitter for the
-  zero-width rule: stripped, re-scanned, and flagged only if that reveals an injection.
-  Innocent Latin-1 text stays clean.
+  scanned clean and was copied through byte-exact. When a file's bytes are not valid
+  UTF-8, the lines they are on are now also scanned as Latin-1 — what a legacy-encoding
+  consumer actually displays, where `0xAD` is an invisible soft hyphen and `0xA0` a
+  space — so a payload hidden by invalid bytes inside words, between words, or both is
+  found. `redact` refuses such a file (`hidden-in-invalid-bytes`). Innocent Latin-1 text
+  stays clean.
 - **A redaction that did not converge was returned as if clean.** The loop stopped when
   the text stopped changing or the pass budget ran out. A finding that redaction cannot
   locate, such as homoglyph's normalised span, left the payload in place under a normal
@@ -74,15 +77,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   whole-file check decodes hex, literal and UTF-16 PDF strings, and skips a stream as an
   image only when its `/Subtype` really is `/Image`. Only an image's pixel data is
   exempt: its dictionary is checked like any other object. Strings inside page content
-  streams, including `/ActualText`, are run through the rules.
-- **More invisible splitters.** Every Unicode format character (category Cf), Hangul
-  fillers, variation selectors and C0/C1 controls are now treated like the original
-  zero-width list, and so are line-ending characters used inside a word (NEL, U+2028,
-  VT, FF). An invalid byte standing in for the space between words is read as a space.
-  All are flagged only when removing them reveals an injection.
-- **`--glob` with a directory part, or in another case, selected nothing.** `docs/*.md`
-  and `**/docs/*.md` now match the path relative to the root, and matching is
-  case-insensitive, so a scope of `*.md` includes `EVIL.MD`.
+  streams, including `/ActualText`, are run through the rules, and so are `#xx`-escaped
+  names (a payload spelled `/Disregard#20your#20...`). Literal strings with nested
+  parentheses decode whole.
+- **More invisible splitters, in any combination.** The zero-width rule now covers every
+  Unicode Default_Ignorable code point and format character (category Cf), C0/C1
+  controls, and blank characters that render as a gap (Hangul fillers, blank Braille,
+  U+FFFD). Line-ending characters other than LF/CRLF (NEL, U+2028/2029, VT, FF, a bare
+  CR) between two word characters are handled too, alone or combined with any of the
+  others in one run. Each document is read twice — with those characters removed, and
+  with the gap-like ones read as spaces — so a filler used as the space between words is
+  found as well as a character used inside one. All are flagged only when a reading
+  reveals an injection.
+- **Comment and highlight modes could publish payload outside their markers.** An edit
+  that overlapped an earlier one was skipped, so a finding could be located but not
+  applied. These modes now check the text left outside the markers, and refuse the file
+  if it still trips a rule.
+- **An allowlist lookalike could still pass.** A path with `..` in it
+  (`.claude/../evil.md`) is normalised before matching, and on POSIX a name containing a
+  backslash (`evil\CLAUDE.md`, one file) no longer matches an allowlisted path.
+- **A config file could be silently skipped.** A dangling-symlink `.llm-sanitizer.yml`,
+  or a named config path that does not exist, now raises a configuration error instead
+  of falling back to another config or the defaults. The CLI reports configuration
+  errors with exit 2 and no traceback.
+- **Many `--glob` shapes selected nothing and reported clean.** Patterns with a directory
+  part (`docs/*.md`), a leading `./`, an absolute path under the root, a trailing `/`,
+  simple braces (`*.{md,txt}`) and `**` standing for zero directories (`docs/**/*.md`
+  selects `docs/a.md`) now all select what they name, case-insensitively. A glob that
+  selects nothing is reported as a `glob-matched-nothing` walk issue.
 - **Directory-mode writes are confined to the output directory.** A directory symlink
   planted in the output tree could send a write elsewhere, and it overwrote an
   unrelated file (`output-escapes-root`). Writers with no source file (stdin, a URL)
@@ -104,8 +126,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still get it read in `scan`. `redact` narrows this further: it reads one snapshot of
   the source through a checked descriptor, and publishes exactly the bytes it scanned.
   Closing it fully needs descriptor-based reads throughout.
-- The wider splitter set costs roughly 40% more scan time on text where most lines
-  carry one (measured: 1.6 MB with U+FFFD on every line, 4.0 s to 5.5 s).
+- Reading splitter-bearing text twice costs time where most lines carry such a
+  character. Measured on 2.5 MB of clean text with U+FFFD on every line (inline, so no
+  raw bytes): 6.5 s in 0.7.1, 21 s now; 0.6 MB of emoji text: 1.7 s to 4.2 s. Clean
+  files are not refused.
+- A zero-width character used both inside words AND as the only separator between
+  them renders as glued text; neither reading separates the words. Invalid bytes in
+  both roles are covered by the Latin-1 reading; invisible characters in both roles are
+  not.
+- The Latin-1 reading needs the raw bytes, so it applies to files (`scan`, `redact`),
+  not to inline text or a URL body that was already decoded.
 - The cumulative archive budget is not shared across sibling nested archives.
 - Hardlinked files are processed and reported, not refused (see `walk_issues`).
 
