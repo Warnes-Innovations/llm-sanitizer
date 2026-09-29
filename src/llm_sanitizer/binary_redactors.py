@@ -328,7 +328,7 @@ def _strip_unverified_carriers(doc: Any) -> None:
 
 
 _HEX_STRING = re.compile(r"<([0-9A-Fa-f\s]+)>")
-_LITERAL_STRING = re.compile(r"\((?:[^()\\]|\\.)*\)", re.S)
+_LITERAL_STRING = re.compile(r"\((?:[^()\\]|\\.)*\)", re.DOTALL)
 _LITERAL_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f",
                     "(": "(", ")": ")", "\\": "\\"}
 
