@@ -840,10 +840,17 @@ A phrase written with its word breaks removed (`ignoreallpreviousinstructions`,
 `IgnoreAllPrevious...`) — directly, or reached by the zero-width rule's
 "splitters removed" reading. Each run of letters holding a trigger word is split
 into words by a dynamic-programming segmentation over a vocabulary derived at
-first use from the rules themselves (the words in their patterns and lexicons)
-and the semantic classifier's word features; the line is then re-scanned
-through `scan_deobfuscated`. Runs longer than 512 letters are split in windows
-around each trigger word. Flags only what the split line newly trips.
+first use from the rules themselves (the words in their patterns and lexicons),
+the semantic classifier's word features and its training sentences; the line is
+then re-scanned through `scan_deobfuscated`. Runs longer than 512 letters are
+split in windows around each trigger word. Words joined by single `_ - .` or
+digits are read as spaced when three or more parts include two trigger words.
+A name-shaped token (CamelCase, or a run inside a name, path or URL) is read in
+a separate identifier reading, where a finding counts only if it lies wholly
+inside one rewritten token: code around a name reads like a phrase once split
+far more often than a payload hides in a name, and a hidden payload is all in
+the name.
+Flags only what the split line newly trips.
 
 **Risk level:** that of the rule the split text trips.
 
@@ -851,11 +858,14 @@ around each trigger word. Flags only what the split line newly trips.
 
 A tag, comment or character reference between two word characters
 (`ig<b></b>nore`, `ig&shy;nore`, `ig<!---->nore`) disappears when rendered, in a
-browser and in Markdown. The line is read as it renders — tags removed,
-references decoded — and re-scanned through `scan_deobfuscated`, where a decoded
-soft hyphen or zero-width space is then handled by the zero-width rule. The raw
-markup is still scanned by every other rule. Flags only what the rendered line
-newly trips.
+browser and in Markdown. Each paragraph holding one is tokenised once with the
+standard library's HTML parser (linear; a regular expression for the same test
+backtracked) and read as it renders — tags and comments removed, references
+decoded, hidden elements' text left out — then re-scanned through
+`scan_deobfuscated`, where a decoded soft hyphen or zero-width space is handled
+by the zero-width rule. The raw markup is still scanned by every other rule.
+Flags only what the rendered paragraph newly trips; the paragraph is the
+finding.
 
 **Risk level:** that of the rule the rendered text trips.
 
