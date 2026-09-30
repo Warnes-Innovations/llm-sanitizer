@@ -129,12 +129,18 @@ def _parse_rules(raw: dict[str, Any]) -> dict[str, RuleSettings]:
     result: dict[str, RuleSettings] = {}
     for rule_id, cfg in raw.items():
         if isinstance(cfg, dict):
-            result[rule_id] = RuleSettings(
-                enabled=cfg.get("enabled", True),
-                sensitivity=cfg.get("sensitivity"),
-            )
+            enabled = cfg.get("enabled", True)
+            if not isinstance(enabled, bool):
+                raise ConfigError(f"rules.{rule_id}.enabled must be true or false, not {enabled!r}")
+            result[rule_id] = RuleSettings(enabled=enabled, sensitivity=cfg.get("sensitivity"))
         elif isinstance(cfg, bool):
             result[rule_id] = RuleSettings(enabled=cfg)
+        else:
+            # Silently skipping `zero_width: 5` left the rule at its default
+            # while the operator believed it configured (review pass 6).
+            raise ConfigError(
+                f"rules.{rule_id} must be true, false or a mapping, not {cfg!r}"
+            )
     return result
 
 
@@ -269,15 +275,21 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
         # Unknown value → fail closed rather than trust a typo'd opt-out.
         policy_value = _DEFAULT_UNPROCESSABLE_BINARY_POLICY
 
+    # A limit that is not a number is an error, not the default: the operator
+    # asked for a limit this file does not express (review pass 6).
     max_scan_bytes = raw.get("max_scan_bytes", _DEFAULT_MAX_SCAN_BYTES)
-    if not isinstance(max_scan_bytes, int) or max_scan_bytes <= 0:
-        max_scan_bytes = _DEFAULT_MAX_SCAN_BYTES
+    if isinstance(max_scan_bytes, bool) or not isinstance(max_scan_bytes, int) or max_scan_bytes <= 0:
+        raise ConfigError(
+            f"{cfg_path}: max_scan_bytes must be a positive integer, not {max_scan_bytes!r}"
+        )
 
     max_scan_seconds = raw.get("max_scan_seconds", _DEFAULT_MAX_SCAN_SECONDS)
     if not isinstance(max_scan_seconds, (int, float)) or isinstance(
         max_scan_seconds, bool
     ):
-        max_scan_seconds = _DEFAULT_MAX_SCAN_SECONDS
+        raise ConfigError(
+            f"{cfg_path}: max_scan_seconds must be a number, not {max_scan_seconds!r}"
+        )
 
     return SanitizerConfig(
         sensitivity=sensitivity,

@@ -70,8 +70,15 @@ def _highlight_marker(finding: Finding) -> str:
     that copied them verbatim republished the invisible payload it was
     highlighting (0.7.2 review, pass 5).
     """
+    from llm_sanitizer.rules.zero_width import _ZERO_WIDTH_CODEPOINTS
+
+    # Every splitter too, not only non-printables: `isprintable()` is True for
+    # the 256 variation selectors, which carried a payload inside the marker
+    # (review pass 6).
+    splitters = frozenset(_ZERO_WIDTH_CODEPOINTS)
     shown = "".join(
-        c if c.isprintable() else f"\\u{{{ord(c):04x}}}" for c in finding.matched
+        c if c.isprintable() and ord(c) not in splitters else f"\\u{{{ord(c):04x}}}"
+        for c in finding.matched
     )
     return f"\u26a0\ufe0f[LLM-INSTRUCTION: {shown}]\u26a0\ufe0f"
 
@@ -674,6 +681,19 @@ def _redact_snapshot(
 
     is_binary_content = binary_mode != "text" and _is_binary(snap)
     original_format = "binary" if is_binary_content else "text"
+    if binary_mode == "extract":
+        from llm_sanitizer.readers.integrity_checks import detect_type_mismatch
+
+        # The scan reports this file as a critical type_mismatch; redaction
+        # published whatever the extractor returned for it — for a NUL-led
+        # `.md`, the literal text "None" under status ok (review passes 5-6).
+        mismatch = detect_type_mismatch(snap)
+        if mismatch is not None:
+            return _refusal(
+                str(path), "type-mismatch",
+                f"{mismatch}; the content was not redacted and no output was written",
+                original_format,
+            )
 
     content = read_scannable_content(snap, binary_mode=binary_mode)
     if content is None:
@@ -698,23 +718,30 @@ def _redact_snapshot(
     clean, result = redact_content(
         content, mode=mode, source=str(path), sensitivity=sensitivity
     )
-    if not is_binary_content:
-        from llm_sanitizer.scanner import legacy_byte_findings
+    from llm_sanitizer.readers.markup_reader import sniff_rtf
+
+    # Text files, and RTF, which sniffs as binary but is published as the
+    # text it extracts (review pass 6).
+    if not is_binary_content or sniff_rtf(raw[:64]):
+        from llm_sanitizer.scanner import hidden_byte_findings
 
         # Compared against NOTHING, not against the UTF-8 findings: a visible
         # payload on the same line, or the same rule found again by a later
         # redaction pass, raised the baseline and masked the hidden one
         # (0.7.2 review, pass 5). Any finding in that reading refuses.
-        hidden = legacy_byte_findings(raw, [], str(path), sensitivity)
+        hidden = hidden_byte_findings(raw, str(path), sensitivity)
         if hidden:
             # A payload only a Latin-1 reading of the invalid bytes shows: the
             # UTF-8 text cannot be redacted to remove it, and a clean copy
             # would publish the bytes byte-for-byte (0.7.2 review, pass 3).
             return _refusal(
                 str(path), "hidden-in-invalid-bytes",
-                "the bytes that are not valid UTF-8 read, in Latin-1, as text "
-                f"that trips {', '.join(sorted({f.rule for f in hidden}))}; no "
-                "output was written.",
+                "a line holding bytes that are not valid UTF-8 trips "
+                f"{', '.join(sorted({f.rule for f in hidden}))} when those bytes "
+                "are read as a legacy-encoding reader shows them (Latin-1, or "
+                "the RTF text built from them). This applies whether or not the "
+                "payload is also visible: the UTF-8 text cannot be redacted to "
+                "match that reading. No output was written.",
                 original_format,
             )
     if not_converged(result):

@@ -22,7 +22,6 @@ import re
 from collections import Counter
 
 from llm_sanitizer.models import Finding, RiskLevel
-from llm_sanitizer.redactor import _finding_offset
 from llm_sanitizer.rules import BaseRule, deadline_exceeded, register_rule
 from llm_sanitizer.rules._rescan import scan_deobfuscated
 
@@ -159,30 +158,20 @@ class ZeroWidthRule(BaseRule):
             return []
         run_classes = [frozenset(_class_of(c) for c in m.group(0)) for m in runs]
 
-        # REGIONS: the LF-delimited lines holding a run (a run crossing an LF
-        # joins the lines it spans), each with the runs it holds and the
-        # classes they carry. Adjacent lines are NOT merged: merging made one
-        # region of a whole emoji-dense file, which then paid for every class
-        # any one line held. Found with
-        # one newline index and bisect — an rfind per run was quadratic on a
-        # long single line (0.7.2 review, pass 4).
+        # LINES (LF-delimited) are the unit. Runs never contain LF, so each run
+        # lies in one line. Found with one newline index and bisect — an rfind
+        # per run was quadratic on a long single line (0.7.2 review, pass 4).
         newlines = [m.start() for m in re.finditer("\n", content)]
-        regions: list[list[int]] = []
-        region_runs: list[list[int]] = []
+        line_bounds = list(zip([0, *(n + 1 for n in newlines)], [*(n + 1 for n in newlines), len(content)]))
+        if line_bounds and line_bounds[-1][0] == line_bounds[-1][1] and len(line_bounds) > 1:
+            line_bounds.pop()
+        line_runs: dict[int, list[int]] = {}
         for r, m in enumerate(runs):
-            k = bisect.bisect_left(newlines, m.start())
-            a = newlines[k - 1] + 1 if k else 0
-            k2 = bisect.bisect_left(newlines, m.end())
-            b = newlines[k2] + 1 if k2 < len(newlines) else len(content)
-            if regions and a < regions[-1][1]:
-                regions[-1][1] = max(regions[-1][1], b)
-                region_runs[-1].append(r)
-            else:
-                regions.append([a, b])
-                region_runs.append([r])
-        region_classes = [
-            tuple(sorted(set().union(*(run_classes[r] for r in rr)))) for rr in region_runs
-        ]
+            line_runs.setdefault(bisect.bisect_right(newlines, m.start() - 1), []).append(r)
+        line_classes = {
+            ln: tuple(sorted(set().union(*(run_classes[r] for r in rr))))
+            for ln, rr in line_runs.items()
+        }
 
         present = sorted(set().union(*run_classes))
         readings: list[dict[str, bool]] = []
@@ -190,52 +179,65 @@ class ZeroWidthRule(BaseRule):
             readings.append(dict(zip(present, bits)))  # True = read as a space
         readings = readings[:_MAX_READINGS]
 
-        # A region is read once per assignment of roles to the classes IT
-        # holds, not once per global assignment: a line with only zero-width
-        # characters is read twice however many other classes the text holds
-        # elsewhere (0.7.2 review, pass 5: the product over every class present
-        # in the text made clean text refuse at ~1.7 MB).
-        read_keys: list[set[tuple[bool, ...]]] = [set() for _ in regions]
+        # A line is read once per assignment of roles to the classes IT holds,
+        # not once per global assignment (0.7.2 review, pass 5: the product
+        # over every class in the text made clean text refuse at ~1.7 MB). Each
+        # line read is joined by the lines either side of it, read under the
+        # same roles, so a payload running across two lines is seen in every
+        # combination of their classes (review pass 6: per-line reading alone
+        # missed an HTML comment opened on one line and split on the next).
+        read_keys: dict[int, set[tuple[bool, ...]]] = {ln: set() for ln in line_runs}
         spans: list[tuple[int, int, RiskLevel, str]] = []
-        baselines: dict[int, Counter[str]] = {}
+        baselines: dict[tuple[int, int], Counter[str]] = {}
         for roles in readings:
             if deadline_exceeded():
                 return []
-            included: list[int] = []
-            for idx, classes in enumerate(region_classes):
+            fresh: list[int] = []
+            for ln, classes in line_classes.items():
                 key = tuple(roles[c] for c in classes)
-                if key not in read_keys[idx]:
-                    read_keys[idx].add(key)
-                    included.append(idx)
-            if not included:
+                if key not in read_keys[ln]:
+                    read_keys[ln].add(key)
+                    fresh.append(ln)
+            if not fresh:
                 continue
-            view = self._view(content, regions, region_runs, runs, run_classes, roles, included)
+            lines = sorted({x for ln in fresh for x in (ln - 1, ln, ln + 1)
+                            if 0 <= x < len(line_bounds)})
+            view = self._view(content, line_bounds, line_runs, runs, run_classes, roles, lines)
             found = scan_deobfuscated(view.text, source, linear=True)
             if not found:
                 continue
-            per_region: dict[int, list[tuple[Finding, int | None]]] = {}
+            per_block: dict[int, list[tuple[Finding, int | None]]] = {}
             for f in found:
-                off = _finding_offset(view.text, f) if f.location.line > 0 else None
-                pos = off if off is not None else view.line_offset(f.location.line)
-                k = bisect.bisect_right(view.region_starts, pos) - 1
-                per_region.setdefault(included[max(k, 0)], []).append((f, off))
-            for idx, fs in per_region.items():
                 if deadline_exceeded():
                     return []
-                if idx not in baselines:
-                    a, b = regions[idx]
-                    baselines[idx] = Counter(
+                off = view.offset_of(f)
+                pos = off if off is not None else view.line_offset(f.location.line)
+                k = view.block_at(pos)
+                if off is not None and off + len(f.matched_raw) > view.block_end(k):
+                    # A match running from one block into the next is an
+                    # artefact of placing unrelated lines side by side in the
+                    # view (review pass 6: an `<!--` line and an `LLM:` line
+                    # far apart were flagged, and a benign line deleted).
+                    continue
+                per_block.setdefault(k, []).append((f, off))
+            for k, fs in per_block.items():
+                if deadline_exceeded():
+                    return []
+                a, b = view.blocks[k][1], view.blocks[k][2]
+                if (a, b) not in baselines:
+                    # The same original lines, unread: a finding the reading
+                    # did not add is not revealed.
+                    baselines[(a, b)] = Counter(
                         f.rule for f in scan_deobfuscated(content[a:b], source, linear=True)
                     )
                 counts = Counter(f.rule for f, _ in fs)
                 for rule, n in counts.items():
                     # Each reading against the original on its own; summing
                     # readings double-counted (review pass 3).
-                    if n <= baselines[idx].get(rule, 0):
+                    if n <= baselines[(a, b)].get(rule, 0):
                         continue
                     spans.extend(self._payload_spans(
-                        content, view, regions[idx], runs, region_runs[idx],
-                        [(f, off) for f, off in fs if f.rule == rule],
+                        view, runs, [(f, off) for f, off in fs if f.rule == rule],
                     ))
 
         return self._findings(content, spans)
@@ -255,18 +257,23 @@ class ZeroWidthRule(BaseRule):
 
     @staticmethod
     def _view(
-        content: str, regions: list[list[int]], region_runs: list[list[int]],
+        content: str, line_bounds: list[tuple[int, int]], line_runs: dict[int, list[int]],
         runs: list[re.Match[str]], run_classes: list[frozenset[str]],
-        roles: dict[str, bool], included: list[int],
+        roles: dict[str, bool], lines: list[int],
     ) -> _View:
-        """The *included* regions under one role assignment, joined by LF, with
-        a map from every view position back to the original text."""
+        """The given *lines* under one role assignment, with a map from every
+        view position back to the original text. Consecutive lines form one
+        BLOCK; blocks are separated in the view by a blank line."""
         view = _View()
-        for idx in included:
-            a, b = regions[idx]
-            view.region_starts.append(view.length)
+        prev = -2
+        for ln in lines:
+            a, b = line_bounds[ln]
+            if ln != prev + 1:
+                if prev >= 0:
+                    view.replace("\n", view.last_end, view.last_end)
+                view.start_block(a)
             pos = a
-            for r in region_runs[idx]:
+            for r in line_runs.get(ln, ()):
                 m = runs[r]
                 view.keep(content, pos, m.start())
                 if any(roles.get(c) for c in run_classes[r]):
@@ -275,12 +282,13 @@ class ZeroWidthRule(BaseRule):
             view.keep(content, pos, b)
             if not content[a:b].endswith("\n"):
                 view.replace("\n", b, b)
+            view.end_block(b)
+            prev = ln
         return view
 
     @staticmethod
     def _payload_spans(
-        content: str, view: _View, region: list[int], runs: list[re.Match[str]],
-        run_ids: list[int], candidates: list[tuple[Finding, int | None]],
+        view: _View, runs: list[re.Match[str]], candidates: list[tuple[Finding, int | None]],
     ) -> list[tuple[int, int, RiskLevel, str]]:
         """The ORIGINAL spans of the payload a reading revealed.
 
@@ -291,14 +299,16 @@ class ZeroWidthRule(BaseRule):
         published it with status ok (0.7.2 review, pass 5). A candidate whose
         span holds no splitter is found in the original text too and is left
         to the rule that finds it there.
+
+        A candidate never runs from one block into the next: detect() drops
+        those, because blocks adjacent in the view need not be adjacent in the
+        original, and such a span deleted every line between them (review
+        pass 6: 40 benign paragraphs between a directive and a soft hyphen).
         """
-        a, b = region
-        run_starts = [runs[r].start() for r in run_ids]
+        run_starts = [m.start() for m in runs]
         out: list[tuple[int, int, RiskLevel, str]] = []
-        unplaced: list[Finding] = []
         for f, off in candidates:
             if off is None:
-                unplaced.append(f)
                 continue
             s, e = view.to_original(off, off + len(f.matched_raw))
             i = bisect.bisect_left(run_starts, s)
@@ -306,10 +316,11 @@ class ZeroWidthRule(BaseRule):
                 out.append((s, e, f.risk, f.rule))
         if not out:
             # The reading tripped the rule more often than the original did,
-            # but no finding could be placed over a splitter: remove the whole
-            # region rather than guess which part carried the payload.
-            worst = max((f for f, _ in candidates), key=lambda f: f.risk.value)
-            out.append((a, b, worst.risk, worst.rule))
+            # but no finding could be placed over a splitter: remove the block
+            # it was found in rather than guess which part carried the payload.
+            f, off = max(candidates, key=lambda c: c[0].risk.value)
+            k = view.block_at(off if off is not None else view.line_offset(f.location.line))
+            out.append((view.blocks[k][1], view.blocks[k][2], f.risk, f.rule))
         return out
 
     def _findings(
@@ -371,10 +382,54 @@ class _View:
     def __init__(self) -> None:
         self._parts: list[str] = []
         self.length = 0
-        self.region_starts: list[int] = []
         self._view_starts: list[int] = []
         self._orig: list[tuple[int, int, bool]] = []  # (orig start, orig end, kept)
         self._text: str | None = None
+        #: (view start, original start, original end) per block of lines.
+        self.blocks: list[tuple[int, int, int]] = []
+        self.last_end = 0
+        self._block_starts: list[int] | None = None
+        self._keep_starts: list[int] | None = None
+        self._lf_starts: list[int] | None = None
+
+    def start_block(self, orig_start: int) -> None:
+        self.blocks.append((self.length, orig_start, orig_start))
+
+    def end_block(self, orig_end: int) -> None:
+        v, a, _ = self.blocks[-1]
+        self.blocks[-1] = (v, a, orig_end)
+        self.last_end = orig_end
+
+    def block_at(self, pos: int) -> int:
+        """Index of the block holding view position *pos*."""
+        if self._block_starts is None:
+            self._block_starts = [v for v, _, _ in self.blocks]
+        return max(bisect.bisect_right(self._block_starts, pos) - 1, 0)
+
+    def block_end(self, k: int) -> int:
+        """View offset where block *k* ends (the next block's start)."""
+        return self.blocks[k + 1][0] if k + 1 < len(self.blocks) else self.length
+
+    def offset_of(self, finding: Finding) -> int | None:
+        """View offset of *finding*, placed by its (line, column) and verified
+        against its matched text — the same two line-numbering schemes as
+        redactor._finding_offset, but on line tables built ONCE per view.
+        Calling _finding_offset per finding re-split the whole view each time:
+        280 s on a 1.5 MB file against a 60 s deadline (review pass 6)."""
+        raw = finding.matched_raw
+        line, col = finding.location.line - 1, finding.location.column - 1
+        if not raw or line < 0 or col < 0:
+            return None
+        text = self.text
+        if self._keep_starts is None:
+            self._keep_starts = _line_starts(text)
+            self._lf_starts = [0, *(m.end() for m in re.finditer("\n", text))]
+        for starts in (self._keep_starts, self._lf_starts or []):
+            if line < len(starts):
+                start = starts[line] + col
+                if text[start:start + len(raw)] == raw:
+                    return start
+        return None
 
     def keep(self, content: str, a: int, b: int) -> None:
         if b > a:
@@ -400,7 +455,9 @@ class _View:
         """View offset of 1-based *line* (splitlines numbering); 0 if unknown."""
         if line <= 0:
             return 0
-        starts = _line_starts(self.text)
+        if self._keep_starts is None:
+            self._keep_starts = _line_starts(self.text)
+        starts = self._keep_starts
         return starts[min(line, len(starts)) - 1]
 
     def to_original(self, s: int, e: int) -> tuple[int, int]:

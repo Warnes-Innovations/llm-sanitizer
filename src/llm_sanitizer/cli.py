@@ -270,9 +270,14 @@ def _read_content_raw(
     content, source = _read_content(target, binary_mode=binary_mode)
     raw: bytes | None = None
     if content is not None and not _is_url(target):
+        from llm_sanitizer.readers.markup_reader import sniff_rtf
         from llm_sanitizer.scanner import _is_binary
 
-        if not _is_binary(Path(target)):
+        with open(target, "rb") as fh:
+            head = fh.read(64)
+        # RTF too: it sniffs as binary but is scanned and published as text
+        # (review pass 6).
+        if not _is_binary(Path(target)) or sniff_rtf(head):
             raw = Path(target).read_bytes()
     return content, source, raw
 
@@ -477,6 +482,19 @@ def _cmd_redact(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(3)
+            if target != "-" and not _is_url(target) and binary_mode == "extract":
+                from llm_sanitizer.readers.integrity_checks import detect_type_mismatch
+
+                # After the read above, which admits the path (a FIFO must not
+                # be opened here). As redact_file does: a file whose content is
+                # not what its name says was printed as whatever the extractor
+                # returned — for a NUL-led `.md`, the text "None" (review
+                # passes 5-6).
+                mismatch = detect_type_mismatch(Path(target))
+                if mismatch is not None:
+                    print(f"[llm-sanitize] Refused: {mismatch}; nothing was written.",
+                          file=sys.stderr)
+                    sys.exit(3)
             # Iterate scan/redact to a stable state — a single pass can
             # expose new findings (stripping zero-width characters reveals
             # the text underneath; removing one span on a minified line
@@ -484,15 +502,19 @@ def _cmd_redact(args: argparse.Namespace) -> None:
             redacted, scan_result = redact_content(
                 content, mode=args.mode, source=source, sensitivity=sensitivity
             )
-            # Against no baseline, as redact_file does (review pass 5).
-            if _hidden_in_invalid_bytes(raw, [], source, sensitivity):
+            # Against no baseline, and with the RTF reading, as redact_file
+            # does (review passes 5 and 6).
+            from llm_sanitizer.scanner import hidden_byte_findings
+
+            if raw and hidden_byte_findings(raw, source, sensitivity):
                 # Same refusal as redact_file (hidden-in-invalid-bytes): the
                 # UTF-8 text cannot be redacted to remove what only the byte
                 # reading shows (0.7.2 review, pass 4: `-o -` skipped it).
                 print(
-                    "[llm-sanitize] Refused: the bytes that are not valid UTF-8 "
-                    "read, in Latin-1, as text that trips a detection rule; "
-                    "nothing was written.",
+                    "[llm-sanitize] Refused: a line holding bytes that are not "
+                    "valid UTF-8 trips a detection rule when those bytes are "
+                    "read as a legacy-encoding reader shows them (visible or "
+                    "not); nothing was written.",
                     file=sys.stderr,
                 )
                 sys.exit(3)

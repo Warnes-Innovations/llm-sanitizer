@@ -15,6 +15,7 @@ import stat
 import tempfile
 import time
 import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -475,8 +476,6 @@ def legacy_byte_findings(
     for any rule it trips more often than the UTF-8 reading did, relabelled so
     a reader knows where they were seen.
     """
-    from collections import Counter
-
     lines = raw.split(b"\n")
     # ONLY lines where the invalid bytes play MIXED roles. The UTF-8 reading
     # already reads every U+FFFD both removed and as a space; what it cannot do
@@ -513,6 +512,40 @@ def legacy_byte_findings(
                 "(what a legacy-encoding consumer displays): " + f.explanation
             ),
         }))
+    return out
+
+
+def hidden_byte_findings(raw: bytes, source: str, sensitivity: str) -> list[Finding]:
+    """Every finding a reading of *raw*'s invalid bytes shows, compared against
+    nothing — the check `redact` refuses on (`hidden-in-invalid-bytes`).
+
+    Two readings: the Latin-1 hybrid of the mixed-role lines
+    (`legacy_byte_findings`), and, for RTF, the document an RTF reader shows
+    from the hybrid-decoded bytes. The RTF half is here because `redact` only
+    ran the first, and only for text: RTF sniffs as binary, so a payload its
+    scan reported was still published (review pass 6).
+    """
+    if _valid_utf8(raw):
+        return []
+    from llm_sanitizer.readers.markup_reader import (
+        MarkupExtractionError,
+        extract_markup_text,
+        sniff_rtf,
+    )
+
+    out: list[Finding] = []
+    if not sniff_rtf(raw[:64]):
+        return legacy_byte_findings(raw, [], source, sensitivity)
+    out += legacy_byte_findings(raw, [], source, sensitivity)
+    try:
+        shown = extract_markup_text(raw.decode("utf-8", errors="latin1_fallback"))
+    except MarkupExtractionError as exc:
+        return out + [make_integrity_finding(
+            CORRUPT_FILE, source,
+            f"markup extraction failed on its legacy-byte reading: {exc}",
+        )]
+    if shown:
+        out += Scanner().scan(shown, source=source, sensitivity=sensitivity).findings
     return out
 
 
@@ -1447,7 +1480,32 @@ class Scanner:
                 markup_bytes = path.read_bytes()
                 if _valid_utf8(markup_bytes):
                     return base
-                return base + legacy_byte_findings(markup_bytes, [], source, sensitivity, self)
+                extra = legacy_byte_findings(markup_bytes, [], source, sensitivity, self)
+                # And the DOCUMENT an RTF reader shows from those bytes: the
+                # text extracted from the hybrid decoding (valid UTF-8 kept,
+                # each invalid byte as Latin-1). Reading the raw markup alone
+                # let RTF syntax (`{}`, `\b0 `) beside each invalid byte break
+                # the words up (review pass 6).
+                from llm_sanitizer.readers.markup_reader import (
+                    MarkupExtractionError,
+                    extract_markup_text,
+                )
+
+                try:
+                    shown = extract_markup_text(
+                        markup_bytes.decode("utf-8", errors="latin1_fallback")
+                    )
+                except MarkupExtractionError as exc:
+                    return base + extra + [make_integrity_finding(
+                        CORRUPT_FILE, source,
+                        f"markup extraction failed on its legacy-byte reading: {exc}",
+                    )]
+                if shown:
+                    base_counts = Counter(f.rule for f in base)
+                    seen = self.scan(shown, source=source, sensitivity=sensitivity).findings
+                    seen_counts = Counter(f.rule for f in seen)
+                    extra += [f for f in seen if seen_counts[f.rule] > base_counts.get(f.rule, 0)]
+                return base + extra
 
         if not _is_binary(path):
             return self._scan_text_bytes(path.read_bytes(), source, sensitivity)
