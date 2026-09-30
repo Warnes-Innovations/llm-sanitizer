@@ -122,7 +122,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and a name used as code (`name(`, `name[`, `obj.name`, `name.attr`, `name =`) is not
   read, so code that merely reads like a phrase once split (`return
   auth_user.access_token`, `revealPasswordToggle.addEventListener`) stays clean. A
-  sentence's own punctuation after a payload does not make it code.
+  sentence's own punctuation after a payload does not make it code, and a capitalised
+  name after a dot (`Note.IgnoreAllPreviousInstructions`) is read, where a
+  lowerCamelCase attribute (`x.revealYourSystemPrompt`) is not. A dotfile or extension
+  (`.gitignore`) is a name, not two words.
 - **Markup inside words passed every rule.** `ig<b></b>nore`, `ig&shy;nore`,
   `ig&#x200B;nore` and `ig<!---->nore` render as `ignore` in a browser and in Markdown,
   but no rule matched the raw text (0.7.1 behaves the same). The new `inline_markup`
@@ -132,10 +135,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `<noscript>`/`<noembed>` content, a stray `</>`, and hidden elements inside words
   (including hidden block elements, CSS-escaped styles, and any styled element, since
   stylesheet hiding cannot be resolved) are read as a browser shows them — and
-  re-scans it. Markdown inside a word (`` ig`n`ore ``, `ig**n**ore`, `ig[n](x)ore`) is
-  read as rendered too; an unpaired `**` (exponentiation in code) is not. A finding
-  covers the block-level segment it is in, as the tokenizer sees block tags, not the
-  whole page.
+  re-scans it. Markdown emphasis, code and strike markers glued to a word — inside it
+  (`` ig`n`ore ``, `ig**n**ore`, `ig[n](x)ore`), at its edge (`**ig**nore`) or across
+  words (`Ple**ase ign**ore`) — are read as rendered too; an unpaired `**`
+  (exponentiation in code) is not. A finding covers the block-level segment it is in,
+  as the tokenizer sees block tags, not the whole page. Deeply nested hidden elements
+  are tracked in linear time.
 - **A homoglyph word beside a splitter scanned clean.** A Hangul filler, U+2028 or NEL
   between words, or a zero-width character inside a homoglyph-substituted word, hid it
   from both rules (0.7.1 behaves the same). Each de-obfuscation rule's before-and-after
@@ -148,6 +153,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   line past blank lines is read together with the line it continues on. Cyrillic `р`
   (U+0440) now normalises to `p`, the letter it looks like; `system рrompt` scanned
   clean in 0.7.1.
+- **Harmless camouflaged text on a long line was reported critical.** A `hidden_content`
+  finding for an inline style (`<span style="color: transparent">`) is escalated to
+  critical when the element's own text trips a rule, no longer when anything else on
+  the same line does. On minified pages, where the whole page is one line, a transparent
+  label was reported critical for text elsewhere on the page. A stylesheet rule or
+  invisible tag characters are still judged by their line. A capitalised word of 12 or
+  more letters (`Reactivation`) is no longer decoded as base64: it decoded to printable
+  text whose re-scan reached the de-obfuscation depth cap, reported critical as chained
+  obfuscation on ordinary page text.
 - **A file whose content is not what its name says was redacted to extractor output.**
   A NUL-led `.md` scanned as a critical `type_mismatch` but was redacted to the literal
   text `None` under `ok`. `redact` and `redact -o -` now refuse it (`invalid-contents`).

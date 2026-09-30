@@ -852,8 +852,11 @@ inside one rewritten token — or within adjacent CamelCase names and up to 12
 plain words beside them (not for `.`-joined names, non-phrase joins, or names
 holding an acronym other than a function word) — and a name used as code
 (`name(`, `name[`, `name.attr`, `obj.name`, `name =`; a sentence's own
-punctuation is not code) is not read: code around a name reads like a phrase
-once split far more often than a payload hides in a name.
+punctuation is not code), a lowerCamelCase part after a dot (an attribute), and
+a run directly after a dot (a dotfile or extension such as `.gitignore`) are not
+read: code around a name reads like a phrase once split far more often than a
+payload hides in a name. A capitalised part after a dot
+(`Note.IgnoreAllPreviousInstructions`) is read.
 Flags only what the split line newly trips.
 
 **Risk level:** that of the rule the split text trips.
@@ -870,7 +873,9 @@ decoded, hidden elements' text left out — then re-scanned through
 by the zero-width rule. Script, style, template, noscript, noembed, head and
 title content is never rendered, and a hidden block element breaks no word; a
 second reading drops every styled element's text, since stylesheet hiding
-cannot be resolved; a third removes paired Markdown syntax inside words.
+cannot be resolved; a third removes paired Markdown syntax glued to a word —
+inside it, at its edge, or across words. Hidden elements are tracked with a
+per-tag count, so closing one is constant time however deep the nesting.
 Paragraphs are joined across a blank line inside an open tag or comment, and
 split at block-level tags as the tokenizer finds them (never inside a comment
 or attribute, never at a hidden block element), and into 64-line chunks never
