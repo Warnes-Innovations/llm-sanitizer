@@ -191,6 +191,8 @@ class ZeroWidthRule(BaseRule):
     )
 
     def detect(self, content: str, source: str = "") -> list[Finding]:
+        if deadline_exceeded():
+            return []  # before any input-proportional work (test_scan_deadline)
         runs = [m for m in _RUN.finditer(content) if self._is_splitter(content, m)]
         if not runs:
             return []

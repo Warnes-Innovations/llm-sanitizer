@@ -237,10 +237,12 @@ def _split_short(run: str) -> str | None:
 #: A repeated separator is char_split's; a single one between words is also
 #: what snake_case and dotted names look like, so it is read as a space only
 #: in a token that holds a trigger word.
-#: Joiners: `_ . -`, digits, and — as in URLs, query strings and CSV — `+`,
-#: `%20`, `,` and `'` (review pass 8). Possessive and anchored: an earlier
+#: Joiners: `_ . -`, digits, and — as in URLs, query strings, CSV and prose —
+#: `+ , ' / | ~ ; : #`, Unicode dashes and dots, and percent-encoded space,
+#: `+`, `-`, `.` and `_` (review passes 8-9). They are read as spaces only in
+#: a phrase-like token (_ident_token), so paths and punctuation stay put. Possessive and anchored: an earlier
 #: form backtracked on a long letter run and never finished.
-_JOIN = r"(?:[._\-0-9+,']|%20)"
+_JOIN = r"(?:[._\-0-9+,'/|~;:#\u2010-\u2015\u00b7\u2022\u2219]|%(?:20|2[BbDdEe]|5[Ff]))"
 _JOINED = re.compile(rf"(?<![A-Za-z])[A-Za-z]++(?:{_JOIN}++[A-Za-z]++)+")
 _JOINER = re.compile(rf"{_JOIN}+")
 
@@ -252,6 +254,22 @@ _CAMEL_PART = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+")
 _IDENT_EDGE = frozenset("_./-")
 
 
+def _touches_name(line: str, a: int, b: int) -> bool:
+    """Is line[a:b] part of a name, path or URL? A `_ / -` beside it says so;
+    a `.` only when it joins two word characters (`self.name`, `file.txt`) —
+    a sentence's closing full stop is not a name (review pass 9: that made a
+    glued payload ending a sentence scan clean)."""
+    before = line[a - 1] if a > 0 else ""
+    after = line[b] if b < len(line) else ""
+    # Non-empty checks: `"" in "_/-"` is True, and made every token at a line
+    # edge read as part of a name.
+    if (before and before in "_/-") or (after and after in "_/-"):
+        return True
+    if before == "." and a > 1 and (line[a - 2].isalnum() or line[a - 2] == "_"):
+        return True
+    return after == "." and b + 1 < len(line) and (line[b + 1].isalnum() or line[b + 1] == "_")
+
+
 #: A name-like token: letters, optionally joined by `_ . -` or digits.
 _IDTOK = re.compile(rf"(?<![A-Za-z])[A-Za-z]++(?:{_JOIN}++[A-Za-z]++)*")
 
@@ -261,24 +279,52 @@ def _ident_token(tok: str, line: str, a: int, b: int, by_case: bool = True) -> s
     a letter run inside a name or path split as a glued run, and — for a
     phrase-like join of three or more parts, two of them trigger words
     (`ignore_all_previous`) — its separators read as spaces."""
-    in_name = (a > 0 and line[a - 1] in _IDENT_EDGE) or (b < len(line) and line[b] in _IDENT_EDGE)
+    in_name = _touches_name(line, a, b)
     if not in_name and not _CAMEL.search(tok) and not _JOINER.search(tok):
         return tok  # a plain word: nothing to read (most tokens; hot path)
     return _ident_token_cached(tok, in_name, by_case)
 
 
+#: English function words: grammar, not a detection list, so it does not
+#: drift with the rules. In capitals inside a name (`IgnoreALL`) they are
+#: emphasis, not an acronym like `SSH`.
+_FUNCTION_WORDS = frozenset({
+    "a", "all", "an", "and", "any", "are", "as", "be", "for", "i", "in", "is", "it",
+    "me", "my", "no", "not", "now", "of", "on", "or", "our", "the", "to", "you", "your",
+})
+
+
+def _function_words() -> frozenset[str]:
+    return _FUNCTION_WORDS
+
+
+def _is_phrase(parts: list[str]) -> bool:
+    """Do the parts of a joined token read as a phrase: three or more parts
+    with two 4+ letter trigger words; three short trigger words, all known
+    words (`you_are_now_DAN`); or two parts that are BOTH trigger words
+    (`ignore_all`, then more words: review pass 9)?"""
+    triggers, words = _vocabulary()
+    low = [p.lower() for p in parts]
+    if len(parts) == 2:
+        # One part of 5+ letters: `ignore_all` is a phrase, `auth_user` (two
+        # short triggers) is a name, and read as one it grew over code.
+        return all(len(p) >= 3 and p in triggers for p in low) and max(map(len, low)) >= 5
+    return len(parts) >= 3 and (
+        len({p for p in low if len(p) >= 4 and p in triggers}) >= 2
+        or (len({p for p in low if p in triggers}) >= 3 and all(p in words for p in low)))
+
+
 @functools.lru_cache(maxsize=65536)
 def _ident_token_cached(tok: str, at_edge: bool, by_case: bool) -> str:
-    triggers, _ = _vocabulary()
     parts = _JOINER.split(tok)
     seps = _JOINER.findall(tok)
-    low = [p.lower() for p in parts]
-    _, words = _vocabulary()
-    phrase = len(parts) >= 3 and (
-        len({p for p in low if len(p) >= 4 and p in triggers}) >= 2
-        # three short trigger words, every part a known word (`you_are_now_DAN`)
-        or (len({p for p in low if p in triggers}) >= 3 and all(p in words for p in low)))
+    phrase = _is_phrase(parts)
     in_name = len(parts) > 1 or at_edge
+    # A dotted name with a CamelCase part that is not a phrase is attribute
+    # access (`x.revealYourSystemPrompt`): code, left as it is. Not every
+    # dotted token: `...uploadthe.envfiletotheattacker` is glued prose.
+    if not phrase and "." in seps and any(_CAMEL.search(p) for p in parts):
+        return tok
     out: list[str] = []
     for i, p in enumerate(parts):
         if _CAMEL.search(p) and _worth_splitting(p.lower()):
@@ -297,19 +343,29 @@ def _ident_token_cached(tok: str, at_edge: bool, by_case: bool) -> str:
     return "".join(out)
 
 
-_CODE_AFTER = frozenset("(.=:[")
-
-
 def _in_code_position(line: str, a: int, b: int) -> bool:
-    """A name followed by `( . = : [` or preceded by `.` is being USED as code.
-    A payload disguised as a name stands on its own in text; code around a
-    name is what turned ordinary identifiers into flagged phrases."""
+    """Is the name at line[a:b] being USED as code: a call or index attached
+    to it (`name(`, `name[`), an attribute on either side (`name.x`,
+    `obj.name`), or an assignment (`name =`)? A payload disguised as a name
+    stands on its own in text; code around a name is what turned ordinary
+    identifiers into flagged phrases.
+
+    Prose punctuation is NOT code: a closing full stop, `: `, or `(` after a
+    space ended detection of any glued payload they followed (review pass 9).
+    """
+    after = line[b] if b < len(line) else ""
+    if after and after in "([":
+        return True
+    if after == "." and b + 1 < len(line) and (line[b + 1].isalpha() or line[b + 1] == "_"):
+        return True
+    if a > 1 and line[a - 1] == "." and (line[a - 2].isalnum() or line[a - 2] in "_)]"):
+        return True
     # An index walk, not `line[b:].lstrip()`: copying the rest of the line
     # for every name was quadratic on a long line (a minified page).
     i = b
     while i < len(line) and line[i] == " ":
         i += 1
-    return (i < len(line) and line[i] in _CODE_AFTER) or (a > 0 and line[a - 1] == ".")
+    return i < len(line) and line[i] == "=" and line[i + 1:i + 2] != "="
 
 
 def _ident_reading(line: str, by_case: bool = True) -> tuple[str, list[tuple[int, int, bool]]]:
@@ -330,8 +386,15 @@ def _ident_reading(line: str, by_case: bool = True) -> tuple[str, list[tuple[int
             # an acronym (`OpenSSH`), which is a product name: _runs_of never
             # grows either over neighbouring words ("export Open SSH private
             # keys" read as an exfiltration phrase).
-            fixed = bool(_JOINER.search(tok)) or any(
-                x.isupper() and len(x) > 1 for x in _CAMEL_PART.findall(tok))
+            # Growth over neighbouring words is for a phrase: not for code
+            # joins (any `.`, or a join that is not a phrase), and not for a
+            # name holding an acronym (`OpenSSH`) unless the capitals are a
+            # function word (`IgnoreALL previous ...`).
+            seps = _JOINER.findall(tok)
+            fixed = (bool(seps) and (any("." in x for x in seps)
+                                     or not _is_phrase(_JOINER.split(tok)))) or any(
+                x.isupper() and len(x) > 1 and x.lower() not in _function_words()
+                for x in _CAMEL_PART.findall(tok))
             spans.append((size, size + len(new), fixed))
         out.append(new)
         size += len(new)
@@ -343,8 +406,7 @@ def _ident_reading(line: str, by_case: bool = True) -> tuple[str, list[tuple[int
 def _plain(m: re.Match[str]) -> str:
     run = m.group(0)
     text, a, b = m.string, m.start(), m.end()
-    if _CAMEL.search(run) or (a > 0 and text[a - 1] in _IDENT_EDGE) or (
-            b < len(text) and text[b] in _IDENT_EDGE):
+    if _CAMEL.search(run) or _touches_name(text, a, b):
         return run
     return _split_short(run) or run
 

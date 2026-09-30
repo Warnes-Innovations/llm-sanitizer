@@ -48,7 +48,7 @@ _BREAKS = frozenset({
     "blockquote", "pre",
 })
 #: Elements whose content is never rendered as text.
-_NOT_RENDERED = frozenset({"script", "style", "template", "head", "title"})
+_NOT_RENDERED = frozenset({"script", "style", "template", "noscript", "noembed", "head", "title"})
 _VOID = frozenset({"br", "hr", "img", "wbr", "input", "meta", "link", "area",
                    "base", "col", "embed", "source", "track"})
 _HIDDEN_STYLE = re.compile(
@@ -70,8 +70,16 @@ def _css_unescape(style: str) -> str:
 #: images. Not `_` or `\\`: CommonMark renders those literally inside a word,
 #: and snake_case is everywhere. Bounded, so it cannot backtrack far.
 _MD_IN_WORD = re.compile(
-    r"(?<=[0-9A-Za-z])(?:`{1,3}|\*{1,3}|~~|!?\[\]\([^)\s]{0,200}\))+(?=[0-9A-Za-z])"
+    r"(?<=[0-9A-Za-z])!?\[\]\([^)\s]{0,200}\)(?=[0-9A-Za-z])"
 )
+#: Emphasis, code and strike markers as a matched PAIR around letters inside a
+#: word (`ig**n**ore`, `` ig`n`ore ``). An unpaired `**` is exponentiation in
+#: code (`x**0.5`), and reading it as markup flagged ordinary Python.
+_MD_PAIR_IN_WORD = re.compile(r"(?<=[A-Za-z])(\*{1,3}|`{1,3}|~~)([A-Za-z]{1,40})\1(?=[A-Za-z])")
+#: `</>` between two word characters: markup a browser drops, joining them.
+_EMPTY_END_IN_WORD = re.compile(r"[0-9A-Za-z](?:</>)+[0-9A-Za-z]")
+#: A Markdown link with text inside a word renders as its text: `ig[n](x)ore`.
+_MD_LINK_IN_WORD = re.compile(r"(?<=[0-9A-Za-z])\[([0-9A-Za-z]{1,50})\]\([^)\s]{0,200}\)(?=[0-9A-Za-z])")
 
 
 class _Renderer(HTMLParser):
@@ -123,7 +131,9 @@ class _Renderer(HTMLParser):
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self._markup()
-        if tag in _BREAKS:
+        # A hidden element breaks nothing: `ig<div hidden></div>nore` renders
+        # as one word (review pass 9).
+        if tag in _BREAKS and not self._hidden and not self._opens_hidden(tag, attrs):
             self.parts.append(" ")
         if tag in _VOID:
             return
@@ -133,6 +143,12 @@ class _Renderer(HTMLParser):
         if (self._hidden or tag in _NOT_RENDERED or any(k == "hidden" for k, _ in attrs)
                 or _HIDDEN_STYLE.search(style) or (self.drop_styled and has_style)):
             self._hidden.append(tag)
+
+    def _opens_hidden(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
+        style = _css_unescape(" ".join(v or "" for k, v in attrs if k == "style"))
+        has_style = any(k in ("class", "id", "style") for k, _ in attrs)
+        return (tag in _NOT_RENDERED or any(k == "hidden" for k, _ in attrs)
+                or bool(_HIDDEN_STYLE.search(style)) or (self.drop_styled and has_style))
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag not in _VOID:
@@ -146,7 +162,7 @@ class _Renderer(HTMLParser):
 
     def handle_endtag(self, tag: str) -> None:
         self._markup()
-        if tag in _BREAKS:
+        if tag in _BREAKS and not self._hidden:
             self.parts.append(" ")
         # Close up to the matching open element, as a browser does. Popping
         # only an exact top-of-stack match left a mis-nested hidden element
@@ -217,10 +233,15 @@ class _Renderer(HTMLParser):
 def _render(raw: str, drop_styled: bool = False) -> tuple[str, bool, bool]:
     """(the text as rendered, whether markup joined two words, whether any
     element carried a class, id or style)."""
+    # `</>` is dropped by a browser's tokenizer; html.parser keeps it as text.
+    # The renderer holds the SAME text it is fed: its positions index into it.
+    joined = bool(_EMPTY_END_IN_WORD.search(raw))
+    raw = raw.replace("</>", "")
     r = _Renderer(raw, drop_styled)
     r.feed(raw)
     r.close()
     r._text()  # close a run of markup that ends the paragraph
+    r.in_word = r.in_word or joined
     # References left in data (no `;`, or not recognised by the tokenizer) are
     # decoded here, the way a browser does.
     return html.unescape("".join(r.parts)), r.in_word, r.styled
@@ -245,8 +266,8 @@ def _readings(raw: str) -> tuple[str, ...]:
             out.append(rendered)
             if styled:
                 out.append(_render(raw, drop_styled=True)[0])
-    if _MD_IN_WORD.search(raw):
-        out.append(_MD_IN_WORD.sub("", raw))
+    if _MD_IN_WORD.search(raw) or _MD_LINK_IN_WORD.search(raw) or _MD_PAIR_IN_WORD.search(raw):
+        out.append(_MD_PAIR_IN_WORD.sub(r"\2", _MD_IN_WORD.sub("", _MD_LINK_IN_WORD.sub(r"\1", raw))))
     flat = " ".join(raw.split())
     return tuple(x for x in dict.fromkeys(" ".join(r.split()) for r in out) if x and x != flat)
 
@@ -285,48 +306,106 @@ def _paragraphs(lines: list[str]) -> list[tuple[int, int]]:
     return merged
 
 
-#: A block-level tag. Markup cannot join two words across one (a browser
-#: breaks the line there), so a paragraph is judged — and redacted — one
-#: block-delimited segment at a time. Judging the whole paragraph deleted an
-#: entire minified page for one hidden payload (review passes 7-8).
-_BLOCK_TAG = re.compile(
-    r"</?(?:p|div|li|br|tr|td|th|h[1-6]|section|article|header|footer|blockquote|pre|ul|ol|table)"
-    r"\b[^<>]{0,200}>",
-    re.IGNORECASE,
-)
-
-
 #: A segment longer than this many lines is read in overlapping chunks: one
 #: reading line per segment made a 200 KB paragraph one line, and work per
 #: finding on it grew with its length (review pass 8 cost probe).
 _CHUNK_LINES, _CHUNK_OVERLAP = 64, 4
 
 
+class _BlockFinder(HTMLParser):
+    """Offsets of block-level tags, as the tokenizer sees them. A pattern over
+    the raw text also matched a `<p>` inside a comment or an attribute value
+    and cut the paragraph there (review pass 9)."""
+
+    def __init__(self, raw: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self._starts = [0, *(m.end() for m in re.finditer("\n", raw))]
+        self.raw = raw
+        self.cuts: list[tuple[int, int]] = []
+        self._hidden: list[str] = []
+
+    def _tag(self, tag: str) -> None:
+        # A HIDDEN block element breaks nothing, so it is no cut
+        # (`ig<div hidden></div>nore` renders as one word).
+        if tag in _BREAKS and not self._hidden:
+            line, col = self.getpos()
+            a = self._starts[line - 1] + col
+            end = self.raw.find(">", a)
+            self.cuts.append((a, end + 1 if end >= 0 else a))
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        style = _css_unescape(" ".join(v or "" for k, v in attrs if k == "style"))
+        hides = (tag in _NOT_RENDERED or any(k == "hidden" for k, _ in attrs)
+                 or bool(_HIDDEN_STYLE.search(style)))
+        if not hides:
+            self._tag(tag)
+        if tag not in _VOID and (self._hidden or hides):
+            self._hidden.append(tag)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._hidden:
+            while self._hidden and self._hidden.pop() != tag:
+                pass
+            return
+        self._tag(tag)
+
+
 def _segments(content: str, a: int, b: int) -> list[tuple[int, int]]:
-    """Absolute (start, end) of each block-delimited segment of content[a:b],
-    long ones cut into overlapping chunks of lines."""
+    """Absolute (start, end) of each block-delimited segment of content[a:b].
+    A paragraph is judged, and redacted, one segment at a time — markup
+    cannot join two words across a block-level tag, and judging a whole page
+    deleted all of it for one hidden payload (passes 7-8) — with long
+    segments cut into overlapping chunks of lines."""
+    raw = content[a:b]
+    if "<" not in raw:
+        return _chunks(content, a, b)
+    finder = _BlockFinder(raw)
+    finder.feed(raw)
+    finder.close()
     out: list[tuple[int, int]] = []
-    pos = a
-    for m in _BLOCK_TAG.finditer(content, a, b):
-        if m.start() > pos:
-            out.extend(_chunks(content, pos, m.start()))
-        pos = m.end()
-    if b > pos:
-        out.extend(_chunks(content, pos, b))
+    pos = 0
+    for s, e in finder.cuts:
+        if s > pos:
+            out.extend(_chunks(content, a + pos, a + s))
+        pos = max(pos, e)
+    if len(raw) > pos:
+        out.extend(_chunks(content, a + pos, b))
     return out
 
 
 def _chunks(content: str, a: int, b: int) -> list[tuple[int, int]]:
+    """content[a:b] in chunks of about _CHUNK_LINES lines, overlapping, never
+    ended inside an open comment or tag: a comment open across a cut was
+    seen by neither chunk (review pass 9)."""
     starts = [a] + [a + m.end() for m in re.finditer("\n", content[a:b]) if a + m.end() < b]
-    if len(starts) <= _CHUNK_LINES:
+    n = len(starts)
+    if n <= _CHUNK_LINES:
         return [(a, b)]
+    # ok[j]: a chunk may end before line j (nothing open at that point).
+    ok = [True] * (n + 1)
+    in_comment = in_tag = False
+    for i, s0 in enumerate(starts):
+        line = content[s0:starts[i + 1] if i + 1 < n else b]
+        lo, lc = line.rfind("<!--"), line.rfind("-->")
+        if lo != lc:
+            in_comment = lo > lc
+        to, tc = line.rfind("<"), line.rfind(">")
+        if to != tc:
+            in_tag = to > tc
+        ok[i + 1] = not (in_comment or in_tag)
     out: list[tuple[int, int]] = []
-    step = _CHUNK_LINES - _CHUNK_OVERLAP
-    for i in range(0, len(starts), step):
-        j = i + _CHUNK_LINES
-        out.append((starts[i], starts[j] - 1 if j < len(starts) else b))
-        if j >= len(starts):
+    i = 0
+    while i < n:
+        j = min(i + _CHUNK_LINES, n)
+        while j < n and not ok[j]:
+            j += 1  # extend past an open comment or tag
+        out.append((starts[i], starts[j] - 1 if j < n else b))
+        if j >= n:
             break
+        i = max(j - _CHUNK_OVERLAP, i + 1)
     return out
 
 
@@ -349,7 +428,8 @@ class InlineMarkupRule(BaseRule):
         # Gate on the characters, not on "a letter right before `<` or `&`":
         # a word written starting with a reference (`&#105;gnore`) has none,
         # and the tokenizer below decides whether markup joined words.
-        if "<" not in content and "&" not in content and not _MD_IN_WORD.search(content):
+        if ("<" not in content and "&" not in content and not _MD_IN_WORD.search(content)
+                and not _MD_LINK_IN_WORD.search(content) and not _MD_PAIR_IN_WORD.search(content)):
             return []
         lines = content.splitlines()
         starts = [0]
@@ -390,8 +470,13 @@ class InlineMarkupRule(BaseRule):
                 continue  # one finding per segment, whichever reading showed it
             raw = content[unit[0]:unit[1]]
             if unit not in baselines:
+                # The segment FLATTENED like its readings: scanning it with its
+                # line breaks scored differently (the classifier reads whole
+                # sentences), and code joined into one line looked "revealed"
+                # (review pass 9: ordinary Python flagged).
                 baselines[unit] = Counter(f.rule for f in scan_deobfuscated(
-                    raw + "\n", source, linear=True, exclude=frozenset({self.rule_id})))
+                    " ".join(raw.split()) + "\n", source, linear=True,
+                    exclude=frozenset({self.rule_id})))
             baseline = baselines[unit]
             counts = Counter(f.rule for f in fs)
             newly = [f for f in fs if counts[f.rule] > baseline.get(f.rule, 0)]
