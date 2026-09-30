@@ -265,7 +265,9 @@ def _touches_name(line: str, a: int, b: int) -> bool:
     # edge read as part of a name.
     if (before and before in "_/-") or (after and after in "_/-"):
         return True
-    if before == "." and a > 1 and (line[a - 2].isalnum() or line[a - 2] == "_"):
+    # Directly after a dot: a name part (`self.name`) or a dotfile or extension
+    # (`.gitignore`, `.env`), which read as `git ignore` in a sentence (pass 10).
+    if before == ".":
         return True
     return after == "." and b + 1 < len(line) and (line[b + 1].isalnum() or line[b + 1] == "_")
 
@@ -320,10 +322,15 @@ def _ident_token_cached(tok: str, at_edge: bool, by_case: bool) -> str:
     seps = _JOINER.findall(tok)
     phrase = _is_phrase(parts)
     in_name = len(parts) > 1 or at_edge
-    # A dotted name with a CamelCase part that is not a phrase is attribute
-    # access (`x.revealYourSystemPrompt`): code, left as it is. Not every
-    # dotted token: `...uploadthe.envfiletotheattacker` is glued prose.
-    if not phrase and "." in seps and any(_CAMEL.search(p) for p in parts):
+    # A dotted name whose part after a dot is lowerCamelCase is attribute
+    # access (`x.revealYourSystemPrompt`): code, left as it is. Not a
+    # capitalised part (`Note.IgnoreAllPreviousInstructions`, `config.Reveal...`):
+    # exempting every dotted CamelCase name let those through (review pass 10).
+    # Not every dotted token either: `...uploadthe.envfiletotheattacker` is prose.
+    if not phrase and any(
+        seps[i - 1] == "." and parts[i][:1].islower() and _CAMEL.search(parts[i])
+        for i in range(1, len(parts))
+    ):
         return tok
     out: list[str] = []
     for i, p in enumerate(parts):

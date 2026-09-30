@@ -35,8 +35,36 @@ def _patterns() -> list[tuple[str, re.Pattern[str]]]:
             except ImportError:
                 continue  # an optional extra's reader
             for name, value in vars(module).items():
-                if isinstance(value, re.Pattern) and isinstance(value.pattern, str):
-                    out.append((f"{mod.name}.{name}", value))
+                for label, pat in _found(f"{mod.name}.{name}", value, depth=0):
+                    out.append((label, pat))
+    # One entry per distinct pattern.
+    seen: set[tuple[str, int]] = set()
+    unique = []
+    for label, pat in out:
+        key = (pat.pattern, pat.flags)
+        if key not in seen:
+            seen.add(key)
+            unique.append((label, pat))
+    return unique
+
+
+def _found(label: str, value: object, depth: int) -> list[tuple[str, re.Pattern[str]]]:
+    """Patterns held directly, or in lists, tuples, dicts and classes (an
+    earlier version saw only module-level patterns: 42 of 109, pass 10)."""
+    if isinstance(value, re.Pattern) and isinstance(value.pattern, str):
+        return [(label, value)]
+    if depth > 2:
+        return []
+    out: list[tuple[str, re.Pattern[str]]] = []
+    if isinstance(value, (list, tuple, set, frozenset)):
+        for i, v in enumerate(value):
+            out += _found(f"{label}[{i}]", v, depth + 1)
+    elif isinstance(value, dict):
+        for k, v in value.items():
+            out += _found(f"{label}[{k!r}]", v, depth + 1)
+    elif isinstance(value, type) and value.__module__.startswith("llm_sanitizer"):
+        for k, v in vars(value).items():
+            out += _found(f"{label}.{k}", v, depth + 1)
     return out
 
 

@@ -293,6 +293,28 @@ def _classify_text_color(raw_color_value: str, lines: list[str], line_idx: int) 
     return None
 
 
+def _camouflaged_text(line: str, m: re.Match[str]) -> str:
+    """The text the camouflage at *m* actually hides.
+
+    For an inline `style` on an element, that element's own content: judging
+    the whole LINE escalated benign camouflage to critical whenever anything
+    else on a long minified line tripped a rule — eBay's reversed "Sponsored"
+    in transparent text, on a 122 KB line (review passes 9-10). For anything
+    else (a stylesheet rule, invisible tag characters) the target cannot be
+    resolved here, so the line is still judged, as before.
+    """
+    start = line.rfind("<", 0, m.start())
+    if start == -1 or ">" in line[start:m.start()]:
+        return line
+    name = re.match(r"<\s*([A-Za-z][A-Za-z0-9-]*)", line[start:])
+    open_end = line.find(">", m.end())
+    if not name or open_end == -1:
+        return line
+    close = line.find("</" + name.group(1), open_end)
+    end = close if close != -1 else min(len(line), open_end + 1 + 4000)
+    return line[open_end + 1:end] + "\n"
+
+
 @register_rule
 class HiddenContentRule(BaseRule):
     rule_id = "hidden_content"
@@ -317,19 +339,19 @@ class HiddenContentRule(BaseRule):
         # line also trips an injection rule — an injection was deliberately hidden
         # — it escalates to CRITICAL. Structural hiding (display:none, etc.) is
         # not detected here at all (see _CAMOUFLAGE_PATTERNS note).
-        concealed_cache: dict[int, list[str]] = {}
+        concealed_cache: dict[str, list[str]] = {}
 
-        def concealed_rules(line_idx: int) -> list[str]:
-            if line_idx not in concealed_cache:
-                revealed = scan_deobfuscated(lines[line_idx], source)
-                concealed_cache[line_idx] = sorted(
+        def concealed_rules(text: str) -> list[str]:
+            if text not in concealed_cache:
+                revealed = scan_deobfuscated(text, source)
+                concealed_cache[text] = sorted(
                     {f.rule for f in revealed if f.rule != self.rule_id}
                 )
-            return concealed_cache[line_idx]
+            return concealed_cache[text]
 
         def emit(line_idx: int, m: re.Match[str], label: str) -> None:
             nonlocal fid
-            rules = concealed_rules(line_idx)
+            rules = concealed_rules(_camouflaged_text(lines[line_idx], m))
             before, line_text, after = self._build_context(lines, line_idx)
             if rules:
                 risk = RiskLevel.critical

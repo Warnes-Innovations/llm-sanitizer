@@ -72,14 +72,84 @@ def _css_unescape(style: str) -> str:
 _MD_IN_WORD = re.compile(
     r"(?<=[0-9A-Za-z])!?\[\]\([^)\s]{0,200}\)(?=[0-9A-Za-z])"
 )
-#: Emphasis, code and strike markers as a matched PAIR around letters inside a
-#: word (`ig**n**ore`, `` ig`n`ore ``). An unpaired `**` is exponentiation in
-#: code (`x**0.5`), and reading it as markup flagged ordinary Python.
-_MD_PAIR_IN_WORD = re.compile(r"(?<=[A-Za-z])(\*{1,3}|`{1,3}|~~)([A-Za-z]{1,40})\1(?=[A-Za-z])")
+#: Emphasis, code and strike markers as a matched PAIR around letters (with
+#: spaces, `'` or `-` between them, up to 80 characters): any content matched
+#: `x**2 + y**3` and LaTeX in docstrings, 4.6x the cost on 3,000 Python files
+#: and new false positives (round 11). It is read as markup only
+#: when glued to a word on at least one side — inside a word (`ig**n**ore`), at
+#: its edge (`**ig**nore`, `ig**nore**`) or across words (`Ple**ase ign**ore`):
+#: requiring letters on BOTH sides missed the edge forms (review pass 10).
+#: Do not drop the glue test to read every pair: on 103 real Markdown files
+#: that cost 10x the scan time and flagged four benign documents (round 11).
+#: An unpaired `**` is exponentiation in code (`x**0.5`), and reading it as
+#: markup flagged ordinary Python. Bounded, so it cannot backtrack far.
+_MD_PAIR = re.compile(r"(\*{1,3}|`{1,3}|~~)([A-Za-z](?:[A-Za-z' -]{0,78}[A-Za-z])?)\1")
+
+
+def _md_glued_pairs(raw: str) -> list[re.Match[str]]:
+    """Markdown pairs in *raw* glued to a letter on at least one side; a
+    one-letter pair on both (`ig*n*ore`), as `3*P**2` in code is glued to a
+    digit on one side and was read as markup (round 11)."""
+    out = []
+    for m in _MD_PAIR.finditer(raw):
+        a, b = m.start(), m.end()
+        left = a > 0 and raw[a - 1].isalpha()
+        right = b < len(raw) and raw[b].isalpha()
+        if (left and right) if len(m.group(2)) == 1 else (left or right):
+            out.append(m)
+    return out
+
+
+def _md_unglue(raw: str) -> str:
+    """*raw* with each glued Markdown pair replaced by its content."""
+    pairs = _md_glued_pairs(raw)
+    if not pairs:
+        return raw
+    parts: list[str] = []
+    pos = 0
+    for m in pairs:
+        parts.append(raw[pos:m.start()])
+        parts.append(m.group(2))
+        pos = m.end()
+    parts.append(raw[pos:])
+    return "".join(parts)
 #: `</>` between two word characters: markup a browser drops, joining them.
 _EMPTY_END_IN_WORD = re.compile(r"[0-9A-Za-z](?:</>)+[0-9A-Za-z]")
 #: A Markdown link with text inside a word renders as its text: `ig[n](x)ore`.
 _MD_LINK_IN_WORD = re.compile(r"(?<=[0-9A-Za-z])\[([0-9A-Za-z]{1,50})\]\([^)\s]{0,200}\)(?=[0-9A-Za-z])")
+
+
+class _HiddenStack:
+    """Open elements inside hidden content, with a count per tag name.
+
+    `tag in list` per end tag was quadratic in the nesting depth: deep
+    `<span hidden>` nesting and unmatched end tags ran 100 s on 1.35 MB inside
+    one tokenizer call, where no deadline check can reach (review pass 10).
+    Membership is now a counter lookup; each push is popped at most once.
+    """
+
+    def __init__(self) -> None:
+        self._stack: list[str] = []
+        self._count: dict[str, int] = {}
+
+    def __bool__(self) -> bool:
+        return bool(self._stack)
+
+    def push(self, tag: str) -> None:
+        self._stack.append(tag)
+        self._count[tag] = self._count.get(tag, 0) + 1
+
+    def close(self, tag: str) -> bool:
+        """Close up to the innermost open *tag*, as a browser does; False if
+        none is open."""
+        if not self._count.get(tag):
+            return False
+        while self._stack:
+            top = self._stack.pop()
+            self._count[top] -= 1
+            if top == tag:
+                break
+        return True
 
 
 class _Renderer(HTMLParser):
@@ -102,7 +172,7 @@ class _Renderer(HTMLParser):
         self.styled = False
         self._starts = [0, *(m.end() for m in re.finditer("\n", raw))]
         self.parts: list[str] = []
-        self._hidden: list[str] = []
+        self._hidden = _HiddenStack()
         self.in_word = False
         self._markup_from: int | None = None  # start of a run of markup tokens
         self._refs = 0  # character references in the current run
@@ -142,7 +212,7 @@ class _Renderer(HTMLParser):
         self.styled = self.styled or has_style
         if (self._hidden or tag in _NOT_RENDERED or any(k == "hidden" for k, _ in attrs)
                 or _HIDDEN_STYLE.search(style) or (self.drop_styled and has_style)):
-            self._hidden.append(tag)
+            self._hidden.push(tag)
 
     def _opens_hidden(self, tag: str, attrs: list[tuple[str, str | None]]) -> bool:
         style = _css_unescape(" ".join(v or "" for k, v in attrs if k == "style"))
@@ -167,9 +237,7 @@ class _Renderer(HTMLParser):
         # Close up to the matching open element, as a browser does. Popping
         # only an exact top-of-stack match left a mis-nested hidden element
         # (`<span hidden><i>z</span>`) hiding the rest of the paragraph.
-        if tag in self._hidden:
-            while self._hidden and self._hidden.pop() != tag:
-                pass
+        self._hidden.close(tag)
 
     def handle_comment(self, data: str) -> None:
         self._markup()
@@ -266,8 +334,8 @@ def _readings(raw: str) -> tuple[str, ...]:
             out.append(rendered)
             if styled:
                 out.append(_render(raw, drop_styled=True)[0])
-    if _MD_IN_WORD.search(raw) or _MD_LINK_IN_WORD.search(raw) or _MD_PAIR_IN_WORD.search(raw):
-        out.append(_MD_PAIR_IN_WORD.sub(r"\2", _MD_IN_WORD.sub("", _MD_LINK_IN_WORD.sub(r"\1", raw))))
+    if _MD_IN_WORD.search(raw) or _MD_LINK_IN_WORD.search(raw) or _md_glued_pairs(raw):
+        out.append(_md_unglue(_MD_IN_WORD.sub("", _MD_LINK_IN_WORD.sub(r"\1", raw))))
     flat = " ".join(raw.split())
     return tuple(x for x in dict.fromkeys(" ".join(r.split()) for r in out) if x and x != flat)
 
@@ -322,7 +390,7 @@ class _BlockFinder(HTMLParser):
         self._starts = [0, *(m.end() for m in re.finditer("\n", raw))]
         self.raw = raw
         self.cuts: list[tuple[int, int]] = []
-        self._hidden: list[str] = []
+        self._hidden = _HiddenStack()
 
     def _tag(self, tag: str) -> None:
         # A HIDDEN block element breaks nothing, so it is no cut
@@ -340,17 +408,14 @@ class _BlockFinder(HTMLParser):
         if not hides:
             self._tag(tag)
         if tag not in _VOID and (self._hidden or hides):
-            self._hidden.append(tag)
+            self._hidden.push(tag)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag in self._hidden:
-            while self._hidden and self._hidden.pop() != tag:
-                pass
-            return
-        self._tag(tag)
+        if not self._hidden.close(tag):
+            self._tag(tag)
 
 
 def _segments(content: str, a: int, b: int) -> list[tuple[int, int]]:
@@ -429,7 +494,7 @@ class InlineMarkupRule(BaseRule):
         # a word written starting with a reference (`&#105;gnore`) has none,
         # and the tokenizer below decides whether markup joined words.
         if ("<" not in content and "&" not in content and not _MD_IN_WORD.search(content)
-                and not _MD_LINK_IN_WORD.search(content) and not _MD_PAIR_IN_WORD.search(content)):
+                and not _MD_LINK_IN_WORD.search(content) and not _md_glued_pairs(content)):
             return []
         lines = content.splitlines()
         starts = [0]

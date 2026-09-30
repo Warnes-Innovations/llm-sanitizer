@@ -56,6 +56,12 @@ def _looks_like_base64(s: str) -> bool:
     the other rules scanning the raw text.
     """
     body = s.rstrip("=")
+    # A capitalised word ("Reactivation") has two classes but is still a word;
+    # it decoded to printable UTF-8 garbage whose re-scan spent a layer of the
+    # depth cap, and ordinary page text was reported critical (0.7.2 review,
+    # pass 10). Real base64 takes this shape with probability ~(26/64)**11.
+    if body.isalpha() and body[:1].isupper() and body[1:].islower():
+        return False
     classes = (
         any(c.islower() for c in body)
         + any(c.isupper() for c in body)
