@@ -140,6 +140,28 @@ def _line_starts(text: str) -> list[int]:
     return starts or [0]
 
 
+def _lf_starts(text: str) -> list[int]:
+    return [0, *(m.end() for m in re.finditer("\n", text))]
+
+
+def _offset_in(
+    text: str, finding: Finding, keep_starts: list[int], lf_starts: list[int],
+) -> int | None:
+    """Offset of *finding* in *text*, placed by its (line, column) under either
+    line-numbering scheme (as redactor._finding_offset does) and verified
+    against its matched text; None if neither verifies."""
+    raw = finding.matched_raw
+    line, col = finding.location.line - 1, finding.location.column - 1
+    if not raw or line < 0 or col < 0:
+        return None
+    for starts in (keep_starts, lf_starts):
+        if line < len(starts):
+            start = starts[line] + col
+            if text[start:start + len(raw)] == raw:
+                return start
+    return None
+
+
 @register_rule
 class ZeroWidthRule(BaseRule):
     rule_id = "zero_width"
@@ -207,6 +229,7 @@ class ZeroWidthRule(BaseRule):
             if not found:
                 continue
             per_block: dict[int, list[tuple[Finding, int | None]]] = {}
+            recheck: set[int] = set()
             for f in found:
                 if deadline_exceeded():
                     return []
@@ -214,12 +237,28 @@ class ZeroWidthRule(BaseRule):
                 pos = off if off is not None else view.line_offset(f.location.line)
                 k = view.block_at(pos)
                 if off is not None and off + len(f.matched_raw) > view.block_end(k):
-                    # A match running from one block into the next is an
-                    # artefact of placing unrelated lines side by side in the
-                    # view (review pass 6: an `<!--` line and an `LLM:` line
-                    # far apart were flagged, and a benign line deleted).
+                    # A match running from one block into the next joins
+                    # unrelated lines the view placed side by side (review
+                    # pass 6: an `<!--` line and an `LLM:` line far apart were
+                    # flagged, and a benign line deleted). Do NOT just drop it:
+                    # a greedy match that starts in this block may hide a real
+                    # one that ends inside it (review pass 7: a hidden
+                    # three-line comment scanned clean). Re-scan the block on
+                    # its own instead.
+                    recheck.add(k)
                     continue
                 per_block.setdefault(k, []).append((f, off))
+            for k in sorted(recheck):
+                if deadline_exceeded():
+                    return []
+                start, end = view.blocks[k][0], view.block_end(k)
+                alone = view.text[start:end]
+                keep, lf = _line_starts(alone), _lf_starts(alone)
+                per_block[k] = [
+                    (f, None if o is None else start + o)
+                    for f in scan_deobfuscated(alone, source, linear=True)
+                    for o in [_offset_in(alone, f, keep, lf)]
+                ]
             for k, fs in per_block.items():
                 if deadline_exceeded():
                     return []
@@ -228,7 +267,10 @@ class ZeroWidthRule(BaseRule):
                     # The same original lines, unread: a finding the reading
                     # did not add is not revealed.
                     baselines[(a, b)] = Counter(
-                        f.rule for f in scan_deobfuscated(content[a:b], source, linear=True)
+                        f.rule for f in scan_deobfuscated(
+                            content[a:b], source, linear=True,
+                            exclude=frozenset({self.rule_id}),
+                        )
                     )
                 counts = Counter(f.rule for f, _ in fs)
                 for rule, n in counts.items():
@@ -246,14 +288,15 @@ class ZeroWidthRule(BaseRule):
 
     @staticmethod
     def _is_splitter(content: str, m: re.Match[str]) -> bool:
-        """A run with a line-ending in it counts only BETWEEN word characters —
-        elsewhere it is an ordinary line break."""
+        """A run with a line-ending in it counts only BETWEEN two non-space
+        characters — beside whitespace or at a line's edge it is an ordinary
+        line break. Word characters on both sides was too narrow: U+2028
+        between `the` and `.env` split a payload (0.7.2 review, pass 5 F4)."""
         if not _LINE_END_IN_RUN.search(m.group(0)):
             return True
         before = content[m.start() - 1] if m.start() else ""
         after = content[m.end()] if m.end() < len(content) else ""
-        return bool(before and after and (before.isalnum() or before == "_")
-                    and (after.isalnum() or after == "_"))
+        return bool(before and after and not before.isspace() and not after.isspace())
 
     @staticmethod
     def _view(
@@ -416,20 +459,11 @@ class _View:
         redactor._finding_offset, but on line tables built ONCE per view.
         Calling _finding_offset per finding re-split the whole view each time:
         280 s on a 1.5 MB file against a 60 s deadline (review pass 6)."""
-        raw = finding.matched_raw
-        line, col = finding.location.line - 1, finding.location.column - 1
-        if not raw or line < 0 or col < 0:
-            return None
-        text = self.text
         if self._keep_starts is None:
-            self._keep_starts = _line_starts(text)
-            self._lf_starts = [0, *(m.end() for m in re.finditer("\n", text))]
-        for starts in (self._keep_starts, self._lf_starts or []):
-            if line < len(starts):
-                start = starts[line] + col
-                if text[start:start + len(raw)] == raw:
-                    return start
-        return None
+            self._keep_starts = _line_starts(self.text)
+        if self._lf_starts is None:
+            self._lf_starts = _lf_starts(self.text)
+        return _offset_in(self.text, finding, self._keep_starts, self._lf_starts)
 
     def keep(self, content: str, a: int, b: int) -> None:
         if b > a:

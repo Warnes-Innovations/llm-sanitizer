@@ -91,6 +91,13 @@ def _vocabulary() -> tuple[frozenset[str], frozenset[str]]:
     triggers |= lexicon_words - set(getattr(features, "_STOPWORDS", ()))
 
     words = set(triggers) | lexicon_words
+    # The classifier's training sentences: ordinary words a payload is written
+    # with that no rule pattern names ("password", "email").
+    from llm_sanitizer.semantic import corpus
+
+    for name, value in vars(corpus).items():
+        if not name.startswith("__"):
+            words |= _words_in(value)
     model = json.loads((Path(features.__file__).parent / "model.json").read_text())
     for key in model.get("weights", {}):
         if key.startswith("w:") and key[2:].isalpha():
@@ -104,13 +111,13 @@ def _vocabulary() -> tuple[frozenset[str], frozenset[str]]:
 
 @functools.cache
 def _trigger_prefixes() -> dict[str, tuple[str, ...]]:
-    """Trigger words of 4+ letters, keyed by their first four letters. A set
+    """Trigger words of 3+ letters, keyed by their first three letters. A set
     lookup per position: an alternation regex over the same words took ~9 s on
     a 4 MB run, this ~0.6 s."""
     triggers, _ = _vocabulary()
     out: dict[str, list[str]] = {}
-    for w in sorted((w for w in triggers if len(w) >= 4), key=len, reverse=True):
-        out.setdefault(w[:4], []).append(w)
+    for w in sorted((w for w in triggers if len(w) >= 3), key=len, reverse=True):
+        out.setdefault(w[:3], []).append(w)
     return {k: tuple(v) for k, v in out.items()}
 
 
@@ -118,8 +125,8 @@ def _trigger_hits(low: str) -> list[int]:
     """Start offsets of trigger words in lower-cased *low*."""
     prefixes = _trigger_prefixes()
     hits: list[int] = []
-    for i in range(len(low) - 3):
-        cands = prefixes.get(low[i:i + 4])
+    for i in range(len(low) - 2):
+        cands = prefixes.get(low[i:i + 3])
         if cands and any(low.startswith(w, i) for w in cands):
             hits.append(i)
     return hits
@@ -173,34 +180,146 @@ def _split(run: str) -> str | None:
     if not middle or unknown > covered * _MAX_UNKNOWN_SHARE:
         return None
     found = [t.lower() for t, is_word in middle if is_word]
-    # Cost controls, not detection: the re-scan decides. Each keeps ordinary
-    # long words ("documentation" -> "document at i on") from being split and
-    # re-scanned. A trigger must be a real content word (4+ letters, not
-    # "at"/"on"); an uncovered chunk shorter than 4 letters is a sign the
-    # vocabulary is forcing a split; short average pieces are fragments.
-    if len(middle) < 2 or not any(len(w) >= 4 and w in triggers for w in found):
+    # Cost controls, not detection: the re-scan decides, so these only keep
+    # ordinary long words ("straightforward" -> "str ai ght forward") from
+    # being split and re-scanned. Each was tightened once and then loosened
+    # again when it hid a real payload (review pass 7), so read the case
+    # before changing one:
+    #  - some trigger word must be among the pieces;
+    #  - an uncovered chunk under 4 letters inside the phrase ("ur", "teh")
+    #    is allowed only when two or more distinct 4+ letter triggers vouch
+    #    for the split ("ignoreallurpreviousinstructions");
+    #  - a phrase whose triggers are all short ("youarenowdan") must be fully
+    #    covered, in three pieces or more.
+    #  - pieces average 3+ letters ("obf us cat i on" is fragments), and a
+    #    phrase with an uncovered END trimmed off keeps 3+ pieces ("read in|g").
+    long_triggers = {w for w in found if len(w) >= 4 and w in triggers}
+    if len(middle) < 2 or not any(w in triggers for w in found):
         return None
-    if any(not is_word and len(t) < 4 for t, is_word in middle):
+    if covered / len(middle) < 3.0 or (len(middle) < 3 and (lo > 0 or hi < len(merged))):
         return None
-    if covered / len(middle) < 3.5:
+    short_unknown = any(not is_word and len(t) < 4 for t, is_word in middle)
+    if not long_triggers:
+        if unknown or len(middle) < 3:
+            return None
+    elif short_unknown and len(long_triggers) < 2:
         return None
     return " ".join(t for t, _ in merged)
 
 
+def _worth_splitting(low: str) -> bool:
+    """A trigger word of 4+ letters in *low*, or three distinct short ones
+    ("youarenowdan"). One short trigger ("all", "get") is in too many
+    ordinary words to be worth a split and a re-scan."""
+    short: set[str] = set()
+    prefixes = _trigger_prefixes()
+    for i in _trigger_hits(low):
+        for w in prefixes[low[i:i + 3]]:
+            if low.startswith(w, i):
+                if len(w) >= 4:
+                    return True
+                short.add(w)
+    return len(short) >= 3
+
+
 def _split_short(run: str) -> str | None:
-    if len(run) > _BLOCK or not _trigger_hits(run.lower()):
+    # A short all-capitals run is an acronym, not a glued phrase: splitting
+    # `OPENSSH` turned `BEGIN OPENSSH PRIVATE KEY` into an exfiltration phrase
+    # (review pass 7). A glued payload in capitals is longer than 8 letters.
+    if run.isupper() and len(run) <= 8:
+        return None
+    if len(run) > _BLOCK or not _worth_splitting(run.lower()):
         return None
     return _split(run)
 
 
-def _readings(line: str) -> list[str]:
-    """The line with each short glued run split into words (if any changed),
-    plus, for each LONG run, a split of the window around every trigger word
-    on its own."""
+#: Words joined by single separators or digits (`ignore_all.previous-1rules`).
+#: A repeated separator is char_split's; a single one between words is also
+#: what snake_case and dotted names look like, so it is read as a space only
+#: in a token that holds a trigger word.
+_JOINED = re.compile(r"(?<![A-Za-z])[A-Za-z]++(?:[._\-0-9]++[A-Za-z]++)+")
+_JOINER = re.compile(r"[._\-0-9]+")
+
+
+#: A lower-to-upper change inside a run: CamelCase, an identifier's shape.
+_CAMEL = re.compile(r"[a-z][A-Z]")
+_CAMEL_PART = re.compile(r"[A-Z]+(?=[A-Z][a-z])|[A-Z]?[a-z]+|[A-Z]+")
+
+_IDENT_EDGE = frozenset("_./-")
+
+
+#: A name-like token: letters, optionally joined by `_ . -` or digits.
+_IDTOK = re.compile(r"(?<![A-Za-z])[A-Za-z]++(?:[._\-0-9]++[A-Za-z]++)*")
+
+
+def _ident_token(tok: str, line: str, a: int, b: int) -> str:
+    """*tok* (at line[a:b]) read as words: CamelCase split at its capitals,
+    a letter run inside a name or path split as a glued run, and — for a
+    phrase-like join of three or more parts, two of them trigger words
+    (`ignore_all_previous`) — its separators read as spaces."""
+    triggers, _ = _vocabulary()
+    parts = _JOINER.split(tok)
+    seps = _JOINER.findall(tok)
+    phrase = len(parts) >= 3 and len(
+        {p.lower() for p in parts if len(p) >= 4 and p.lower() in triggers}) >= 2
+    in_name = len(parts) > 1 or (a > 0 and line[a - 1] in _IDENT_EDGE) or (
+        b < len(line) and line[b] in _IDENT_EDGE)
     out: list[str] = []
-    new = _RUN.sub(lambda m: _split_short(m.group(0)) or m.group(0), line)
-    if new != line:
+    for i, p in enumerate(parts):
+        if _CAMEL.search(p) and _worth_splitting(p.lower()):
+            p = " ".join((_split_short(x) or x) if len(x) >= 7 else x for x in _CAMEL_PART.findall(p))
+        elif in_name and len(p) >= 7:
+            p = _split_short(p) or p
+        out.append(p)
+        if i < len(seps):
+            out.append(" " if phrase else seps[i])
+    return "".join(out)
+
+
+def _ident_reading(line: str) -> tuple[str, list[tuple[int, int]]]:
+    """*line* with each name-like token read as words, and where each
+    rewritten token lies in the result."""
+    out: list[str] = []
+    spans: list[tuple[int, int]] = []
+    pos = size = 0
+    for m in _IDTOK.finditer(line):
+        tok = m.group(0)
+        new = _ident_token(tok, line, m.start(), m.end())
+        out.append(line[pos:m.start()])
+        size += m.start() - pos
+        if new != tok:
+            spans.append((size, size + len(new)))
         out.append(new)
+        size += len(new)
+        pos = m.end()
+    out.append(line[pos:])
+    return "".join(out), spans
+
+
+def _plain(m: re.Match[str]) -> str:
+    run = m.group(0)
+    text, a, b = m.string, m.start(), m.end()
+    if _CAMEL.search(run) or (a > 0 and text[a - 1] in _IDENT_EDGE) or (
+            b < len(text) and text[b] in _IDENT_EDGE):
+        return run
+    return _split_short(run) or run
+
+
+def _readings(line: str) -> list[tuple[str, list[tuple[int, int]] | None]]:
+    """Readings of *line*. The second item is None for a PLAIN reading, and
+    for an IDENTIFIER-shaped reading the spans of the rewritten tokens:
+
+    - plain glued runs (no CamelCase, not inside a name or path) split;
+    - name-like tokens read as words (see _ident_token);
+    - for each LONG run, the window around every trigger word, split.
+    """
+    out: list[tuple[str, list[tuple[int, int]] | None]] = []
+    plain = _RUN.sub(_plain, line)
+    if plain != line:
+        out.append((plain, None))
+    ident, spans = _ident_reading(line)
+    if spans and ident != plain:
+        out.append((ident, spans))
     half = _BLOCK // 2
     for m in _RUN.finditer(line):
         run = m.group(0)
@@ -217,7 +336,7 @@ def _readings(line: str) -> list[str]:
             covered_to = start + _BLOCK
             split = _split(window)
             if split:
-                out.append(split)
+                out.append((split, None))
     return out
 
 
@@ -237,14 +356,16 @@ class GluedWordsRule(BaseRule):
         lines = content.splitlines()
         changed: list[int] = []
         rebuilt: list[str] = []
+        spans_of: list[list[tuple[int, int]] | None] = []
         for idx, line in enumerate(lines):
             if deadline_exceeded():
                 return []
-            if not _RUN.search(line):
+            if not _RUN.search(line) and not _JOINED.search(line):
                 continue
-            for reading in _readings(line):
+            for reading, spans in _readings(line):
                 changed.append(idx)
                 rebuilt.append(reading)
+                spans_of.append(spans)
         if not changed:
             return []
         # One re-scan of every rebuilt line together (linear in the input),
@@ -254,6 +375,19 @@ class GluedWordsRule(BaseRule):
         for f in found:
             k = f.location.line - 1
             if 0 <= k < len(changed):
+                spans = spans_of[k]
+                if spans is not None:
+                    # In an identifier reading a finding counts only inside
+                    # ONE rewritten token: a payload hidden as a name is all
+                    # in the name, while code around a name ("return
+                    # auth_user.access_token") reads as a phrase by accident.
+                    # That alone took ordinary library code from 77 flagged
+                    # lines to 2 (review pass 7); exempting whole rules on top
+                    # removed no more and lost CamelCase payloads.
+                    a = f.location.column - 1
+                    z = a + len(f.matched_raw)
+                    if not any(s <= a and z <= e for s, e in spans):
+                        continue
                 by_line.setdefault(k, []).append(f)
         findings: list[Finding] = []
         flagged: set[int] = set()
@@ -267,7 +401,8 @@ class GluedWordsRule(BaseRule):
             line = lines[idx]
             if idx not in baselines:
                 baselines[idx] = Counter(
-                    f.rule for f in scan_deobfuscated(line, source, linear=True)
+                    f.rule for f in scan_deobfuscated(
+                        line, source, linear=True, exclude=frozenset({self.rule_id}))
                 )
             baseline = baselines[idx]
             counts = Counter(f.rule for f in fs)

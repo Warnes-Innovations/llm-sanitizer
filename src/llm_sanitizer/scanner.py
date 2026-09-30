@@ -144,7 +144,11 @@ def _read_markup_text(path: Path) -> str | None:
     if not sniff_rtf(head):
         return None
 
-    content = path.read_text(encoding="utf-8", errors="replace")
+    # Valid UTF-8 as UTF-8 and every other byte as Latin-1 — what an RTF
+    # reader shows for a legacy code page. Decoding with replacement turned
+    # each accented letter of a cp1252 RTF into U+FFFD in redacted output
+    # (review pass 7).
+    content = path.read_bytes().decode("utf-8", errors="latin1_fallback")
     try:
         return extract_markup_text(content)
     except ImportError as exc:
@@ -1500,7 +1504,7 @@ class Scanner:
                         CORRUPT_FILE, source,
                         f"markup extraction failed on its legacy-byte reading: {exc}",
                     )]
-                if shown:
+                if shown and shown != markup:
                     base_counts = Counter(f.rule for f in base)
                     seen = self.scan(shown, source=source, sensitivity=sensitivity).findings
                     seen_counts = Counter(f.rule for f in seen)

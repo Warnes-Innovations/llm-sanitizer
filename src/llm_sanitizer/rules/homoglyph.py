@@ -213,7 +213,7 @@ class HomoglyphRule(BaseRule):
             # double-reported and mis-attributed to homoglyph normalization.
             baseline_keys = {
                 (f.rule, f.location.line, f.location.column)
-                for f in scan_deobfuscated(content, source)
+                for f in scan_deobfuscated(content, source, exclude=frozenset({self.rule_id}))
             }
             for sub in scan_deobfuscated(normalized_content, source):
                 if (sub.rule, sub.location.line, sub.location.column) in baseline_keys:

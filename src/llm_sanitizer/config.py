@@ -234,6 +234,21 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
             raise ConfigError(
                 f"{cfg_path}: `{section}` must be a mapping, not a {type(value).__name__}"
             )
+    # A key this version does not read is an error, not ignored: a misspelt
+    # or invented setting (`policy: {fail_on: ...}`) left the operator
+    # believing a control was configured (review pass 7).
+    for where, value, known in (
+        ("", raw, _KNOWN_TOP_LEVEL),
+        ("policy.", raw.get("policy", {}), _KNOWN_POLICY),
+        ("output.", raw.get("output", {}), _KNOWN_OUTPUT),
+        ("archive.", raw.get("archive", {}), _KNOWN_ARCHIVE),
+    ):
+        unknown = sorted(str(k) for k in value if k not in known)
+        if unknown:
+            raise ConfigError(
+                f"{cfg_path}: unknown setting(s) {', '.join(where + k for k in unknown)}; "
+                f"known: {', '.join(sorted(known))}"
+            )
     sensitivity = raw.get("sensitivity", "medium")
     if sensitivity not in _SENSITIVITIES:
         # An unknown level is not "medium": the operator asked for something
@@ -303,11 +318,31 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
     )
 
 
+#: Every key this version reads, per section. `llm` is reserved: the design
+#: spec's example config carries it, and rejecting it would break a config
+#: copied from there.
+_KNOWN_TOP_LEVEL = frozenset({
+    "sensitivity", "rules", "policy", "output", "archive",
+    "unprocessable_binary_policy", "max_scan_bytes", "max_scan_seconds", "llm",
+})
+_KNOWN_POLICY = frozenset({"mode", "agents", "custom_allow", "custom_deny"})
+_KNOWN_OUTPUT = frozenset({"format", "context_lines"})
+_KNOWN_ARCHIVE = frozenset({
+    "formats", "max_depth", "max_cumulative_bytes", "max_entries",
+    "max_uncompressed_bytes", "max_compression_ratio", "min_ratio_check_bytes",
+})
+_ARCHIVE_INTS = _KNOWN_ARCHIVE - {"formats"}
+
+
 def _parse_archive(raw: dict[str, Any]) -> ArchiveSettings:
     """Build ArchiveSettings from a config mapping, falling back to the dataclass
     defaults (which mirror the scanner's module-level constants) for any key the
     config omits."""
     defaults = ArchiveSettings()
+    for key in _ARCHIVE_INTS & raw.keys():
+        value = raw[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+            raise ConfigError(f"archive.{key} must be a non-negative number, not {value!r}")
     formats = raw.get("formats", defaults.formats)
     if not isinstance(formats, list):
         formats = defaults.formats

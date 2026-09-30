@@ -137,7 +137,8 @@ class CharSplitRule(BaseRule):
             # the raw line already trips, so an injection that fires on the raw
             # text is not double-reported here.
             baseline = {
-                (f.rule, f.matched) for f in scan_deobfuscated(line, source)
+                (f.rule, f.matched)
+                for f in scan_deobfuscated(line, source, exclude=frozenset({self.rule_id}))
             }
             sub_findings = [
                 f

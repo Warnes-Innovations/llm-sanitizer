@@ -48,6 +48,16 @@ _MAX_RESCAN_BYTES = 4 * 1024 * 1024
 _depth: contextvars.ContextVar[int] = contextvars.ContextVar(
     "llm_sanitizer_deobfuscation_depth", default=0
 )
+# Rules left out of a re-scan and of every re-scan nested inside it. A rule's
+# BASELINE ("what did the text trip before I undid my transport?") excludes
+# the rule itself: otherwise another de-obfuscation rule in the baseline undoes
+# a DIFFERENT transport, routes the payload back through this rule, and finds
+# it — so the baseline already "has" the payload, the reading adds nothing, and
+# each rule defers to the other. Zero-width and homoglyph masked each other
+# that way (0.7.2 review, pass 5 F4: a Hangul filler after a homoglyph word).
+_excluded: contextvars.ContextVar[frozenset[str]] = contextvars.ContextVar(
+    "llm_sanitizer_deobfuscation_excluded", default=frozenset()
+)
 _scanned_bytes: contextvars.ContextVar[int] = contextvars.ContextVar(
     "llm_sanitizer_deobfuscation_bytes", default=0
 )
@@ -65,7 +75,9 @@ _scanner_managed: contextvars.ContextVar[bool] = contextvars.ContextVar(
 # the same text (Red-Team F3 / M2) — and keeps the low base64 floor (M10)
 # affordable. Set to a fresh dict by reset_rescan_budget; None for direct
 # rule.detect() calls (no memo, behaves as before).
-_rescan_cache: contextvars.ContextVar[dict[str, list[Finding]] | None] = (
+_rescan_cache: contextvars.ContextVar[
+    dict[tuple[int, frozenset[str], str], list[Finding]] | None
+] = (
     contextvars.ContextVar("llm_sanitizer_rescan_cache", default=None)
 )
 # Set True when a re-scan was refused because the work budget was exhausted, so
@@ -152,7 +164,9 @@ def deadline_exceeded() -> bool:
     return d is not None and time.monotonic() > d
 
 
-def scan_deobfuscated(text: str, source: str = "", *, linear: bool = False) -> list[Finding]:
+def scan_deobfuscated(
+    text: str, source: str = "", *, linear: bool = False, exclude: frozenset[str] = frozenset(),
+) -> list[Finding]:
     """Run every registered rule over already-de-obfuscated *text* and return
     their findings (empty if the de-obfuscated text is clean).
 
@@ -162,6 +176,9 @@ def scan_deobfuscated(text: str, source: str = "", *, linear: bool = False) -> l
     shared byte budget: drawing on it made a large CLEAN file exhaust the
     budget and be reported (and refused) as not fully scanned (0.7.2 review,
     pass 3). Depth, the memo and the scan deadline still apply.
+
+    ``exclude`` names rules left out of this re-scan and every re-scan nested
+    in it; a rule's baseline passes its own id (see ``_excluded``).
 
     Callers pass text they have themselves decoded/normalized; this function
     does not de-obfuscate. Recursion is bounded by ``_MAX_DEOBFUSCATION_DEPTH``
@@ -183,11 +200,17 @@ def scan_deobfuscated(text: str, source: str = "", *, linear: bool = False) -> l
         # content is still obfuscated at the safe-depth cap, so fail closed.
         return [_chained_obfuscation_finding(text)]
 
-    # Memo hit: an identical blob was already scanned this content unit — reuse
-    # its result without re-running the ruleset or consuming more budget.
+    # Memo hit: an identical blob was already scanned AT THIS DEPTH this
+    # content unit — reuse its result without re-running the ruleset or
+    # consuming more budget. Keyed by depth too: the same text scanned deeper
+    # reaches the depth cap sooner, so its result is truncated. Reusing that
+    # result higher up let a homoglyph word beside a Hangul filler or U+2028
+    # scan clean (0.7.2 review, pass 5 F4; also in 0.7.1).
+    excluded = _excluded.get() | exclude
     cache = _rescan_cache.get()
+    key = (depth, excluded, text)
     if cache is not None:
-        cached = cache.get(text)
+        cached = cache.get(key)
         if cached is not None:
             return cached
 
@@ -198,9 +221,12 @@ def scan_deobfuscated(text: str, source: str = "", *, linear: bool = False) -> l
         _scanned_bytes.set(_scanned_bytes.get() + len(text))
 
     token = _depth.set(depth + 1)
+    ex_token = _excluded.set(excluded)
     try:
         findings: list[Finding] = []
         for rule_cls in get_all_rules():
+            if rule_cls.rule_id in excluded:
+                continue
             try:
                 # get_all_rules() returns classes; instantiate before detect().
                 findings.extend(rule_cls().detect(text, source))
@@ -208,7 +234,8 @@ def scan_deobfuscated(text: str, source: str = "", *, linear: bool = False) -> l
                 # A single misbehaving rule must not sink the whole re-scan.
                 continue
         if cache is not None:
-            cache[text] = findings
+            cache[key] = findings
         return findings
     finally:
+        _excluded.reset(ex_token)
         _depth.reset(token)

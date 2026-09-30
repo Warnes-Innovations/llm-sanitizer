@@ -76,9 +76,14 @@ def _highlight_marker(finding: Finding) -> str:
     # the 256 variation selectors, which carried a payload inside the marker
     # (review pass 6).
     splitters = frozenset(_ZERO_WIDTH_CODEPOINTS)
+    # The whole matched text, not `matched`: some rules shorten `matched` to
+    # 80 characters for reports, and the marker then REPLACED a long line
+    # with its first 80 characters — the rest, instruction included, vanished
+    # from highlight output (review pass 7).
+    text = finding.matched_raw or finding.matched
     shown = "".join(
         c if c.isprintable() and ord(c) not in splitters else f"\\u{{{ord(c):04x}}}"
-        for c in finding.matched
+        for c in text
     )
     return f"\u26a0\ufe0f[LLM-INSTRUCTION: {shown}]\u26a0\ufe0f"
 
@@ -690,7 +695,7 @@ def _redact_snapshot(
         mismatch = detect_type_mismatch(snap)
         if mismatch is not None:
             return _refusal(
-                str(path), "type-mismatch",
+                str(path), "invalid-contents",
                 f"{mismatch}; the content was not redacted and no output was written",
                 original_format,
             )
