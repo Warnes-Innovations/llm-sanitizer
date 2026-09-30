@@ -849,10 +849,11 @@ words, or three short ones that are all known words.
 A name-shaped token (CamelCase, or a run inside a name, path or URL) is read in
 a separate identifier reading, where a finding counts only if it lies wholly
 inside one rewritten token — or within adjacent CamelCase names and up to 12
-plain words beside them (never for joined or acronym-bearing names) — and a name
-followed by `( . = : [` or preceded by `.` is treated as code and not read: code
-around a name reads like a phrase once split far more often than a payload hides
-in a name.
+plain words beside them (not for `.`-joined names, non-phrase joins, or names
+holding an acronym other than a function word) — and a name used as code
+(`name(`, `name[`, `name.attr`, `obj.name`, `name =`; a sentence's own
+punctuation is not code) is not read: code around a name reads like a phrase
+once split far more often than a payload hides in a name.
 Flags only what the split line newly trips.
 
 **Risk level:** that of the rule the split text trips.
@@ -866,11 +867,18 @@ standard library's HTML parser (linear; a regular expression for the same test
 backtracked) and read as it renders — tags and comments removed, references
 decoded, hidden elements' text left out — then re-scanned through
 `scan_deobfuscated`, where a decoded soft hyphen or zero-width space is handled
-by the zero-width rule. Script, style, template, head and title content is never
-rendered; a second reading drops every styled element's text, since stylesheet
-hiding cannot be resolved; a third removes Markdown syntax inside words.
+by the zero-width rule. Script, style, template, noscript, noembed, head and
+title content is never rendered, and a hidden block element breaks no word; a
+second reading drops every styled element's text, since stylesheet hiding
+cannot be resolved; a third removes paired Markdown syntax inside words.
 Paragraphs are joined across a blank line inside an open tag or comment, and
-split at block-level tags (and into 64-line chunks), so a finding is its segment.
+split at block-level tags as the tokenizer finds them (never inside a comment
+or attribute, never at a hidden block element), and into 64-line chunks never
+ended inside an open comment or tag, so a finding is its segment. The baseline
+is the segment flattened to one line, like its readings. Every compiled pattern
+in the rules and readers is fuzzed for backtracking by
+`tests/test_regex_backtracking.py`: the scan deadline bounds rule loops but not a
+single regular-expression call.
 The raw markup is still scanned by every other rule. Flags only what the
 rendered segment newly trips.
 

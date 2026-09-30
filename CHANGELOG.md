@@ -115,23 +115,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **A phrase written without word breaks passed every rule.**
   `ignoreallpreviousinstructions`, and the same text reached by removing invisible
   characters, scanned clean in 0.7.1 too, as did the same words joined by single
-  `_`, `-`, `.`, `+`, `,`, `'`, `%20` or digits. The new `glued_words` rule splits such
-  a run back into words and re-scans it. A name-shaped token (CamelCase, or a run
-  inside a name, path or URL) counts only when the payload lies within it — or within
-  CamelCase names and plain words beside it — so code that merely reads like a phrase
-  once split (`return auth_user.access_token`, `revealPasswordToggle.addEventListener`)
-  stays clean.
+  `_ - . + , ' / | ~ ; : #`, Unicode dashes and dots, percent-encoded separators or
+  digits. The new `glued_words` rule splits such a run back into words and re-scans it.
+  A name-shaped token (CamelCase, or a run inside a name, path or URL) counts only when
+  the payload lies within it — or within CamelCase names and plain words beside it —
+  and a name used as code (`name(`, `name[`, `obj.name`, `name.attr`, `name =`) is not
+  read, so code that merely reads like a phrase once split (`return
+  auth_user.access_token`, `revealPasswordToggle.addEventListener`) stays clean. A
+  sentence's own punctuation after a payload does not make it code.
 - **Markup inside words passed every rule.** `ig<b></b>nore`, `ig&shy;nore`,
   `ig&#x200B;nore` and `ig<!---->nore` render as `ignore` in a browser and in Markdown,
   but no rule matched the raw text (0.7.1 behaves the same). The new `inline_markup`
   rule renders each such paragraph with the standard library's HTML parser — so
   references without `;`, `>` inside attributes, markup over a line break or a blank
-  line, words written wholly as references, `<script>`/`<style>`/`<template>` content,
-  and hidden elements inside words (including CSS-escaped styles, and any styled
-  element, since stylesheet hiding cannot be resolved) are read as a browser shows
-  them — and re-scans it. Markdown inside a word (`` ig`n`ore ``, `ig**n**ore`,
-  `ig[](x)nore`) is read as rendered too. A finding covers the block-level segment it
-  is in, not the whole page.
+  line, words written wholly as references, `<script>`/`<style>`/`<template>`/
+  `<noscript>`/`<noembed>` content, a stray `</>`, and hidden elements inside words
+  (including hidden block elements, CSS-escaped styles, and any styled element, since
+  stylesheet hiding cannot be resolved) are read as a browser shows them — and
+  re-scans it. Markdown inside a word (`` ig`n`ore ``, `ig**n**ore`, `ig[n](x)ore`) is
+  read as rendered too; an unpaired `**` (exponentiation in code) is not. A finding
+  covers the block-level segment it is in, as the tokenizer sees block tags, not the
+  whole page.
 - **A homoglyph word beside a splitter scanned clean.** A Hangul filler, U+2028 or NEL
   between words, or a zero-width character inside a homoglyph-substituted word, hid it
   from both rules (0.7.1 behaves the same). Each de-obfuscation rule's before-and-after
@@ -204,17 +208,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Closing it fully needs descriptor-based reads throughout.
 - Reading splitter-bearing text more than once costs time where most lines carry such
   a character. Measured on one machine, clean text, 0.7.1 then 0.7.2: 2.5 MB with
-  U+FFFD on every line 5.9 s to 25.1 s; a 2.5 MB cp1252 file with an invalid byte on
-  every line 5.8 s to 25.2 s; 0.6 MB of emoji 1.7 s to 5.7 s; a 1.6 MB single line with
+  U+FFFD on every line 5.9 s to 27.0 s; a 2.5 MB cp1252 file with an invalid byte on
+  every line 5.8 s to 25.5 s; 0.6 MB of emoji 1.7 s to 5.7 s; a 1.6 MB single line with
   a zero-width space in every word 2.5 s to 5.0 s. At that rate a clean file this dense
-  with invalid bytes reaches the default 60 s `max_scan_seconds` at roughly 6 MB and
+  with invalid bytes reaches the default 60 s `max_scan_seconds` at roughly 5.5 MB and
   is then refused as not fully scanned; raise `max_scan_seconds` for such inputs. A
   line is read once per role assignment of the classes IT holds (2, 4, 8 or 16
   readings), so clean text with all four classes on every line is slowest: 0.3 MB took
   21 s, and such text reaches the default deadline at roughly 0.85 MB. Text packed
   with every transport at once (splitters, markup, homoglyphs and CamelCase on every
-  line) takes about 0.5 s per KB. Ordinary prose (0.84 MB of this repository's
-  Markdown) went from 11.2 s to 11.8 s. Tracked in
+  line) takes about 0.5 s per KB. Markdown dense with HTML and code examples (0.85 MB
+  of this repository's own Markdown) went from 11.7 s to 18.5 s, about 58% more, most
+  of it rendering markup; a 440 KB minified HTML page takes about 19 s. Tracked in
   https://github.com/Warnes-Innovations/llm-sanitizer/issues/61.
 - When a rule revealed by a reading matches a whole sentence (`semantic_intent`), the
   whole sentence is the redacted span, benign words in it included. A `glued_words`,
