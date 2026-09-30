@@ -45,12 +45,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **An invalid byte inside each trigger word hid an injection.** A raw `0xAD` byte (a
   soft hyphen in Latin-1) became U+FFFD on read, which no rule stripped. The file
   scanned clean and was copied through byte-exact. U+FFFD is now a splitter in the UTF-8
-  reading, and when a file's (or stdin's) bytes are not valid UTF-8, the lines they are
-  on are ALSO read with each invalid byte decoded as Latin-1 and the valid UTF-8 left as
-  it is — what a legacy-encoding consumer displays, where `0xAD` is an invisible soft
-  hyphen and `0xA0` a space. Every byte 0x80–0xFF, inside a word or between words, is
-  caught (pinned by a test). `redact` refuses a file whose payload only the byte reading
-  shows (`hidden-in-invalid-bytes`), including `redact -o -` and stdin. Innocent Latin-1
+  reading. Where a line's invalid bytes play two roles — a gap byte (`0xA0`, `0x85`)
+  alongside any other invalid byte — that line (of a file, stdin, or an RTF or other
+  markup file's own bytes) is ALSO read with each invalid byte decoded as Latin-1 and
+  the valid UTF-8 left as it is: what a legacy-encoding consumer displays, where `0xAD`
+  is an invisible soft hyphen and `0xA0` a space. Every byte 0x80–0xFF, inside a word or
+  between words, is caught (pinned by a test). `redact` refuses a file when that reading
+  of those lines trips any rule (`hidden-in-invalid-bytes`), including `redact -o -` and
+  stdin; a visible payload elsewhere on the line no longer masks it. Innocent Latin-1
   text stays clean.
 - **A redaction that did not converge was returned as if clean.** The loop stopped when
   the text stopped changing or the pass budget ran out. A finding that redaction cannot
@@ -82,7 +84,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   streams, including `/ActualText`, are run through the rules, and so are `#xx`-escaped
   names (a payload spelled `/Disregard#20your#20...`). Literal strings with nested
   parentheses decode whole, and every string or name is read as UTF-8 as well as Latin-1,
-  so a splitter carried as UTF-8 bytes is seen as the character it is.
+  so a splitter carried as UTF-8 bytes is seen as the character it is. One invalid byte
+  in a string no longer discards its UTF-8 reading: that byte alone is read as Latin-1.
 - **More invisible splitters, in any combination.** The zero-width rule now covers every
   Unicode Default_Ignorable code point and format character (category Cf), C0/C1
   controls, and blank characters that render as a gap (Hangul fillers, blank Braille,
@@ -91,15 +94,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   others in one run. Each class of character is read both ways — removed, and as a
   space — in every combination across the classes present, so one class inside words
   and another between them is found, as is a zero-width character used only as the
-  space between words. All are flagged only when a reading reveals an injection. When a
-  splitter was revealed read as a space, strip and placeholder modes replace it with a
-  space rather than gluing the words together, so the next pass removes the exposed
-  injection. `scan` and `redact` now read text files identically (no newline
-  translation), so a bare CR splitter is handled by both.
+  space between words. All are flagged only when a reading reveals an injection. The
+  finding covers the revealed payload itself, splitters included, and redaction removes
+  or replaces that whole span, so no mode leaves the words behind, glued together or
+  re-spaced. Where another rule's edit falls inside it (an invisible tag character, for
+  instance), the payload edit wins. `scan` and `redact` now read text files identically
+  (no newline translation), so a bare CR splitter is handled by both.
 - **Comment and highlight modes could publish payload outside their markers.** An edit
   that overlapped an earlier one was skipped, so a finding could be located but not
   applied. These modes now check the text left outside the markers, and refuse the file
-  (`not-converged`) if it still trips a rule.
+  (`not-converged`) if it still trips a rule. The highlight marker writes invisible
+  characters as visible `\u{...}` escapes, so it no longer republishes an invisible
+  payload.
 - **An allowlist lookalike could still pass.** A path with `..` in it
   (`.claude/../evil.md`) is normalised before matching, and on POSIX a name containing a
   backslash (`evil\CLAUDE.md`, one file) no longer matches an allowlisted path.
@@ -107,7 +113,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   or a named config path that does not exist, now raises a configuration error instead
   of falling back to another config or the defaults. Any config that cannot be read as
   a YAML mapping — malformed, a list, unreadable, not UTF-8 — is a configuration error
-  too. The CLI reports configuration errors with exit 2 and no traceback.
+  too, as is a `rules`, `policy`, `output` or `archive` section that is not a mapping,
+  and a `sensitivity` (global or per rule) other than `low`, `medium` or `high`. The CLI
+  reports configuration errors with exit 2 and no traceback.
 - **Many `--glob` shapes selected nothing and reported clean.** Patterns with a directory
   part (`docs/*.md`), a leading `./`, an absolute path under the root, a trailing `/`,
   simple braces (`*.{md,txt}`) and `**` standing for zero directories (`docs/**/*.md`
@@ -115,8 +123,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `.//docs`, `docs/./x`, `docs/sub/../x`, an absolute directory with or without a
   trailing `/`, and a pattern starting with the root's own name. A glob that selects
   nothing is reported as a `glob-matched-nothing` walk issue, shown in the default
-  report as well as JSON. A brace expansion beyond 256 patterns is refused (exit 2), and
-  `**` matching is memoised, so neither can be used to hang a scan.
+  report as well as JSON. A brace expansion beyond 64 patterns is refused (exit 2), each
+  pattern is compiled once, and `**` matching is memoised, so none of these can be used
+  to hang a scan.
 - **Directory-mode writes are confined to the output directory.** A directory symlink
   planted in the output tree could send a write elsewhere, and it overwrote an
   unrelated file (`output-escapes-root`). Writers with no source file (stdin, a URL)
@@ -144,7 +153,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every line 5.8 s to 17.2 s; 0.6 MB of emoji 1.7 s to 5.1 s; a 1.6 MB single line with
   a zero-width space in every word 2.5 s to 4.4 s. At that rate a clean file this dense
   with invalid bytes reaches the default 60 s `max_scan_seconds` at roughly 9 MB and is
-  then refused as not fully scanned; raise `max_scan_seconds` for such inputs.
+  then refused as not fully scanned; raise `max_scan_seconds` for such inputs. A line is
+  read once per role assignment of the classes IT holds (2, 4, 8 or 16 readings), so
+  clean text with all four classes on every line is slowest: 1.2 MB took 52 s, and such
+  text reaches the default deadline at roughly 1.4 MB. Tracked in
+  https://github.com/Warnes-Innovations/llm-sanitizer/issues/61.
 - Characters of the SAME class used both inside words and as the only separator between
   them (for example U+200B in both roles) are not separated by any reading. Different
   classes in the two roles are covered.
