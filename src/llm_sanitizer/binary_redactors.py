@@ -350,10 +350,13 @@ def _pdf_string_text(raw: bytes) -> str:
         return raw[2:].decode("utf-16-le", "replace")
     readings = [raw.decode("latin-1")]
     body = raw[3:] if raw.startswith(b"\xef\xbb\xbf") else raw
-    try:
-        readings.append(body.decode("utf-8"))
-    except UnicodeDecodeError:
-        pass
+    # HYBRID, never strict: valid UTF-8 as UTF-8 and only the invalid bytes as
+    # Latin-1. A strict decode dropped the whole UTF-8 reading for ONE invalid
+    # byte, and a trailing 0xFF hid a split payload (0.7.2 review, pass 5).
+    readings.append("".join(
+        chr(ord(c) - 0xDC00) if 0xDC80 <= ord(c) <= 0xDCFF else c
+        for c in body.decode("utf-8", errors="surrogateescape")
+    ))
     return "\n".join(readings)
 
 

@@ -120,6 +120,11 @@ class SanitizerConfig:
         return rule_cfg.sensitivity or self.sensitivity
 
 
+#: Valid sensitivity levels; mirrors scanner._SENSITIVITY_RISK_MAP (checked by
+#: tests/test_review_round6.py::test_config_sensitivities_match_scanner).
+_SENSITIVITIES = ("low", "medium", "high")
+
+
 def _parse_rules(raw: dict[str, Any]) -> dict[str, RuleSettings]:
     result: dict[str, RuleSettings] = {}
     for rule_id, cfg in raw.items():
@@ -214,8 +219,30 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
         )
     raw: dict[str, Any] = loaded
 
+    # Each section must have the shape the code below indexes into, or the
+    # loader crashes with a traceback (`rules: 5`) instead of refusing the
+    # config (0.7.2 review, pass 5).
+    for section in ("rules", "policy", "output", "archive"):
+        value = raw.get(section, {})
+        if not isinstance(value, dict):
+            raise ConfigError(
+                f"{cfg_path}: `{section}` must be a mapping, not a {type(value).__name__}"
+            )
     sensitivity = raw.get("sensitivity", "medium")
+    if sensitivity not in _SENSITIVITIES:
+        # An unknown level is not "medium": the operator asked for something
+        # this version does not provide.
+        raise ConfigError(
+            f"{cfg_path}: sensitivity {sensitivity!r} is not one of "
+            f"{', '.join(_SENSITIVITIES)}"
+        )
     rules = _parse_rules(raw.get("rules", {}))
+    for rule_id, rule_cfg in rules.items():
+        if rule_cfg.sensitivity is not None and rule_cfg.sensitivity not in _SENSITIVITIES:
+            raise ConfigError(
+                f"{cfg_path}: rules.{rule_id}.sensitivity {rule_cfg.sensitivity!r} "
+                f"is not one of {', '.join(_SENSITIVITIES)}"
+            )
 
     policy_raw = raw.get("policy", {})
     policy = PolicySettings(

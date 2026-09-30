@@ -484,7 +484,8 @@ def _cmd_redact(args: argparse.Namespace) -> None:
             redacted, scan_result = redact_content(
                 content, mode=args.mode, source=source, sensitivity=sensitivity
             )
-            if _hidden_in_invalid_bytes(raw, scan_result.findings, source, sensitivity):
+            # Against no baseline, as redact_file does (review pass 5).
+            if _hidden_in_invalid_bytes(raw, [], source, sensitivity):
                 # Same refusal as redact_file (hidden-in-invalid-bytes): the
                 # UTF-8 text cannot be redacted to remove what only the byte
                 # reading shows (0.7.2 review, pass 4: `-o -` skipped it).

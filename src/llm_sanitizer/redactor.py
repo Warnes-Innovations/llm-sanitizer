@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import bisect
 import os
 import secrets
 import shutil
@@ -33,13 +34,13 @@ REDACTION_MODES: tuple[str, ...] = ("strip", "comment", "highlight", "placeholde
 PLACEHOLDER_CHAR = "█"
 
 
+#: Rules whose finding spans a whole de-obfuscated payload, so their edit takes
+#: precedence over any edit it contains (see ``redact``).
+_PAYLOAD_RULES = frozenset({"zero_width"})
+
+
 def _replacement_text(finding: Finding, mode: str) -> str:
     """The text that replaces a finding's matched span for a given mode."""
-    spaced = finding._redact_as
-    if spaced is not None and mode == "strip":
-        return spaced
-    if spaced is not None and mode == "placeholder":
-        return spaced * len(finding.matched_raw)  # same length, still a space
     if mode == "strip":
         return ""
     if mode == "placeholder":
@@ -63,8 +64,16 @@ def _replacement_text(finding: Finding, mode: str) -> str:
 
 
 def _highlight_marker(finding: Finding) -> str:
-    """Visible warning marker wrapping the matched text."""
-    return f"\u26a0\ufe0f[LLM-INSTRUCTION: {finding.matched}]\u26a0\ufe0f"
+    """Visible warning marker wrapping the matched text.
+
+    Invisible characters in the matched text are written as escapes: a marker
+    that copied them verbatim republished the invisible payload it was
+    highlighting (0.7.2 review, pass 5).
+    """
+    shown = "".join(
+        c if c.isprintable() else f"\\u{{{ord(c):04x}}}" for c in finding.matched
+    )
+    return f"\u26a0\ufe0f[LLM-INSTRUCTION: {shown}]\u26a0\ufe0f"
 
 
 def _finding_offset(content: str, finding: Finding) -> int | None:
@@ -140,7 +149,7 @@ def redact(
     # edits are applied right-to-left so earlier offsets stay valid; findings
     # whose location can't be verified against their matched text fall back to
     # first-occurrence replacement (the original behavior).
-    anchored: list[tuple[int, int, str]] = []
+    anchored: list[tuple[int, int, str, bool]] = []
     unanchored: list[Finding] = []
     for finding in result.findings:
         if not finding.matched_raw:
@@ -153,20 +162,33 @@ def redact(
                 offset,
                 offset + len(finding.matched_raw),
                 _replacement_text(finding, mode),
+                finding.rule in _PAYLOAD_RULES,
             ))
 
-    redacted = content
-    # Apply from the end of the document backwards. Skip any edit whose span
-    # overlaps one already applied to its right (this also drops exact
-    # duplicates); the iterating redact_content re-scan picks up anything
-    # skipped this pass.
-    anchored.sort(key=lambda e: e[0], reverse=True)
-    prev_start = len(content)
-    for start, end, replacement in anchored:
-        if end > prev_start:
+    # Overlapping edits: a PAYLOAD edit (the zero-width rule's span over a
+    # whole split payload, splitters included) wins over the edits inside it,
+    # longest first. Otherwise the rightmost edit wins, as before. Letting the
+    # rightmost win everywhere let another rule's edit on one invisible
+    # character beat the payload edit, and the words were published glued
+    # together (0.7.2 review, pass 5). Do not make "longest wins" the general
+    # rule: semantic_intent's edit is a whole line, and it would then delete
+    # the benign text around every finer finding on that line.
+    anchored.sort(key=lambda e: (0, e[0] - e[1]) if e[3] else (1, -e[0]))
+    kept_starts: list[int] = []
+    kept: list[tuple[int, int, str]] = []
+    for start, end, replacement, _ in anchored:
+        i = bisect.bisect_right(kept_starts, start)
+        if i and kept[i - 1][1] > start:
             continue
+        if i < len(kept) and kept[i][0] < end:
+            continue
+        kept_starts.insert(i, start)
+        kept.insert(i, (start, end, replacement))
+
+    redacted = content
+    # Apply from the end of the document backwards so earlier offsets stay valid.
+    for start, end, replacement in reversed(kept):
         redacted = redacted[:start] + replacement + redacted[end:]
-        prev_start = start
 
     for finding in unanchored:
         if finding.matched_raw in redacted:
@@ -679,7 +701,11 @@ def _redact_snapshot(
     if not is_binary_content:
         from llm_sanitizer.scanner import legacy_byte_findings
 
-        hidden = legacy_byte_findings(raw, result.findings, str(path), sensitivity)
+        # Compared against NOTHING, not against the UTF-8 findings: a visible
+        # payload on the same line, or the same rule found again by a later
+        # redaction pass, raised the baseline and masked the hidden one
+        # (0.7.2 review, pass 5). Any finding in that reading refuses.
+        hidden = legacy_byte_findings(raw, [], str(path), sensitivity)
         if hidden:
             # A payload only a Latin-1 reading of the invalid bytes shows: the
             # UTF-8 text cannot be redacted to remove it, and a clean copy

@@ -244,7 +244,7 @@ def path_within(inner: Path, outer: Path) -> bool:
     return False
 
 
-_MAX_GLOB_PATTERNS = 256
+_MAX_GLOB_PATTERNS = 64
 
 
 class GlobTooComplexError(ValueError):
@@ -316,9 +316,19 @@ def _glob_patterns(glob_pattern: str, root: Path) -> list[str]:
     return out or ["**"]
 
 
-def _segments_match(pat: tuple[str, ...], parts: tuple[str, ...]) -> bool:
-    """fnmatch per path segment, with `**` matching ZERO or more segments — so
-    `docs/**/*.md` selects `docs/a.md` as well as `docs/x/a.md`. Memoised on
+@functools.lru_cache(maxsize=1024)
+def _compiled_segments(pattern: str) -> tuple[re.Pattern[str] | None, ...]:
+    """A `/` pattern as compiled per-segment regexes, led by `**` (None) so it
+    matches from any directory down. Compiled once per pattern, not per file."""
+    return (None, *(
+        None if seg == "**" else re.compile(fnmatch.translate(seg))
+        for seg in pattern.split("/")
+    ))
+
+
+def _segments_match(pat: tuple[re.Pattern[str] | None, ...], parts: tuple[str, ...]) -> bool:
+    """Match per path segment, with `**` (None) matching ZERO or more segments —
+    so `docs/**/*.md` selects `docs/a.md` as well as `docs/x/a.md`. Memoised on
     positions: plain backtracking was exponential in the number of `**`
     (8 of them against a 30-deep path ran 44 s per file; review pass 4)."""
 
@@ -326,9 +336,10 @@ def _segments_match(pat: tuple[str, ...], parts: tuple[str, ...]) -> bool:
     def match(i: int, j: int) -> bool:
         if i == len(pat):
             return j == len(parts)
-        if pat[i] == "**":
+        seg = pat[i]
+        if seg is None:
             return match(i + 1, j) or (j < len(parts) and match(i, j + 1))
-        return j < len(parts) and fnmatch.fnmatchcase(parts[j], pat[i]) and match(i + 1, j + 1)
+        return j < len(parts) and seg.match(parts[j]) is not None and match(i + 1, j + 1)
 
     return match(0, 0)
 
@@ -347,8 +358,7 @@ def _glob_match(path: Path, root: Path, pattern: str) -> bool:
         parts = path.relative_to(root).as_posix().lower().split("/")
     except ValueError:
         parts = path.as_posix().lower().split("/")
-    segs = tuple(pattern.split("/"))
-    return any(_segments_match(segs, tuple(parts[i:])) for i in range(len(parts)))
+    return _segments_match(_compiled_segments(pattern), tuple(parts))
 
 
 def _under_excluded(target: Path, root: Path) -> bool:
@@ -1430,9 +1440,14 @@ class Scanner:
                     )
                 ]
             if markup is not None:
-                return self.scan(
-                    markup, source=source, sensitivity=sensitivity
-                ).findings
+                base = self.scan(markup, source=source, sensitivity=sensitivity).findings
+                # The markup's own bytes get the invalid-byte reading too: raw
+                # 0xA0 / 0xAD in an RTF body hid a payload the extracted text
+                # did not show (0.7.2 review, pass 5).
+                markup_bytes = path.read_bytes()
+                if _valid_utf8(markup_bytes):
+                    return base
+                return base + legacy_byte_findings(markup_bytes, [], source, sensitivity, self)
 
         if not _is_binary(path):
             return self._scan_text_bytes(path.read_bytes(), source, sensitivity)

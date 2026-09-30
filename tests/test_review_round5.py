@@ -12,6 +12,7 @@ between words, in a FILE scan, is pinned here.
 from __future__ import annotations
 
 import json
+import re
 import subprocess
 import sys
 import time
@@ -126,17 +127,24 @@ def test_bare_cr_splitter_is_refused_by_redact(tmp_path: Path) -> None:
     assert payload["status"] == "error" or b"\r" not in out.read_bytes(), payload
 
 
-# --- marker modes: the outside check must refuse -------------------------------------------
+# --- marker modes: nothing may be left outside the markers ---------------------------------
+# Round 5 pinned a REFUSAL here, because the markers then covered only the
+# splitters. Since review pass 5 the zero-width finding spans the whole payload,
+# so its marker covers it; what must hold is that nothing is left outside.
 
 
 @pytest.mark.parametrize("mode", ["comment", "highlight"])
-def test_marker_mode_refuses_when_outside_text_is_dirty(tmp_path: Path, mode: str) -> None:
+def test_marker_mode_leaves_nothing_outside_the_markers(tmp_path: Path, mode: str) -> None:
     f = tmp_path / "z.md"
     f.write_text(" ".join(w[:2] + "\u200b" + w[2:] for w in SIDE.split()) + "\n")
     out = tmp_path / "o.md"
     payload = json.loads(server.redact_file(str(f), str(out), mode=mode))
-    assert payload["status"] == "error", payload
-    assert not out.exists()
+    if payload["status"] == "error":
+        assert not out.exists()
+        return
+    text = out.read_text()
+    outside = re.sub(r"\u26a0\ufe0f\[LLM-INSTRUCTION: .*?\]\u26a0\ufe0f|\[REDACTED: [^\]]*\]", "", text)
+    assert "\u200b" not in outside and scan_text(outside).summary.max_risk is None, repr(text)
 
 
 # --- strip / placeholder: do not glue words back together ----------------------------------
@@ -256,7 +264,7 @@ def test_hybrid_byte_reading_is_the_only_reading_that_sees_this(tmp_path: Path) 
     valid UTF-8 ZWSP together inside each word, and an invalid 0xA0 between
     words. The UTF-8 reading has U+FFFD in both roles (one class, both roles);
     a pure Latin-1 reading mangles the UTF-8 ZWSP into visible characters."""
-    zw = "​".encode()
+    zw = "\u200b".encode()
     f = tmp_path / "h.md"
     f.write_bytes(
         PAYLOAD.encode().replace(b"ignore", b"ign\xad" + zw + b"ore")
