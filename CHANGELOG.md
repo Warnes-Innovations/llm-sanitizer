@@ -44,12 +44,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   They are now reported.
 - **An invalid byte inside each trigger word hid an injection.** A raw `0xAD` byte (a
   soft hyphen in Latin-1) became U+FFFD on read, which no rule stripped. The file
-  scanned clean and was copied through byte-exact. When a file's bytes are not valid
-  UTF-8, the lines they are on are now also scanned as Latin-1 — what a legacy-encoding
-  consumer actually displays, where `0xAD` is an invisible soft hyphen and `0xA0` a
-  space — so a payload hidden by invalid bytes inside words, between words, or both is
-  found. `redact` refuses such a file (`hidden-in-invalid-bytes`). Innocent Latin-1 text
-  stays clean.
+  scanned clean and was copied through byte-exact. U+FFFD is now a splitter in the UTF-8
+  reading, and when a file's (or stdin's) bytes are not valid UTF-8, the lines they are
+  on are ALSO read with each invalid byte decoded as Latin-1 and the valid UTF-8 left as
+  it is — what a legacy-encoding consumer displays, where `0xAD` is an invisible soft
+  hyphen and `0xA0` a space. Every byte 0x80–0xFF, inside a word or between words, is
+  caught (pinned by a test). `redact` refuses a file whose payload only the byte reading
+  shows (`hidden-in-invalid-bytes`), including `redact -o -` and stdin. Innocent Latin-1
+  text stays clean.
 - **A redaction that did not converge was returned as if clean.** The loop stopped when
   the text stopped changing or the pass budget ran out. A finding that redaction cannot
   locate, such as homoglyph's normalised span, left the payload in place under a normal
@@ -79,32 +81,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   exempt: its dictionary is checked like any other object. Strings inside page content
   streams, including `/ActualText`, are run through the rules, and so are `#xx`-escaped
   names (a payload spelled `/Disregard#20your#20...`). Literal strings with nested
-  parentheses decode whole.
+  parentheses decode whole, and every string or name is read as UTF-8 as well as Latin-1,
+  so a splitter carried as UTF-8 bytes is seen as the character it is.
 - **More invisible splitters, in any combination.** The zero-width rule now covers every
   Unicode Default_Ignorable code point and format character (category Cf), C0/C1
   controls, and blank characters that render as a gap (Hangul fillers, blank Braille,
   U+FFFD). Line-ending characters other than LF/CRLF (NEL, U+2028/2029, VT, FF, a bare
   CR) between two word characters are handled too, alone or combined with any of the
-  others in one run. Each document is read twice — with those characters removed, and
-  with the gap-like ones read as spaces — so a filler used as the space between words is
-  found as well as a character used inside one. All are flagged only when a reading
-  reveals an injection.
+  others in one run. Each class of character is read both ways — removed, and as a
+  space — in every combination across the classes present, so one class inside words
+  and another between them is found, as is a zero-width character used only as the
+  space between words. All are flagged only when a reading reveals an injection. When a
+  splitter was revealed read as a space, strip and placeholder modes replace it with a
+  space rather than gluing the words together, so the next pass removes the exposed
+  injection. `scan` and `redact` now read text files identically (no newline
+  translation), so a bare CR splitter is handled by both.
 - **Comment and highlight modes could publish payload outside their markers.** An edit
   that overlapped an earlier one was skipped, so a finding could be located but not
   applied. These modes now check the text left outside the markers, and refuse the file
-  if it still trips a rule.
+  (`not-converged`) if it still trips a rule.
 - **An allowlist lookalike could still pass.** A path with `..` in it
   (`.claude/../evil.md`) is normalised before matching, and on POSIX a name containing a
   backslash (`evil\CLAUDE.md`, one file) no longer matches an allowlisted path.
 - **A config file could be silently skipped.** A dangling-symlink `.llm-sanitizer.yml`,
   or a named config path that does not exist, now raises a configuration error instead
-  of falling back to another config or the defaults. The CLI reports configuration
-  errors with exit 2 and no traceback.
+  of falling back to another config or the defaults. Any config that cannot be read as
+  a YAML mapping — malformed, a list, unreadable, not UTF-8 — is a configuration error
+  too. The CLI reports configuration errors with exit 2 and no traceback.
 - **Many `--glob` shapes selected nothing and reported clean.** Patterns with a directory
   part (`docs/*.md`), a leading `./`, an absolute path under the root, a trailing `/`,
   simple braces (`*.{md,txt}`) and `**` standing for zero directories (`docs/**/*.md`
-  selects `docs/a.md`) now all select what they name, case-insensitively. A glob that
-  selects nothing is reported as a `glob-matched-nothing` walk issue.
+  selects `docs/a.md`) now all select what they name, case-insensitively, as do
+  `.//docs`, `docs/./x`, `docs/sub/../x`, an absolute directory with or without a
+  trailing `/`, and a pattern starting with the root's own name. A glob that selects
+  nothing is reported as a `glob-matched-nothing` walk issue, shown in the default
+  report as well as JSON. A brace expansion beyond 256 patterns is refused (exit 2), and
+  `**` matching is memoised, so neither can be used to hang a scan.
 - **Directory-mode writes are confined to the output directory.** A directory symlink
   planted in the output tree could send a write elsewhere, and it overwrote an
   unrelated file (`output-escapes-root`). Writers with no source file (stdin, a URL)
@@ -126,16 +138,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   still get it read in `scan`. `redact` narrows this further: it reads one snapshot of
   the source through a checked descriptor, and publishes exactly the bytes it scanned.
   Closing it fully needs descriptor-based reads throughout.
-- Reading splitter-bearing text twice costs time where most lines carry such a
-  character. Measured on 2.5 MB of clean text with U+FFFD on every line (inline, so no
-  raw bytes): 6.5 s in 0.7.1, 21 s now; 0.6 MB of emoji text: 1.7 s to 4.2 s. Clean
-  files are not refused.
-- A zero-width character used both inside words AND as the only separator between
-  them renders as glued text; neither reading separates the words. Invalid bytes in
-  both roles are covered by the Latin-1 reading; invisible characters in both roles are
-  not.
-- The Latin-1 reading needs the raw bytes, so it applies to files (`scan`, `redact`),
-  not to inline text or a URL body that was already decoded.
+- Reading splitter-bearing text more than once costs time where most lines carry such
+  a character. Measured on one machine, clean text, 0.7.1 then 0.7.2: 2.5 MB with
+  U+FFFD on every line 5.9 s to 16.6 s; a 2.5 MB cp1252 file with an invalid byte on
+  every line 5.8 s to 17.2 s; 0.6 MB of emoji 1.7 s to 5.1 s; a 1.6 MB single line with
+  a zero-width space in every word 2.5 s to 4.4 s. At that rate a clean file this dense
+  with invalid bytes reaches the default 60 s `max_scan_seconds` at roughly 9 MB and is
+  then refused as not fully scanned; raise `max_scan_seconds` for such inputs.
+- Characters of the SAME class used both inside words and as the only separator between
+  them (for example U+200B in both roles) are not separated by any reading. Different
+  classes in the two roles are covered.
+- The invalid-byte reading needs the raw bytes: it applies to files and stdin, not to
+  inline text or a URL body that was already decoded.
+- One zero-width character inside a homoglyph-substituted word can defeat both rules
+  (present in 0.7.1; tracked for 0.8.0).
+- Only `.llm-sanitizer.yml` is discovered; `.llm-sanitizer.yaml` is not read.
 - The cumulative archive budget is not shared across sibling nested archives.
 - Hardlinked files are processed and reported, not refused (see `walk_issues`).
 
