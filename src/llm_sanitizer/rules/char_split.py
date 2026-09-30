@@ -121,10 +121,12 @@ class CharSplitRule(BaseRule):
     )
 
     def detect(self, content: str, source: str = "") -> list[Finding]:
+        if deadline_exceeded():
+            return []
         findings: list[Finding] = []
         lines = content.splitlines()
-        fid = 1
-
+        changed: list[int] = []
+        rebuilt: list[str] = []
         for line_idx, line in enumerate(lines):
             if deadline_exceeded():
                 break
@@ -133,6 +135,26 @@ class CharSplitRule(BaseRule):
             reconstructed = _reconstruct(line)
             if reconstructed == line or not reconstructed.strip():
                 continue
+            changed.append(line_idx)
+            rebuilt.append(reconstructed)
+        if not changed:
+            return findings
+        # One re-scan of every reconstructed line together, then a baseline
+        # only for the lines that tripped something. Two re-scans per split
+        # line, nested at every depth, were the largest share of re-scan work
+        # on transport-dense text (review pass 8).
+        by_line: dict[int, list[Finding]] = {}
+        for f in scan_deobfuscated("\n".join(rebuilt) + "\n", source, linear=True):
+            k = f.location.line - 1
+            if 0 <= k < len(changed):
+                by_line.setdefault(k, []).append(f)
+        fid = 1
+        for k, subs in sorted(by_line.items()):
+            if deadline_exceeded():
+                break
+            line_idx = changed[k]
+            line = lines[line_idx]
+            reconstructed = rebuilt[k]
             # Only credit findings the reconstruction REVEALS: diff against what
             # the raw line already trips, so an injection that fires on the raw
             # text is not double-reported here.
@@ -140,11 +162,7 @@ class CharSplitRule(BaseRule):
                 (f.rule, f.matched)
                 for f in scan_deobfuscated(line, source, exclude=frozenset({self.rule_id}))
             }
-            sub_findings = [
-                f
-                for f in scan_deobfuscated(reconstructed, source)
-                if (f.rule, f.matched) not in baseline
-            ]
+            sub_findings = [f for f in subs if (f.rule, f.matched) not in baseline]
             if not sub_findings:
                 continue
             risk = max((f.risk for f in sub_findings), key=lambda r: r.value)

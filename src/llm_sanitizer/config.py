@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import math
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -258,6 +259,21 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
             f"{', '.join(_SENSITIVITIES)}"
         )
     rules = _parse_rules(raw.get("rules", {}))
+    from llm_sanitizer.rules import get_all_rules
+
+    known_rules = {cls.rule_id for cls in get_all_rules()}
+    unknown_rules = sorted(set(rules) - known_rules)
+    if unknown_rules:
+        # A misspelt rule id configured nothing (review pass 8).
+        raise ConfigError(
+            f"{cfg_path}: unknown rule(s) {', '.join(unknown_rules)}; "
+            f"known: {', '.join(sorted(known_rules))}"
+        )
+    for rule_id, per_rule in raw.get("rules", {}).items():
+        if isinstance(per_rule, dict):
+            extra = sorted(str(k) for k in per_rule if k not in ("enabled", "sensitivity"))
+            if extra:
+                raise ConfigError(f"{cfg_path}: rules.{rule_id}: unknown setting(s) {', '.join(extra)}")
     for rule_id, rule_cfg in rules.items():
         if rule_cfg.sensitivity is not None and rule_cfg.sensitivity not in _SENSITIVITIES:
             raise ConfigError(
@@ -266,6 +282,11 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
             )
 
     policy_raw = raw.get("policy", {})
+    if policy_raw.get("mode", "allow-known") not in _POLICY_MODES:
+        raise ConfigError(f"{cfg_path}: policy.mode must be one of {', '.join(sorted(_POLICY_MODES))}")
+    output_format = raw.get("output", {}).get("format", "markdown")
+    if output_format not in _OUTPUT_FORMATS:
+        raise ConfigError(f"{cfg_path}: output.format must be one of {', '.join(sorted(_OUTPUT_FORMATS))}")
     policy = PolicySettings(
         mode=policy_raw.get("mode", "allow-known"),
         agents=policy_raw.get("agents", {
@@ -301,7 +322,7 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
     max_scan_seconds = raw.get("max_scan_seconds", _DEFAULT_MAX_SCAN_SECONDS)
     if not isinstance(max_scan_seconds, (int, float)) or isinstance(
         max_scan_seconds, bool
-    ):
+    ) or not math.isfinite(max_scan_seconds):
         raise ConfigError(
             f"{cfg_path}: max_scan_seconds must be a number, not {max_scan_seconds!r}"
         )
@@ -325,7 +346,10 @@ _KNOWN_TOP_LEVEL = frozenset({
     "sensitivity", "rules", "policy", "output", "archive",
     "unprocessable_binary_policy", "max_scan_bytes", "max_scan_seconds", "llm",
 })
-_KNOWN_POLICY = frozenset({"mode", "agents", "custom_allow", "custom_deny"})
+# `overrides` is reserved like `llm`: DESIGN_SPEC shows it in a policy.
+_KNOWN_POLICY = frozenset({"mode", "agents", "custom_allow", "custom_deny", "overrides"})
+_POLICY_MODES = frozenset({"allow-known", "allow-none", "allow-all"})
+_OUTPUT_FORMATS = frozenset({"json", "markdown", "sarif"})
 _KNOWN_OUTPUT = frozenset({"format", "context_lines"})
 _KNOWN_ARCHIVE = frozenset({
     "formats", "max_depth", "max_cumulative_bytes", "max_entries",
@@ -341,7 +365,8 @@ def _parse_archive(raw: dict[str, Any]) -> ArchiveSettings:
     defaults = ArchiveSettings()
     for key in _ARCHIVE_INTS & raw.keys():
         value = raw[key]
-        if isinstance(value, bool) or not isinstance(value, (int, float)) or value < 0:
+        if (isinstance(value, bool) or not isinstance(value, (int, float))
+                or not math.isfinite(value) or value < 0):
             raise ConfigError(f"archive.{key} must be a non-negative number, not {value!r}")
     formats = raw.get("formats", defaults.formats)
     if not isinstance(formats, list):

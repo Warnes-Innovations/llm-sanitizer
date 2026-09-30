@@ -38,7 +38,8 @@ import pytest
 from llm_sanitizer import config as config_mod
 from llm_sanitizer.config import ConfigError, load_config
 
-CONFIG = "sensitivity: high\nrules:\n  prompt_injection:\n    enabled: false\n"
+# A real rule id: an unknown one is itself a configuration error (0.7.2).
+CONFIG = "sensitivity: high\nrules:\n  instruction_override:\n    enabled: false\n"
 
 
 def test_pyyaml_is_actually_installed() -> None:

@@ -189,6 +189,13 @@ def scan_deobfuscated(
     # registry at module load time would be circular.
     from llm_sanitizer.rules import get_all_rules
 
+    # Past the scan deadline no re-scan starts: nested re-scans otherwise ran
+    # whole rule sets long after it, and one scan took 300 s against a 60 s
+    # limit (review pass 8 cost probe). The scanner reports scan_timeout, so
+    # the result still fails closed.
+    if deadline_exceeded():
+        return []
+
     depth = _depth.get()
     # A direct top-level call (no scanner managing the budget) gets a fresh
     # allowance; under a scanner, the budget is reset once per content unit.

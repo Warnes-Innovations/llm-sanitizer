@@ -25,6 +25,8 @@ parser handles those the way a browser does.
 
 from __future__ import annotations
 
+import bisect
+import functools
 import html
 import re
 from collections import Counter
@@ -34,9 +36,6 @@ from llm_sanitizer.models import Finding, RiskLevel
 from llm_sanitizer.rules import BaseRule, register_rule
 from llm_sanitizer.rules._rescan import deadline_exceeded, scan_deobfuscated
 
-#: Cheap prefilter: a word character directly before `<` or `&`. Only a
-#: paragraph holding one is tokenised.
-_NEAR = re.compile(r"[0-9A-Za-z][<&]")
 #: A character reference inside a data run, joined to letters on both sides.
 #: Linear: the reference can only extend over letters, digits and `;`.
 _REF_IN_WORD = re.compile(r"[0-9A-Za-z]&#?[0-9A-Za-z]{1,64};?(?=[0-9A-Za-z])")
@@ -48,9 +47,31 @@ _BREAKS = frozenset({
     "article", "header", "footer", "h1", "h2", "h3", "h4", "h5", "h6", "hr",
     "blockquote", "pre",
 })
+#: Elements whose content is never rendered as text.
+_NOT_RENDERED = frozenset({"script", "style", "template", "head", "title"})
 _VOID = frozenset({"br", "hr", "img", "wbr", "input", "meta", "link", "area",
                    "base", "col", "embed", "source", "track"})
-_HIDDEN_STYLE = re.compile(r"display\s*:\s*none|visibility\s*:\s*hidden", re.IGNORECASE)
+_HIDDEN_STYLE = re.compile(
+    r"display\s*:\s*none|visibility\s*:\s*(?:hidden|collapse)"
+    r"|font-size\s*:\s*0(?![.\d]*[1-9])|opacity\s*:\s*0(?![.\d]*[1-9])",
+    re.IGNORECASE,
+)
+_CSS_ESCAPE = re.compile(r"\\([0-9a-fA-F]{1,6})\s?|\\(.)")
+
+
+def _css_unescape(style: str) -> str:
+    """`dis\\70 lay:none` is `display:none` to a browser."""
+    return _CSS_ESCAPE.sub(
+        lambda m: chr(int(m.group(1), 16)) if m.group(1) else m.group(2), style)
+
+
+#: Markdown inline syntax directly between two word characters that renders to
+#: nothing between them: code spans, `*` emphasis, `~~` strike, empty links and
+#: images. Not `_` or `\\`: CommonMark renders those literally inside a word,
+#: and snake_case is everywhere. Bounded, so it cannot backtrack far.
+_MD_IN_WORD = re.compile(
+    r"(?<=[0-9A-Za-z])(?:`{1,3}|\*{1,3}|~~|!?\[\]\([^)\s]{0,200}\))+(?=[0-9A-Za-z])"
+)
 
 
 class _Renderer(HTMLParser):
@@ -64,9 +85,13 @@ class _Renderer(HTMLParser):
     repeated a few thousand times took seconds, growing with the square of
     the input (review pass 8)."""
 
-    def __init__(self, raw: str) -> None:
+    def __init__(self, raw: str, drop_styled: bool = False) -> None:
         super().__init__(convert_charrefs=False)
         self.raw = raw
+        #: Treat any element with a class, id or style as hidden: hiding done
+        #: in a stylesheet cannot be resolved here, so one reading assumes it.
+        self.drop_styled = drop_styled
+        self.styled = False
         self._starts = [0, *(m.end() for m in re.finditer("\n", raw))]
         self.parts: list[str] = []
         self._hidden: list[str] = []
@@ -102,11 +127,19 @@ class _Renderer(HTMLParser):
             self.parts.append(" ")
         if tag in _VOID:
             return
-        style = " ".join(v or "" for k, v in attrs if k == "style")
-        if self._hidden or any(k == "hidden" for k, _ in attrs) or _HIDDEN_STYLE.search(style):
+        style = _css_unescape(" ".join(v or "" for k, v in attrs if k == "style"))
+        has_style = any(k in ("class", "id", "style") for k, _ in attrs)
+        self.styled = self.styled or has_style
+        if (self._hidden or tag in _NOT_RENDERED or any(k == "hidden" for k, _ in attrs)
+                or _HIDDEN_STYLE.search(style) or (self.drop_styled and has_style)):
             self._hidden.append(tag)
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in _VOID:
+            # A browser ignores the `/` on a non-void element: `<span hidden/>`
+            # OPENS a hidden span (review pass 8).
+            self.handle_starttag(tag, attrs)
+            return
         self._markup()
         if tag in _BREAKS:
             self.parts.append(" ")
@@ -115,8 +148,12 @@ class _Renderer(HTMLParser):
         self._markup()
         if tag in _BREAKS:
             self.parts.append(" ")
-        if self._hidden and self._hidden[-1] == tag:
-            self._hidden.pop()
+        # Close up to the matching open element, as a browser does. Popping
+        # only an exact top-of-stack match left a mis-nested hidden element
+        # (`<span hidden><i>z</span>`) hiding the rest of the paragraph.
+        if tag in self._hidden:
+            while self._hidden and self._hidden.pop() != tag:
+                pass
 
     def handle_comment(self, data: str) -> None:
         self._markup()
@@ -130,7 +167,19 @@ class _Renderer(HTMLParser):
     def handle_pi(self, data: str) -> None:
         self._markup()
 
+    def _ref_touches_word(self, start: int, length: int) -> None:
+        # A reference decodes to a character: touching a word character on
+        # EITHER side it is part of that word (`&#105;gnore` at a line start
+        # has nothing before it).
+        end = start + length
+        if (start > 0 and self.raw[start - 1].isalnum()) or (
+                end < len(self.raw) and self.raw[end].isalnum()):
+            self.in_word = True
+
     def handle_charref(self, name: str) -> None:
+        start = self._here()
+        semi = 1 if start + 2 + len(name) < len(self.raw) and self.raw[start + 2 + len(name)] == ";" else 0
+        self._ref_touches_word(start, 2 + len(name) + semi)
         self._markup()
         self._refs += 1
         if not self._hidden:
@@ -147,32 +196,65 @@ class _Renderer(HTMLParser):
             # The letters after an unterminated reference are part of the
             # token, so the "word on both sides" test below cannot see them.
             self.in_word = True
+        self._ref_touches_word(start, 1 + len(name) + len(semi))
         self._markup()
         self._refs += 1
         if not self._hidden:
             self.parts.append(f"&{name}{semi}")
 
     def handle_data(self, data: str) -> None:
+        if self._hidden:
+            # Hidden text is not text to the reader: it continues a run of
+            # markup, so `ig<span hidden>!</span>nore` joins a word.
+            self._markup()
+            return
         self._text()
         if _REF_IN_WORD.search(data):
             self.in_word = True
-        if not self._hidden:
-            self.parts.append(data)
+        self.parts.append(data)
 
 
-def _render(raw: str) -> tuple[str, bool]:
-    """(the text as rendered, whether markup joined two words)."""
-    r = _Renderer(raw)
+def _render(raw: str, drop_styled: bool = False) -> tuple[str, bool, bool]:
+    """(the text as rendered, whether markup joined two words, whether any
+    element carried a class, id or style)."""
+    r = _Renderer(raw, drop_styled)
     r.feed(raw)
     r.close()
     r._text()  # close a run of markup that ends the paragraph
     # References left in data (no `;`, or not recognised by the tokenizer) are
     # decoded here, the way a browser does.
-    return html.unescape("".join(r.parts)), r.in_word
+    return html.unescape("".join(r.parts)), r.in_word, r.styled
+
+
+@functools.lru_cache(maxsize=4096)
+def _readings(raw: str) -> tuple[str, ...]:
+    """Rendered readings of one paragraph that differ from it: as HTML
+    renders it; the same with styled elements' text dropped (stylesheet
+    hiding cannot be resolved, so fail toward reading it as hidden); and
+    with Markdown syntax inside words removed."""
+    out: list[str] = []
+    # Rendering is about TEXT a reader sees. A segment dense with control
+    # characters is binary (a PDF font stream reaches this rule through the
+    # rewrite check), and its "rendering" is noise that trips rules at random.
+    controls = sum(1 for c in raw if c < " " and c not in "\t\n\r")
+    if "\x00" in raw or controls * 20 > len(raw):
+        return ()
+    if "<" in raw or "&" in raw:
+        rendered, in_word, styled = _render(raw)
+        if in_word:
+            out.append(rendered)
+            if styled:
+                out.append(_render(raw, drop_styled=True)[0])
+    if _MD_IN_WORD.search(raw):
+        out.append(_MD_IN_WORD.sub("", raw))
+    flat = " ".join(raw.split())
+    return tuple(x for x in dict.fromkeys(" ".join(r.split()) for r in out) if x and x != flat)
 
 
 def _paragraphs(lines: list[str]) -> list[tuple[int, int]]:
-    """(first line, last line + 1) of each run of non-blank lines."""
+    """(first line, last line + 1) of each run of non-blank lines — joined
+    with the next run while it ends inside an open comment or tag, so markup
+    holding a blank line (`<!--\n\n-->`) stays one piece (review pass 8)."""
     out: list[tuple[int, int]] = []
     start = None
     for i, line in enumerate(lines):
@@ -184,6 +266,67 @@ def _paragraphs(lines: list[str]) -> list[tuple[int, int]]:
             start = None
     if start is not None:
         out.append((start, len(lines)))
+    merged: list[tuple[int, int]] = []
+    in_comment = in_tag = False
+    for a, b in out:
+        if (in_comment or in_tag) and merged:
+            merged[-1] = (merged[-1][0], b)
+        else:
+            merged.append((a, b))
+        # State carried chunk by chunk (re-reading the growing paragraph was
+        # quadratic): the LAST opener or closer in this chunk decides.
+        chunk = "\n".join(lines[a:b])
+        lo, lc = chunk.rfind("<!--"), chunk.rfind("-->")
+        if lo != lc:
+            in_comment = lo > lc
+        to, tc = chunk.rfind("<"), chunk.rfind(">")
+        if to != tc:
+            in_tag = to > tc
+    return merged
+
+
+#: A block-level tag. Markup cannot join two words across one (a browser
+#: breaks the line there), so a paragraph is judged — and redacted — one
+#: block-delimited segment at a time. Judging the whole paragraph deleted an
+#: entire minified page for one hidden payload (review passes 7-8).
+_BLOCK_TAG = re.compile(
+    r"</?(?:p|div|li|br|tr|td|th|h[1-6]|section|article|header|footer|blockquote|pre|ul|ol|table)"
+    r"\b[^<>]{0,200}>",
+    re.IGNORECASE,
+)
+
+
+#: A segment longer than this many lines is read in overlapping chunks: one
+#: reading line per segment made a 200 KB paragraph one line, and work per
+#: finding on it grew with its length (review pass 8 cost probe).
+_CHUNK_LINES, _CHUNK_OVERLAP = 64, 4
+
+
+def _segments(content: str, a: int, b: int) -> list[tuple[int, int]]:
+    """Absolute (start, end) of each block-delimited segment of content[a:b],
+    long ones cut into overlapping chunks of lines."""
+    out: list[tuple[int, int]] = []
+    pos = a
+    for m in _BLOCK_TAG.finditer(content, a, b):
+        if m.start() > pos:
+            out.extend(_chunks(content, pos, m.start()))
+        pos = m.end()
+    if b > pos:
+        out.extend(_chunks(content, pos, b))
+    return out
+
+
+def _chunks(content: str, a: int, b: int) -> list[tuple[int, int]]:
+    starts = [a] + [a + m.end() for m in re.finditer("\n", content[a:b]) if a + m.end() < b]
+    if len(starts) <= _CHUNK_LINES:
+        return [(a, b)]
+    out: list[tuple[int, int]] = []
+    step = _CHUNK_LINES - _CHUNK_OVERLAP
+    for i in range(0, len(starts), step):
+        j = i + _CHUNK_LINES
+        out.append((starts[i], starts[j] - 1 if j < len(starts) else b))
+        if j >= len(starts):
+            break
     return out
 
 
@@ -201,62 +344,73 @@ class InlineMarkupRule(BaseRule):
     )
 
     def detect(self, content: str, source: str = "") -> list[Finding]:
-        if ("<" not in content and "&" not in content) or not _NEAR.search(content):
+        if deadline_exceeded():
+            return []  # before any input-proportional work (test_scan_deadline)
+        # Gate on the characters, not on "a letter right before `<` or `&`":
+        # a word written starting with a reference (`&#105;gnore`) has none,
+        # and the tokenizer below decides whether markup joined words.
+        if "<" not in content and "&" not in content and not _MD_IN_WORD.search(content):
             return []
         lines = content.splitlines()
-        blocks: list[tuple[int, int]] = []
+        starts = [0]
+        for piece in content.splitlines(keepends=True):
+            starts.append(starts[-1] + len(piece))
+        units: list[tuple[int, int]] = []  # absolute (start, end) in content
         rebuilt: list[str] = []
         for a, b in _paragraphs(lines):
             if deadline_exceeded():
                 return []
-            raw = "\n".join(lines[a:b])
-            if not _NEAR.search(raw):
-                continue
-            rendered, in_word = _render(raw)
-            if not in_word:
-                continue
-            # One line per paragraph in the reading: the rendering is judged
-            # as the reader sees it, and a finding maps back to its paragraph.
-            shown = " ".join(rendered.split())
-            if shown and shown != " ".join(raw.split()):
-                blocks.append((a, b))
-                rebuilt.append(shown)
-        if not blocks:
+            p0 = starts[a]
+            p1 = starts[b - 1] + len(lines[b - 1])
+            for s0, s1 in _segments(content, p0, p1):
+                # One line per reading: the rendering is judged as the reader
+                # sees it, and a finding maps back to its segment.
+                for shown in _readings(content[s0:s1]):
+                    units.append((s0, s1))
+                    rebuilt.append(shown)
+        if not units:
             return []
-        # One re-scan of every rendered paragraph together (linear in the
-        # input), then a baseline only for the paragraphs that tripped
+        # One re-scan of every rendered segment together (linear in the
+        # input), then a baseline only for the segments that tripped
         # something — scanned without this rule (see _rescan._excluded).
         found = scan_deobfuscated("\n".join(rebuilt) + "\n", source, linear=True)
-        by_block: dict[int, list[Finding]] = {}
+        by_unit: dict[int, list[Finding]] = {}
         for f in found:
             k = f.location.line - 1
-            if 0 <= k < len(blocks):
-                by_block.setdefault(k, []).append(f)
+            if 0 <= k < len(units):
+                by_unit.setdefault(k, []).append(f)
         findings: list[Finding] = []
-        for k, fs in sorted(by_block.items()):
+        flagged: set[tuple[int, int]] = set()
+        baselines: dict[tuple[int, int], Counter[str]] = {}
+        for k, fs in sorted(by_unit.items()):
             if deadline_exceeded():
                 return []
-            a, b = blocks[k]
-            raw = "\n".join(lines[a:b])
-            baseline = Counter(f.rule for f in scan_deobfuscated(
-                raw + "\n", source, linear=True, exclude=frozenset({self.rule_id})))
+            unit = units[k]
+            if unit in flagged:
+                continue  # one finding per segment, whichever reading showed it
+            raw = content[unit[0]:unit[1]]
+            if unit not in baselines:
+                baselines[unit] = Counter(f.rule for f in scan_deobfuscated(
+                    raw + "\n", source, linear=True, exclude=frozenset({self.rule_id})))
+            baseline = baselines[unit]
             counts = Counter(f.rule for f in fs)
             newly = [f for f in fs if counts[f.rule] > baseline.get(f.rule, 0)]
             if not newly:
                 continue
+            flagged.add(unit)
             risk = max((f.risk for f in newly), key=lambda r: r.value)
             tripped = ", ".join(sorted({f.rule_name for f in newly}))
-            # The finding is the whole paragraph: redaction must also remove
-            # markup that ran over a line break.
-            before, line_text, after = self._build_context(lines, a)
+            line_idx = bisect.bisect_right(starts, unit[0]) - 1
+            col = unit[0] - starts[line_idx] + 1
+            before, line_text, after = self._build_context(lines, line_idx)
             findings.append(self._make_finding(
                 finding_id=len(findings) + 1,
                 rule_id=self.rule_id,
                 rule_name=self.rule_name,
                 risk=risk,
-                line_no=a + 1,
-                col=1,
-                end_col=len(raw) + 1,
+                line_no=line_idx + 1,
+                col=col,
+                end_col=col + len(raw),
                 matched=raw[:80] + ("..." if len(raw) > 80 else ""),
                 matched_raw=raw,
                 before=before,

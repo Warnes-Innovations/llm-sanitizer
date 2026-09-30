@@ -140,6 +140,22 @@ def _line_starts(text: str) -> list[int]:
     return starts or [0]
 
 
+def _context(ln: int, nonblank: list[int], n: int) -> list[int]:
+    """Line *ln*, its neighbours, and the nearest line of TEXT on each side
+    past any blank lines: a directive opened two lines up, past a blank line,
+    was out of a plain ±1 window (review pass 8). The blank lines themselves
+    are not read; _view joins lines with only blank lines between them.
+    *nonblank* is the sorted list of non-blank line indices."""
+    out = [x for x in (ln - 1, ln, ln + 1) if 0 <= x < n]
+    k = bisect.bisect_left(nonblank, ln)
+    if k > 0:
+        out.append(nonblank[k - 1])
+    k2 = bisect.bisect_right(nonblank, ln)
+    if k2 < len(nonblank):
+        out.append(nonblank[k2])
+    return out
+
+
 def _lf_starts(text: str) -> list[int]:
     return [0, *(m.end() for m in re.finditer("\n", text))]
 
@@ -187,6 +203,12 @@ class ZeroWidthRule(BaseRule):
         line_bounds = list(zip([0, *(n + 1 for n in newlines)], [*(n + 1 for n in newlines), len(content)]))
         if line_bounds and line_bounds[-1][0] == line_bounds[-1][1] and len(line_bounds) > 1:
             line_bounds.pop()
+        # Non-blank lines, and for each line how many non-blank lines precede
+        # it: two included lines with only blank lines between are one block.
+        nonblank = [i for i, (a, b) in enumerate(line_bounds) if content[a:b].strip()]
+        nonblank_upto = [0] * (len(line_bounds) + 1)
+        for i, (a, b) in enumerate(line_bounds):
+            nonblank_upto[i + 1] = nonblank_upto[i] + (1 if content[a:b].strip() else 0)
         line_runs: dict[int, list[int]] = {}
         for r, m in enumerate(runs):
             line_runs.setdefault(bisect.bisect_right(newlines, m.start() - 1), []).append(r)
@@ -222,9 +244,9 @@ class ZeroWidthRule(BaseRule):
                     fresh.append(ln)
             if not fresh:
                 continue
-            lines = sorted({x for ln in fresh for x in (ln - 1, ln, ln + 1)
-                            if 0 <= x < len(line_bounds)})
-            view = self._view(content, line_bounds, line_runs, runs, run_classes, roles, lines)
+            lines = sorted({x for ln in fresh for x in _context(ln, nonblank, len(line_bounds))})
+            view = self._view(content, line_bounds, line_runs, runs, run_classes, roles, lines,
+                              nonblank_upto)
             found = scan_deobfuscated(view.text, source, linear=True)
             if not found:
                 continue
@@ -302,7 +324,7 @@ class ZeroWidthRule(BaseRule):
     def _view(
         content: str, line_bounds: list[tuple[int, int]], line_runs: dict[int, list[int]],
         runs: list[re.Match[str]], run_classes: list[frozenset[str]],
-        roles: dict[str, bool], lines: list[int],
+        roles: dict[str, bool], lines: list[int], nonblank_upto: list[int],
     ) -> _View:
         """The given *lines* under one role assignment, with a map from every
         view position back to the original text. Consecutive lines form one
@@ -311,7 +333,10 @@ class ZeroWidthRule(BaseRule):
         prev = -2
         for ln in lines:
             a, b = line_bounds[ln]
-            if ln != prev + 1:
+            # Only blank lines between this and the previous included line:
+            # the same block, the blank lines left out of the reading.
+            gap_blank = prev >= 0 and nonblank_upto[ln] == nonblank_upto[prev + 1]
+            if ln != prev + 1 and not gap_blank:
                 if prev >= 0:
                     view.replace("\n", view.last_end, view.last_end)
                 view.start_block(a)

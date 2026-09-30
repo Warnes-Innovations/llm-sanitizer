@@ -237,8 +237,12 @@ def _split_short(run: str) -> str | None:
 #: A repeated separator is char_split's; a single one between words is also
 #: what snake_case and dotted names look like, so it is read as a space only
 #: in a token that holds a trigger word.
-_JOINED = re.compile(r"(?<![A-Za-z])[A-Za-z]++(?:[._\-0-9]++[A-Za-z]++)+")
-_JOINER = re.compile(r"[._\-0-9]+")
+#: Joiners: `_ . -`, digits, and — as in URLs, query strings and CSV — `+`,
+#: `%20`, `,` and `'` (review pass 8). Possessive and anchored: an earlier
+#: form backtracked on a long letter run and never finished.
+_JOIN = r"(?:[._\-0-9+,']|%20)"
+_JOINED = re.compile(rf"(?<![A-Za-z])[A-Za-z]++(?:{_JOIN}++[A-Za-z]++)+")
+_JOINER = re.compile(rf"{_JOIN}+")
 
 
 #: A lower-to-upper change inside a run: CamelCase, an identifier's shape.
@@ -249,25 +253,42 @@ _IDENT_EDGE = frozenset("_./-")
 
 
 #: A name-like token: letters, optionally joined by `_ . -` or digits.
-_IDTOK = re.compile(r"(?<![A-Za-z])[A-Za-z]++(?:[._\-0-9]++[A-Za-z]++)*")
+_IDTOK = re.compile(rf"(?<![A-Za-z])[A-Za-z]++(?:{_JOIN}++[A-Za-z]++)*")
 
 
-def _ident_token(tok: str, line: str, a: int, b: int) -> str:
+def _ident_token(tok: str, line: str, a: int, b: int, by_case: bool = True) -> str:
     """*tok* (at line[a:b]) read as words: CamelCase split at its capitals,
     a letter run inside a name or path split as a glued run, and — for a
     phrase-like join of three or more parts, two of them trigger words
     (`ignore_all_previous`) — its separators read as spaces."""
+    in_name = (a > 0 and line[a - 1] in _IDENT_EDGE) or (b < len(line) and line[b] in _IDENT_EDGE)
+    if not in_name and not _CAMEL.search(tok) and not _JOINER.search(tok):
+        return tok  # a plain word: nothing to read (most tokens; hot path)
+    return _ident_token_cached(tok, in_name, by_case)
+
+
+@functools.lru_cache(maxsize=65536)
+def _ident_token_cached(tok: str, at_edge: bool, by_case: bool) -> str:
     triggers, _ = _vocabulary()
     parts = _JOINER.split(tok)
     seps = _JOINER.findall(tok)
-    phrase = len(parts) >= 3 and len(
-        {p.lower() for p in parts if len(p) >= 4 and p.lower() in triggers}) >= 2
-    in_name = len(parts) > 1 or (a > 0 and line[a - 1] in _IDENT_EDGE) or (
-        b < len(line) and line[b] in _IDENT_EDGE)
+    low = [p.lower() for p in parts]
+    _, words = _vocabulary()
+    phrase = len(parts) >= 3 and (
+        len({p for p in low if len(p) >= 4 and p in triggers}) >= 2
+        # three short trigger words, every part a known word (`you_are_now_DAN`)
+        or (len({p for p in low if p in triggers}) >= 3 and all(p in words for p in low)))
+    in_name = len(parts) > 1 or at_edge
     out: list[str] = []
     for i, p in enumerate(parts):
         if _CAMEL.search(p) and _worth_splitting(p.lower()):
-            p = " ".join((_split_short(x) or x) if len(x) >= 7 else x for x in _CAMEL_PART.findall(p))
+            # By its capitals, or — since `DANandcan` reads as `DA` + `Nandcan`
+            # by case — by its letters alone; each is a separate reading.
+            parts_by_case = _CAMEL_PART.findall(p)
+            if by_case:
+                p = " ".join((_split_short(x) or x) if len(x) >= 7 else x for x in parts_by_case)
+            elif any(x.isupper() and len(x) > 1 for x in parts_by_case):
+                p = _split(p) or p  # only where an acronym made the case split ambiguous
         elif in_name and len(p) >= 7:
             p = _split_short(p) or p
         out.append(p)
@@ -276,19 +297,42 @@ def _ident_token(tok: str, line: str, a: int, b: int) -> str:
     return "".join(out)
 
 
-def _ident_reading(line: str) -> tuple[str, list[tuple[int, int]]]:
+_CODE_AFTER = frozenset("(.=:[")
+
+
+def _in_code_position(line: str, a: int, b: int) -> bool:
+    """A name followed by `( . = : [` or preceded by `.` is being USED as code.
+    A payload disguised as a name stands on its own in text; code around a
+    name is what turned ordinary identifiers into flagged phrases."""
+    # An index walk, not `line[b:].lstrip()`: copying the rest of the line
+    # for every name was quadratic on a long line (a minified page).
+    i = b
+    while i < len(line) and line[i] == " ":
+        i += 1
+    return (i < len(line) and line[i] in _CODE_AFTER) or (a > 0 and line[a - 1] == ".")
+
+
+def _ident_reading(line: str, by_case: bool = True) -> tuple[str, list[tuple[int, int, bool]]]:
     """*line* with each name-like token read as words, and where each
     rewritten token lies in the result."""
     out: list[str] = []
-    spans: list[tuple[int, int]] = []
+    spans: list[tuple[int, int, bool]] = []
     pos = size = 0
     for m in _IDTOK.finditer(line):
         tok = m.group(0)
-        new = _ident_token(tok, line, m.start(), m.end())
+        if _in_code_position(line, m.start(), m.end()):
+            continue  # a name used as code: `revealPasswordToggle.addEventListener(`
+        new = _ident_token(tok, line, m.start(), m.end(), by_case)
         out.append(line[pos:m.start()])
         size += m.start() - pos
         if new != tok:
-            spans.append((size, size + len(new)))
+            # Whether the name is JOINED (`_ . -`...), which is code, or holds
+            # an acronym (`OpenSSH`), which is a product name: _runs_of never
+            # grows either over neighbouring words ("export Open SSH private
+            # keys" read as an exfiltration phrase).
+            fixed = bool(_JOINER.search(tok)) or any(
+                x.isupper() and len(x) > 1 for x in _CAMEL_PART.findall(tok))
+            spans.append((size, size + len(new), fixed))
         out.append(new)
         size += len(new)
         pos = m.end()
@@ -305,21 +349,17 @@ def _plain(m: re.Match[str]) -> str:
     return _split_short(run) or run
 
 
-def _readings(line: str) -> list[tuple[str, list[tuple[int, int]] | None]]:
-    """Readings of *line*. The second item is None for a PLAIN reading, and
-    for an IDENTIFIER-shaped reading the spans of the rewritten tokens:
+_Reading = tuple[str, "tuple[tuple[int, int, bool], ...] | None"]
 
-    - plain glued runs (no CamelCase, not inside a name or path) split;
-    - name-like tokens read as words (see _ident_token);
-    - for each LONG run, the window around every trigger word, split.
-    """
-    out: list[tuple[str, list[tuple[int, int]] | None]] = []
-    plain = _RUN.sub(_plain, line)
-    if plain != line:
-        out.append((plain, None))
-    ident, spans = _ident_reading(line)
-    if spans and ident != plain:
-        out.append((ident, spans))
+
+def _readings(line: str) -> list[tuple[str, list[tuple[int, int, bool]] | None]]:
+    """Readings of *line* (see _short_readings), plus, for each LONG run, the
+    window around every trigger word, split. Not cached as a whole: the
+    long-run part stops at the scan deadline, and a cut-short result must not
+    be remembered as the answer."""
+    out: list[tuple[str, list[tuple[int, int, bool]] | None]] = [
+        (text, list(spans) if spans is not None else None) for text, spans in _short_readings(line)
+    ]
     half = _BLOCK // 2
     for m in _RUN.finditer(line):
         run = m.group(0)
@@ -340,6 +380,93 @@ def _readings(line: str) -> list[tuple[str, list[tuple[int, int]] | None]]:
     return out
 
 
+@functools.lru_cache(maxsize=16384)
+def _short_readings(line: str) -> tuple[_Reading, ...]:
+    """Readings of *line*. The second item is None for a PLAIN reading, and
+    for an IDENTIFIER-shaped reading the spans of the rewritten tokens:
+
+    - plain glued runs (no CamelCase, not inside a name or path) split;
+    - name-like tokens read as words (see _ident_token).
+
+    Pure, so cached: nested re-scans read the same lines again and again.
+    """
+    out: list[_Reading] = []
+    plain = _RUN.sub(_plain, line)
+    if plain != line:
+        out.append((plain, None))
+    seen = {line, plain}
+    for by_case in (True, False):
+        ident, spans = _ident_reading(line, by_case)
+        if spans and ident not in seen:
+            seen.add(ident)
+            out.append((ident, tuple(spans)))
+    return tuple(out)
+
+
+#: Words a run of names may grow over on each side: an injected phrase is
+#: short, and unbounded growth over a long line of words was quadratic.
+_GROW_WORDS = 12
+
+
+def _grow_left(text: str, s: int) -> int:
+    """Start of the plain words (letters, space-separated) ending at *s*.
+    A walk, not an end-anchored pattern: searching from 0 to *s* for one was
+    quadratic on a long line (review pass 8 cost probe)."""
+    j = s
+    for _ in range(_GROW_WORDS):
+        k = j
+        while k > 0 and text[k - 1] == " ":
+            k -= 1
+        w = k
+        while w > 0 and "a" <= text[w - 1].lower() <= "z":
+            w -= 1
+        if k == j or w == k or (w > 0 and (text[w - 1].isalnum() or text[w - 1] in "_.")):
+            return j
+        j = w
+    return j
+
+
+def _grow_right(text: str, e: int) -> int:
+    """End of the plain words starting at *e* (see _grow_left)."""
+    j = e
+    n = len(text)
+    for _ in range(_GROW_WORDS):
+        k = j
+        while k < n and text[k] == " ":
+            k += 1
+        w = k
+        while w < n and "a" <= text[w].lower() <= "z":
+            w += 1
+        if k == j or w == k or (w < n and (text[w].isalnum() or text[w] in "_.(")):
+            return j
+        j = w
+    return j
+
+
+
+def _runs_of(spans: list[tuple[int, int, bool]], text: str) -> list[tuple[int, int]]:
+    """Rewritten names separated only by whitespace, merged: a payload split
+    over two names (`IgnoreAll PreviousInstructions`) is still all names
+    (review pass 8). Code between names (`.`, `(`, a keyword) keeps them
+    apart."""
+    out: list[tuple[int, int, bool]] = []
+    for s, e, joined in spans:
+        if out and not text[out[-1][1]:s].strip():
+            out[-1] = (out[-1][0], e, out[-1][2] or joined)
+        else:
+            out.append((s, e, joined))
+    # And over plain words either side, separated only by spaces: a name
+    # among words (`Ignore AllPrevious Instructions`) is one phrase. Not for
+    # a run holding a joined name: `return auth_user.access_token` is code.
+    grown: list[tuple[int, int]] = []
+    for s, e, joined in out:
+        if joined:
+            grown.append((s, e))
+            continue
+        grown.append((_grow_left(text, s), _grow_right(text, e)))
+    return grown
+
+
 @register_rule
 class GluedWordsRule(BaseRule):
     rule_id = "glued_words"
@@ -353,10 +480,12 @@ class GluedWordsRule(BaseRule):
     )
 
     def detect(self, content: str, source: str = "") -> list[Finding]:
+        if deadline_exceeded():
+            return []  # before any input-proportional work (test_scan_deadline)
         lines = content.splitlines()
         changed: list[int] = []
         rebuilt: list[str] = []
-        spans_of: list[list[tuple[int, int]] | None] = []
+        spans_of: list[list[tuple[int, int, bool]] | None] = []
         for idx, line in enumerate(lines):
             if deadline_exceeded():
                 return []
@@ -372,6 +501,7 @@ class GluedWordsRule(BaseRule):
         # then a baseline only for the lines that tripped something.
         found = scan_deobfuscated("\n".join(rebuilt) + "\n", source, linear=True)
         by_line: dict[int, list[Finding]] = {}
+        runs_of: dict[int, list[tuple[int, int]]] = {}
         for f in found:
             k = f.location.line - 1
             if 0 <= k < len(changed):
@@ -384,9 +514,11 @@ class GluedWordsRule(BaseRule):
                     # That alone took ordinary library code from 77 flagged
                     # lines to 2 (review pass 7); exempting whole rules on top
                     # removed no more and lost CamelCase payloads.
+                    if k not in runs_of:
+                        runs_of[k] = _runs_of(spans, rebuilt[k])  # once per reading
                     a = f.location.column - 1
                     z = a + len(f.matched_raw)
-                    if not any(s <= a and z <= e for s, e in spans):
+                    if not any(s <= a and z <= e for s, e in runs_of[k]):
                         continue
                 by_line.setdefault(k, []).append(f)
         findings: list[Finding] = []

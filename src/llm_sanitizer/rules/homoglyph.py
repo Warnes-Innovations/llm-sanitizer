@@ -45,7 +45,8 @@ _HOMOGLYPHS: dict[str, str] = {
     "а": "a",  # U+0430 Cyrillic а → a
     "е": "e",  # U+0435 Cyrillic е → e
     "о": "o",  # U+043E Cyrillic о → o
-    "р": "r",  # U+0440 Cyrillic р → r  (visually p; kept as r per prior behavior)
+    "р": "p",  # U+0440 Cyrillic р → p (it LOOKS like p; mapping it to r let
+               # "system рrompt" pass — review pass 8; capital Р → P already)
     "с": "c",  # U+0441 Cyrillic с → c
     "х": "x",  # U+0445 Cyrillic х → x
     "у": "y",  # U+0443 Cyrillic у → y

@@ -144,11 +144,11 @@ def _read_markup_text(path: Path) -> str | None:
     if not sniff_rtf(head):
         return None
 
-    # Valid UTF-8 as UTF-8 and every other byte as Latin-1 — what an RTF
-    # reader shows for a legacy code page. Decoding with replacement turned
-    # each accented letter of a cp1252 RTF into U+FFFD in redacted output
-    # (review pass 7).
-    content = path.read_bytes().decode("utf-8", errors="latin1_fallback")
+    # Valid UTF-8 as UTF-8 and every other byte as cp1252 (Latin-1 where
+    # cp1252 has no character) — what an RTF reader shows for its default
+    # code page. Replacement turned accented letters into U+FFFD (review
+    # pass 7); Latin-1 alone turned “ ” … – into control characters (pass 8).
+    content = path.read_bytes().decode("utf-8", errors="cp1252_fallback")
     try:
         return extract_markup_text(content)
     except ImportError as exc:
@@ -443,6 +443,22 @@ def _latin1_fallback(err: UnicodeError) -> tuple[str, int]:
 
 
 codecs.register_error("latin1_fallback", _latin1_fallback)
+
+
+def _cp1252_fallback(err: UnicodeError) -> tuple[str, int]:
+    """codecs error handler: each invalid byte as cp1252 where it defines one
+    (the RTF default code page: 0x93 is “, 0x85 is …), else as Latin-1."""
+    assert isinstance(err, UnicodeDecodeError)
+    out = []
+    for b in err.object[err.start:err.end]:
+        try:
+            out.append(bytes([b]).decode("cp1252"))
+        except UnicodeDecodeError:
+            out.append(chr(b))
+    return "".join(out), err.end
+
+
+codecs.register_error("cp1252_fallback", _cp1252_fallback)
 
 
 _GAP_BYTES = frozenset({0xA0, 0x85})
