@@ -874,7 +874,10 @@ by the zero-width rule. Script, style, template, noscript, noembed, head and
 title content is never rendered, and a hidden block element breaks no word; a
 second reading drops every styled element's text, since stylesheet hiding
 cannot be resolved; a third removes paired Markdown syntax glued to a word —
-inside it, at its edge, or across words. Hidden elements are tracked with a
+inside it, at its edge, or across words. Emphasis around whole words
+(`ignore **all** previous`, `__all__`) is read per line rather than per segment,
+since nearly every Markdown chunk holds some; a `_` pair in a name position
+(`def __copy__(`, `obj.__dict__`, `__all__ =`) is left as code. Hidden elements are tracked with a
 per-tag count, so closing one is constant time however deep the nesting.
 Paragraphs are joined across a blank line inside an open tag or comment, and
 split at block-level tags as the tokenizer finds them (never inside a comment

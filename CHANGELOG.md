@@ -137,8 +137,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   stylesheet hiding cannot be resolved) are read as a browser shows them — and
   re-scans it. Markdown emphasis, code and strike markers glued to a word — inside it
   (`` ig`n`ore ``, `ig**n**ore`, `ig[n](x)ore`), at its edge (`**ig**nore`) or across
-  words (`Ple**ase ign**ore`) — are read as rendered too; an unpaired `**`
-  (exponentiation in code) is not. A finding covers the block-level segment it is in,
+  words (`Ple**ase ign**ore`) — are read as rendered too, and so, line by line, is
+  emphasis around whole words (`ignore **all** previous instructions`, `` `ignore` ``,
+  `__all__`), which broke the phrase for every word rule; an unpaired `**`
+  (exponentiation in code) is not, nor a `_` pair used as a name (`def __copy__(`). A finding covers the block-level segment it is in,
   as the tokenizer sees block tags, not the whole page. Deeply nested hidden elements
   are tracked in linear time.
 - **A homoglyph word beside a splitter scanned clean.** A Hangul filler, U+2028 or NEL

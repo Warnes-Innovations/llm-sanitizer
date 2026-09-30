@@ -100,6 +100,45 @@ def _md_glued_pairs(raw: str) -> list[re.Match[str]]:
     return out
 
 
+#: The same pairs around whole words, `_` included: CommonMark reads `__all__`
+#: as emphasis at a word boundary, though not inside a word (snake_case).
+_MD_BARE = re.compile(r"(\*{1,3}|`{1,3}|~~|_{1,3})([A-Za-z](?:[A-Za-z' -]{0,78}[A-Za-z])?)\1")
+
+
+def _md_bare_pairs(line: str) -> list[re.Match[str]]:
+    """Markdown pairs around whole words in *line* (`ignore **all** previous`):
+    no letter, digit or `_` on either side, so `3*P**2` in code is not one;
+    nor a `_` pair used as a name (`def __copy__(`, `obj.__dict__`, `__all__ =`),
+    which read as prose once stripped (`def copy(self) -> DHPrivateKey`)."""
+    out = []
+    for m in _MD_BARE.finditer(line):
+        a, b = m.start(), m.end()
+        if (a > 0 and (line[a - 1].isalnum() or line[a - 1] == "_")) or (
+                b < len(line) and (line[b].isalnum() or line[b] == "_")):
+            continue
+        if m.group(1)[0] == "_" and (
+                (a > 0 and line[a - 1] == ".")
+                or line[b:].lstrip()[:1] in ("(", "[", ".", "=")
+                or re.search(r"\b(?:def|class)\s+$", line[:a])):
+            continue
+        out.append(m)
+    return out
+
+
+def _md_strip_bare(line: str) -> str:
+    """*line* with each whole-word pair, and each glued pair, replaced by its
+    content. Only those: stripping every match took `_API_` out of
+    `OPENAI_API_KEY`."""
+    parts: list[str] = []
+    pos = 0
+    for m in _md_bare_pairs(line):
+        parts.append(line[pos:m.start()])
+        parts.append(m.group(2))
+        pos = m.end()
+    parts.append(line[pos:])
+    return _md_unglue("".join(parts))
+
+
 def _md_unglue(raw: str) -> str:
     """*raw* with each glued Markdown pair replaced by its content."""
     pairs = _md_glued_pairs(raw)
@@ -493,8 +532,9 @@ class InlineMarkupRule(BaseRule):
         # Gate on the characters, not on "a letter right before `<` or `&`":
         # a word written starting with a reference (`&#105;gnore`) has none,
         # and the tokenizer below decides whether markup joined words.
-        if ("<" not in content and "&" not in content and not _MD_IN_WORD.search(content)
-                and not _MD_LINK_IN_WORD.search(content) and not _md_glued_pairs(content)):
+        segmented = bool("<" in content or "&" in content or _MD_IN_WORD.search(content)
+                         or _MD_LINK_IN_WORD.search(content) or _md_glued_pairs(content))
+        if not segmented and not _MD_BARE.search(content):
             return []
         lines = content.splitlines()
         starts = [0]
@@ -502,7 +542,7 @@ class InlineMarkupRule(BaseRule):
             starts.append(starts[-1] + len(piece))
         units: list[tuple[int, int]] = []  # absolute (start, end) in content
         rebuilt: list[str] = []
-        for a, b in _paragraphs(lines):
+        for a, b in (_paragraphs(lines) if segmented else []):
             if deadline_exceeded():
                 return []
             p0 = starts[a]
@@ -512,6 +552,23 @@ class InlineMarkupRule(BaseRule):
                 # sees it, and a finding maps back to its segment.
                 for shown in _readings(content[s0:s1]):
                     units.append((s0, s1))
+                    rebuilt.append(shown)
+        # Emphasis around whole words (`ignore **all** previous instructions`)
+        # breaks a phrase for the word rules as surely as markup inside a word,
+        # but is read per LINE, not per segment: nearly every Markdown chunk
+        # has emphasis, and reading whole segments for it cost 7x on 103 real
+        # Markdown files (round 11). A phrase broken across lines is not read.
+        segment_units = len(units)
+        candidates = sorted({bisect.bisect_right(starts, m.start()) - 1
+                             for m in _MD_BARE.finditer(content)})
+        for idx in candidates:
+            if idx >= len(lines):
+                continue
+            line = lines[idx]
+            if _md_bare_pairs(line):
+                shown = " ".join(_md_strip_bare(line).split())
+                if shown != " ".join(line.split()):
+                    units.append((starts[idx], starts[idx] + len(line)))
                     rebuilt.append(shown)
         if not units:
             return []
@@ -533,6 +590,8 @@ class InlineMarkupRule(BaseRule):
             unit = units[k]
             if unit in flagged:
                 continue  # one finding per segment, whichever reading showed it
+            if k >= segment_units and any(a <= unit[0] and unit[1] <= b for a, b in flagged):
+                continue  # a line inside a segment already reported
             raw = content[unit[0]:unit[1]]
             if unit not in baselines:
                 # The segment FLATTENED like its readings: scanning it with its
