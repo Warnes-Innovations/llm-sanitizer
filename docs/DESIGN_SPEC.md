@@ -843,13 +843,16 @@ into words by a dynamic-programming segmentation over a vocabulary derived at
 first use from the rules themselves (the words in their patterns and lexicons),
 the semantic classifier's word features and its training sentences; the line is
 then re-scanned through `scan_deobfuscated`. Runs longer than 512 letters are
-split in windows around each trigger word. Words joined by single `_ - .` or
-digits are read as spaced when three or more parts include two trigger words.
+split in windows around each trigger word. Words joined by single `_ - . + , '`,
+`%20` or digits are read as spaced when three or more parts include two trigger
+words, or three short ones that are all known words.
 A name-shaped token (CamelCase, or a run inside a name, path or URL) is read in
 a separate identifier reading, where a finding counts only if it lies wholly
-inside one rewritten token: code around a name reads like a phrase once split
-far more often than a payload hides in a name, and a hidden payload is all in
-the name.
+inside one rewritten token — or within adjacent CamelCase names and up to 12
+plain words beside them (never for joined or acronym-bearing names) — and a name
+followed by `( . = : [` or preceded by `.` is treated as code and not read: code
+around a name reads like a phrase once split far more often than a payload hides
+in a name.
 Flags only what the split line newly trips.
 
 **Risk level:** that of the rule the split text trips.
@@ -863,9 +866,13 @@ standard library's HTML parser (linear; a regular expression for the same test
 backtracked) and read as it renders — tags and comments removed, references
 decoded, hidden elements' text left out — then re-scanned through
 `scan_deobfuscated`, where a decoded soft hyphen or zero-width space is handled
-by the zero-width rule. The raw markup is still scanned by every other rule.
-Flags only what the rendered paragraph newly trips; the paragraph is the
-finding.
+by the zero-width rule. Script, style, template, head and title content is never
+rendered; a second reading drops every styled element's text, since stylesheet
+hiding cannot be resolved; a third removes Markdown syntax inside words.
+Paragraphs are joined across a blank line inside an open tag or comment, and
+split at block-level tags (and into 64-line chunks), so a finding is its segment.
+The raw markup is still scanned by every other rule. Flags only what the
+rendered segment newly trips.
 
 **Risk level:** that of the rule the rendered text trips.
 
