@@ -197,8 +197,22 @@ def load_config(path: str | Path | None = None) -> SanitizerConfig:
             f"{cfg_path} is not a regular file (FIFO, socket, device or directory); "
             "refusing to read it as configuration."
         )
-    with open(cfg_path) as fh:
-        raw: dict[str, Any] = yaml.safe_load(fh) or {}
+    # Every way the file can fail to be a config — unreadable, not UTF-8, not
+    # YAML, not a mapping — is a ConfigError, so the CLI reports it (exit 2)
+    # rather than crashing with a traceback (0.7.2 review, pass 4). Still
+    # fail-closed: nothing here falls back to defaults.
+    try:
+        with open(cfg_path, encoding="utf-8") as fh:
+            loaded = yaml.safe_load(fh)
+    except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
+        raise ConfigError(f"{cfg_path} could not be read as YAML: {exc}") from exc
+    if loaded is None:
+        loaded = {}
+    if not isinstance(loaded, dict):
+        raise ConfigError(
+            f"{cfg_path} must be a YAML mapping of settings, not a {type(loaded).__name__}"
+        )
+    raw: dict[str, Any] = loaded
 
     sensitivity = raw.get("sensitivity", "medium")
     rules = _parse_rules(raw.get("rules", {}))

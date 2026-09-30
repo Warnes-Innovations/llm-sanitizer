@@ -87,6 +87,14 @@ def format_markdown(result: ScanResult | DirScanResult) -> str:
         f"{result.dirs_pruned} director(ies). Files beneath a pruned directory were "
         "never enumerated or scanned.\n"
     )
+    if result.walk_issues:
+        # Rendered in the DEFAULT report, not only in JSON: "no findings" over
+        # a walk that selected nothing, or skipped paths, read as a clean result
+        # (0.7.2 review, pass 4).
+        lines.append(f"**Walk issues:** {len(result.walk_issues)}\n")
+        for issue in result.walk_issues:
+            lines.append(f"- `{issue['code']}` — `{issue['path']}`: {issue['message']}")
+        lines.append("")
     lines.append("---\n")
 
     for r in result.results:
@@ -95,6 +103,9 @@ def format_markdown(result: ScanResult | DirScanResult) -> str:
             lines.append("\n---\n")
 
     if result.total_findings == 0:
-        lines.append("✅ No findings across all files.\n")
+        if result.files_scanned == 0:
+            lines.append("⚠️ No files were scanned — nothing here is a clean result.\n")
+        else:
+            lines.append("✅ No findings across all files.\n")
 
     return "\n".join(lines)

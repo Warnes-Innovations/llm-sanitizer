@@ -35,6 +35,11 @@ PLACEHOLDER_CHAR = "█"
 
 def _replacement_text(finding: Finding, mode: str) -> str:
     """The text that replaces a finding's matched span for a given mode."""
+    spaced = finding._redact_as
+    if spaced is not None and mode == "strip":
+        return spaced
+    if spaced is not None and mode == "placeholder":
+        return spaced * len(finding.matched_raw)  # same length, still a space
     if mode == "strip":
         return ""
     if mode == "placeholder":
@@ -215,6 +220,7 @@ def redact_content(
     # the text unchanged AND the payload in place (0.7.2 fix, ported from the
     # redesign branch).
     converged = not first_result.findings
+    marker_residue: list[Finding] = []
     if not rescans:
         # Single-pass modes keep the matched text as a marker, so a re-scan
         # always re-detects it and cannot be the test. Ask instead whether
@@ -229,12 +235,13 @@ def redact_content(
         never_examined = {
             integrity.INPUT_TOO_LARGE, integrity.SCAN_TIMEOUT, integrity.RESCAN_INCOMPLETE,
         }
-        converged = not [
+        marker_residue = [
             f for f in first_result.findings
             if (f.matched_raw and f.location.line != 0
                 and _finding_offset(content, f) is None)
             or f.rule in never_examined
         ]
+        converged = not marker_residue
         if converged and first_result.findings:
             # LOCATED IS NOT APPLIED. `redact()` skips an edit that overlaps an
             # earlier one, so a finding can be placeable and still left in the
@@ -243,10 +250,11 @@ def redact_content(
             # same edits — so re-scan that. Anything text-anchored left there
             # is payload the markers did not cover.
             outside = redact(content, first_result, mode="strip")
-            converged = not [
+            marker_residue = [
                 f for f in scan_text(outside, source=source, sensitivity=sensitivity).findings
                 if f.location.line != 0
             ]
+            converged = not marker_residue
     else:
         original = content
         for _ in range(max_passes - 1):
@@ -269,7 +277,14 @@ def redact_content(
             make_integrity_finding,
         )
 
-        residual = scan_text(current, source=source, sensitivity=sensitivity)
+        # Marker modes: the residue is what the checks above found — NOT a
+        # re-scan of the marked output, which in comment mode is clean by
+        # construction and silently cancelled the refusal (0.7.2 review, pass 4).
+        residual = (
+            scan_text(current, source=source, sensitivity=sensitivity)
+            if rescans
+            else first_result.model_copy(update={"findings": marker_residue})
+        )
         # A PATH-anchored finding (line 0, matched == source: the
         # legitimate-file marker, most integrity facts) describes the file and
         # has nothing in the text to remove; counting it as residue would call

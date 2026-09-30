@@ -5,8 +5,11 @@
 
 from __future__ import annotations
 
+import codecs
 import fnmatch
+import functools
 import os
+import posixpath
 import re
 import stat
 import tempfile
@@ -241,52 +244,93 @@ def path_within(inner: Path, outer: Path) -> bool:
     return False
 
 
+_MAX_GLOB_PATTERNS = 256
+
+
+class GlobTooComplexError(ValueError):
+    """A `--glob` whose brace expansion exceeds `_MAX_GLOB_PATTERNS`."""
+
+
 def _glob_patterns(glob_pattern: str, root: Path) -> list[str]:
     """Normalise a `--glob` into lower-case, root-relative patterns.
 
-    `./docs/*.md`, an absolute pattern under the root, `docs/` (a directory:
-    everything below it) and `*.{md,txt}` (simple braces) all selected NOTHING
-    and reported clean (0.7.2 review, pass 3). A leading `**/` is dropped
+    `./docs/*.md`, `.//docs`, `docs/./x`, `docs/sub/../x`, an absolute pattern
+    under the root (with or without a trailing `/`), a pattern starting with
+    the root's own name, `docs/` and `*.{md,txt}` all selected NOTHING and
+    reported clean (0.7.2 review, passes 3-4). A leading `**/` is dropped
     because every pattern already matches at any depth.
+
+    Brace expansion is CAPPED: an unbounded product of `{a,...}` groups made a
+    130-character glob expand to a million patterns and hang (review pass 4).
     """
     pat = glob_pattern.replace("\\", "/") if os.sep == "\\" else glob_pattern
+    directory = pat.endswith("/")
     if os.path.isabs(pat):
-        root_real = os.path.realpath(root)
-        cand = os.path.realpath(pat) if "*" not in pat and "?" not in pat else pat
-        for base in (root_real, str(root.absolute())):
-            if cand == base or cand.startswith(base.rstrip("/") + "/"):
-                pat = cand[len(base):].lstrip("/") or "**"
+        plain = not any(c in pat for c in "*?[{")
+        if plain and os.path.isdir(pat):
+            directory = True
+        cand = os.path.realpath(pat) if plain else posixpath.normpath(pat)
+        for base in (os.path.realpath(root), str(root.absolute())):
+            base = base.rstrip("/")
+            if cand == base:
+                pat, directory = "", True
                 break
+            if cand.startswith(base + "/"):
+                pat = cand[len(base) + 1:]
+                break
+    if pat:
+        pat = posixpath.normpath(pat)
+        if pat in (".", "/"):
+            pat = ""
     while pat.startswith("./"):
         pat = pat[2:]
-    if pat.endswith("/"):
-        pat += "**"
-    while pat.startswith("**/"):
-        pat = pat[3:]
-    expanded = [pat]
+    alternatives = [pat]
+    root_name = root.name.lower()
+    if root_name and pat.lower().startswith(root_name + "/"):
+        alternatives.append(pat[len(root_name) + 1:])
+    out: list[str] = []
     brace = re.compile(r"\{([^{}]*)\}")
-    for _ in range(8):  # bounded: nested/multiple braces
-        nxt = []
-        for p in expanded:
-            m = brace.search(p)
-            if m is None:
-                nxt.append(p)
-            else:
-                nxt.extend(p[:m.start()] + alt + p[m.end():] for alt in m.group(1).split(","))
-        if nxt == expanded:
-            break
-        expanded = nxt
-    return [p.lower() for p in expanded if p]
+    for alt in alternatives:
+        if directory:
+            alt = (alt + "/**") if alt else "**"
+        while alt.startswith("**/"):
+            alt = alt[3:]
+        expanded = [alt]
+        while True:
+            nxt: list[str] = []
+            for p in expanded:
+                m = brace.search(p)
+                if m is None:
+                    nxt.append(p)
+                else:
+                    nxt.extend(p[:m.start()] + x + p[m.end():] for x in m.group(1).split(","))
+                if len(nxt) > _MAX_GLOB_PATTERNS:
+                    raise GlobTooComplexError(
+                        f"--glob {glob_pattern!r} expands to more than "
+                        f"{_MAX_GLOB_PATTERNS} patterns; simplify it"
+                    )
+            if nxt == expanded:
+                break
+            expanded = nxt
+        out.extend(p.lower() for p in expanded if p)
+    return out or ["**"]
 
 
-def _segments_match(pat: list[str], parts: list[str]) -> bool:
-    """fnmatch per path segment, with `**` matching ZERO or more segments —
-    so `docs/**/*.md` selects `docs/a.md` as well as `docs/x/a.md`."""
-    if not pat:
-        return not parts
-    if pat[0] == "**":
-        return any(_segments_match(pat[1:], parts[i:]) for i in range(len(parts) + 1))
-    return bool(parts) and fnmatch.fnmatchcase(parts[0], pat[0]) and _segments_match(pat[1:], parts[1:])
+def _segments_match(pat: tuple[str, ...], parts: tuple[str, ...]) -> bool:
+    """fnmatch per path segment, with `**` matching ZERO or more segments — so
+    `docs/**/*.md` selects `docs/a.md` as well as `docs/x/a.md`. Memoised on
+    positions: plain backtracking was exponential in the number of `**`
+    (8 of them against a 30-deep path ran 44 s per file; review pass 4)."""
+
+    @functools.cache
+    def match(i: int, j: int) -> bool:
+        if i == len(pat):
+            return j == len(parts)
+        if pat[i] == "**":
+            return match(i + 1, j) or (j < len(parts) and match(i, j + 1))
+        return j < len(parts) and fnmatch.fnmatchcase(parts[j], pat[i]) and match(i + 1, j + 1)
+
+    return match(0, 0)
 
 
 def _glob_match(path: Path, root: Path, pattern: str) -> bool:
@@ -303,8 +347,8 @@ def _glob_match(path: Path, root: Path, pattern: str) -> bool:
         parts = path.relative_to(root).as_posix().lower().split("/")
     except ValueError:
         parts = path.as_posix().lower().split("/")
-    segs = pattern.split("/")
-    return any(_segments_match(segs, parts[i:]) for i in range(len(parts)))
+    segs = tuple(pattern.split("/"))
+    return any(_segments_match(segs, tuple(parts[i:])) for i in range(len(parts)))
 
 
 def _under_excluded(target: Path, root: Path) -> bool:
@@ -365,6 +409,43 @@ def admit_file(path: Path, root: Path | None = None) -> WalkIssue | None:
     return None
 
 
+def _read_text_exact(path: Path) -> str:
+    """Decode a text file's bytes as UTF-8 with NO newline translation.
+
+    `Path.read_text` applies universal newlines, turning a bare CR into LF. A CR
+    used as a splitter inside a word therefore reached `scan` (which reads
+    bytes) but vanished before `redact`, which then published the file
+    byte-for-byte (0.7.2 review, pass 4). Every text read goes through here so
+    both see the same text.
+    """
+    return path.read_bytes().decode("utf-8", errors="replace")
+
+
+def _latin1_fallback(err: UnicodeError) -> tuple[str, int]:
+    """codecs error handler: decode each invalid byte as its Latin-1 char."""
+    assert isinstance(err, UnicodeDecodeError)
+    return err.object[err.start:err.end].decode("latin-1"), err.end
+
+
+codecs.register_error("latin1_fallback", _latin1_fallback)
+
+
+_GAP_BYTES = frozenset({0xA0, 0x85})
+
+
+def _mixed_invalid_roles(line: bytes) -> bool:
+    """True when *line* has an invalid gap byte (0xA0/0x85) AND another
+    invalid byte — the one case the UTF-8 reading cannot separate."""
+    if _valid_utf8(line):
+        return False
+    invalid = {
+        ord(c) - 0xDC00
+        for c in line.decode("utf-8", errors="surrogateescape")
+        if 0xDC80 <= ord(c) <= 0xDCFF
+    }
+    return bool(invalid & _GAP_BYTES) and len(invalid) > 1
+
+
 def _valid_utf8(raw: bytes) -> bool:
     try:
         raw.decode("utf-8")
@@ -387,10 +468,22 @@ def legacy_byte_findings(
     from collections import Counter
 
     lines = raw.split(b"\n")
-    affected = [i for i, line in enumerate(lines) if not _valid_utf8(line)]
+    # ONLY lines where the invalid bytes play MIXED roles. The UTF-8 reading
+    # already reads every U+FFFD both removed and as a space; what it cannot do
+    # is give two invalid bytes on one line different roles. In the byte
+    # reading 0xA0 (NBSP) and 0x85 (NEL) are gaps, 0x80-0x9F and 0xAD vanish,
+    # and the rest are visible letters that hide nothing. So a line needs this
+    # reading only if it has a gap byte AND some other invalid byte. Scanning
+    # every invalid line made a clean 2.5 MB cp1252 file 5.7x slower than
+    # 0.7.1 — near the scan deadline, which refuses the file (review pass 4).
+    affected = [i for i, line in enumerate(lines) if _mixed_invalid_roles(line)]
     if not affected:
         return []
-    view = "\n".join(lines[i].decode("latin-1") for i in affected)
+    # HYBRID reading: valid UTF-8 as UTF-8, only the invalid bytes as Latin-1.
+    # A pure Latin-1 reading mangled a VALID UTF-8 splitter sitting beside an
+    # invalid byte (a UTF-8 ZWSP next to 0xAD), and the two together hid the
+    # payload from both readings (0.7.2 review, pass 4).
+    view = "\n".join(lines[i].decode("utf-8", errors="latin1_fallback") for i in affected)
     found = (scanner or Scanner()).scan(view, source=source, sensitivity=sensitivity).findings
     if not found:
         return []
@@ -852,10 +945,10 @@ def read_scannable_content(path: Path, binary_mode: str = "extract") -> str | No
             return markup
 
     if not _is_binary(path):
-        return path.read_text(encoding="utf-8", errors="replace")
+        return _read_text_exact(path)
 
     if binary_mode == "text":
-        return path.read_text(encoding="utf-8", errors="replace")
+        return _read_text_exact(path)
     if binary_mode == "extract":
         if _is_archive_bomb(path):
             return None
@@ -1279,16 +1372,15 @@ class Scanner:
         other hid from every guess made on U+FFFD alone (0.7.2 review, pass 3).
         The Latin-1 reading is what such a consumer actually reads.
         """
-        from llm_sanitizer.rules.zero_width import fffd_examined_elsewhere
-
         content = raw.decode("utf-8", errors="replace")
-        if "\ufffd" not in content or _valid_utf8(raw):
-            return self.scan(content, source=source, sensitivity=sensitivity).findings
-        token = fffd_examined_elsewhere.set(True)
-        try:
-            base = self.scan(content, source=source, sensitivity=sensitivity).findings
-        finally:
-            fffd_examined_elsewhere.reset(token)
+        # U+FFFD stays a splitter in THIS reading: a consumer decoding UTF-8
+        # with replacement sees "ign\ufffdore". Switching it off whenever the
+        # file had any invalid byte (round 4) let 221 of 256 single-byte
+        # payloads scan clean. The byte reading below is an ADDITION, never a
+        # substitute.
+        base = self.scan(content, source=source, sensitivity=sensitivity).findings
+        if _valid_utf8(raw):
+            return base
         return base + legacy_byte_findings(raw, base, source, sensitivity, self)
 
     def _scan_plain(
@@ -1372,7 +1464,7 @@ class Scanner:
             if policy == "ignore":
                 return None  # explicit fail-open opt-out (counted as skipped)
             if policy == "scan-text":
-                raw = path.read_text(encoding="utf-8", errors="replace")
+                raw = _read_text_exact(path)
                 return self.scan(raw, source=source, sensitivity=sensitivity).findings
             # "fail" (default) — fail closed. Recognized media downgrades to
             # MEDIUM only if its embedded metadata text is also clean.

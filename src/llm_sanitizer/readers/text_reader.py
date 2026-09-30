@@ -31,8 +31,10 @@ def read_text(path: str) -> str:
             "as text (issue #55)"
         )
 
-    with open(path, encoding="utf-8", errors="replace") as fh:
-        return fh.read()
+    # Bytes, decoded without newline translation — the same text the scanner
+    # reads (see scanner._read_text_exact).
+    with open(path, "rb") as fh:
+        return fh.read().decode("utf-8", errors="replace")
 
 
 def read_stdin() -> str | None:
@@ -52,6 +54,13 @@ def read_stdin() -> str | None:
     The declared encoding is still honoured for genuine text, so a pipe under a
     non-UTF-8 locale decodes as it always did rather than through ``replace``.
     """
+    return read_stdin_with_bytes()[0]
+
+
+def read_stdin_with_bytes() -> tuple[str | None, bytes]:
+    """`read_stdin`, plus the raw bytes — so a caller can also examine the
+    bytes that were not valid UTF-8 (see scanner.legacy_byte_findings); the
+    decoded text alone has already turned them into U+FFFD (0.7.2 review)."""
     raw = sys.stdin.buffer.read()
     encoding = getattr(sys.stdin, "encoding", None) or "utf-8"
-    return scannable_text(raw, encoding, origin="stdin")
+    return scannable_text(raw, encoding, origin="stdin"), raw

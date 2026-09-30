@@ -338,11 +338,23 @@ _LITERAL_ESCAPES = {"n": "\n", "r": "\r", "t": "\t", "b": "\b", "f": "\f",
 
 
 def _pdf_string_text(raw: bytes) -> str:
+    """Every plausible reading of a PDF string's bytes, joined by LF.
+
+    UTF-16 when it carries a BOM; otherwise BOTH Latin-1 (PDFDocEncoding's
+    near relative) AND UTF-8 — PyMuPDF and pdfminer read UTF-8 bytes as UTF-8,
+    so a zero-width splitter carried as UTF-8 bytes was mangled by a Latin-1-
+    only reading and the payload passed (0.7.2 review, pass 4)."""
     if raw.startswith(b"\xfe\xff"):
         return raw[2:].decode("utf-16-be", "replace")
     if raw.startswith(b"\xff\xfe"):
         return raw[2:].decode("utf-16-le", "replace")
-    return raw.decode("latin-1")
+    readings = [raw.decode("latin-1")]
+    body = raw[3:] if raw.startswith(b"\xef\xbb\xbf") else raw
+    try:
+        readings.append(body.decode("utf-8"))
+    except UnicodeDecodeError:
+        pass
+    return "\n".join(readings)
 
 
 def _literal_strings(syntax: str) -> list[str]:

@@ -9,8 +9,14 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from llm_sanitizer.redactor import REDACTION_MODES
+
+if TYPE_CHECKING:
+    from collections.abc import Sequence
+
+    from llm_sanitizer.models import Finding
 
 
 def _build_parser() -> argparse.ArgumentParser:
@@ -251,6 +257,39 @@ def _is_url(target: str) -> bool:
     return target.startswith("http://") or target.startswith("https://")
 
 
+def _read_content_raw(
+    target: str, binary_mode: str = "extract"
+) -> tuple[str | None, str, bytes | None]:
+    """`_read_content`, plus the raw bytes where there are any to examine:
+    stdin, or a text file. (A URL body arrives already decoded.)"""
+    if target == "-":
+        from llm_sanitizer.readers.text_reader import read_stdin_with_bytes
+
+        text, stdin_raw = read_stdin_with_bytes()
+        return text, "<stdin>", stdin_raw
+    content, source = _read_content(target, binary_mode=binary_mode)
+    raw: bytes | None = None
+    if content is not None and not _is_url(target):
+        from llm_sanitizer.scanner import _is_binary
+
+        if not _is_binary(Path(target)):
+            raw = Path(target).read_bytes()
+    return content, source, raw
+
+
+def _hidden_in_invalid_bytes(
+    raw: bytes | None, findings: Sequence[Finding], source: str, sensitivity: str
+) -> list[Finding]:
+    """Findings only the Latin-1 reading of *raw*'s invalid bytes shows."""
+    if not raw:
+        return []
+    from llm_sanitizer.scanner import _valid_utf8, legacy_byte_findings
+
+    if _valid_utf8(raw):
+        return []
+    return legacy_byte_findings(raw, list(findings), source, sensitivity)
+
+
 def _read_content(target: str, binary_mode: str = "extract") -> tuple[str | None, str]:
     """Read content from target (file/URL/stdin). Returns (content, source_label).
     content is None when target is a file sniffed as binary and binary_mode
@@ -364,7 +403,7 @@ def _cmd_scan(args: argparse.Namespace) -> None:
                 sys.exit(3)
             result = _filter_by_min_risk(file_result, args.min_risk)  # type: ignore[assignment]
         else:
-            content, source = _read_content(target, binary_mode=binary_mode)
+            content, source, raw = _read_content_raw(target, binary_mode=binary_mode)
             if content is None:
                 print(
                     f"[llm-sanitize] Skipped: no scannable text content "
@@ -372,10 +411,16 @@ def _cmd_scan(args: argparse.Namespace) -> None:
                     file=sys.stderr,
                 )
                 sys.exit(3)
-            result = scanner.scan(  # type: ignore[assignment]
-                content, source=source, sensitivity=args.sensitivity
-            )
-            result = _filter_by_min_risk(result, args.min_risk)  # type: ignore[assignment]
+            single = scanner.scan(content, source=source, sensitivity=args.sensitivity)
+            extra = _hidden_in_invalid_bytes(raw, single.findings, source, args.sensitivity)
+            if extra:
+                from llm_sanitizer.scanner import _build_summary
+
+                merged = [*single.findings, *extra]
+                single = single.model_copy(
+                    update={"findings": merged, "summary": _build_summary(merged)}
+                )
+            result = _filter_by_min_risk(single, args.min_risk)  # type: ignore[assignment]
     except ExtractorUnavailableError as exc:
         # A required extractor/backend is missing for content in this scan.
         # Fail fast and loud — do not degrade or partially report.
@@ -384,7 +429,7 @@ def _cmd_scan(args: argparse.Namespace) -> None:
             file=sys.stderr,
         )
         sys.exit(2)
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         print(f"[llm-sanitize] Error: {exc}", file=sys.stderr)
         sys.exit(2)
 
@@ -424,7 +469,7 @@ def _cmd_redact(args: argparse.Namespace) -> None:
         elif output == "-" or target == "-" or _is_url(target):
             # stdin/stdout and URLs have no file to copy through, so the
             # binary contract below doesn't apply: read, redact, print.
-            content, source = _read_content(target, binary_mode=binary_mode)
+            content, source, raw = _read_content_raw(target, binary_mode=binary_mode)
             if content is None:
                 print(
                     f"[llm-sanitize] Refused: no scannable text content "
@@ -439,6 +484,17 @@ def _cmd_redact(args: argparse.Namespace) -> None:
             redacted, scan_result = redact_content(
                 content, mode=args.mode, source=source, sensitivity=sensitivity
             )
+            if _hidden_in_invalid_bytes(raw, scan_result.findings, source, sensitivity):
+                # Same refusal as redact_file (hidden-in-invalid-bytes): the
+                # UTF-8 text cannot be redacted to remove what only the byte
+                # reading shows (0.7.2 review, pass 4: `-o -` skipped it).
+                print(
+                    "[llm-sanitize] Refused: the bytes that are not valid UTF-8 "
+                    "read, in Latin-1, as text that trips a detection rule; "
+                    "nothing was written.",
+                    file=sys.stderr,
+                )
+                sys.exit(3)
             if not_converged(scan_result):
                 # Print and write NOTHING: the text still carries a finding.
                 print(f"[llm-sanitize] Refused: {refusal_for(scan_result)[1]}", file=sys.stderr)

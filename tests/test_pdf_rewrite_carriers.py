@@ -182,7 +182,7 @@ def test_utf16_hex_string_payload_is_caught(tmp_path: Path) -> None:
     string `<FEFF...>` never matched a rule."""
     src = tmp_path / "in.pdf"
     build_pdf(src)
-    hexed = ("﻿" + SIDE).encode("utf-16-be").hex().upper()
+    hexed = ("\ufeff" + SIDE).encode("utf-16-be").hex().upper()
     _with_catalog_object(src, f"<< /Note <{hexed}> >>")
     _never_ok_with_payload(src, tmp_path)
 

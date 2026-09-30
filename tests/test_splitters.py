@@ -78,7 +78,7 @@ def test_every_format_character_is_a_splitter() -> None:
 
 def test_innocent_emoji_and_scripts_stay_clean() -> None:
     """Control: legitimate uses of these characters are not findings."""
-    for text in ("I ❤️ this\n", "family \U0001F468‍\U0001F469\n",
+    for text in ("I ❤\ufe0f this\n", "family \U0001F468\u200d\U0001F469\n",
                  "مرحبا ؜عالم\n",
                  "caf\xe9 na\xefve\n"):
         assert scan_text(text).summary.max_risk is None, repr(text)

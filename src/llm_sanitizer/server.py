@@ -177,7 +177,7 @@ def scan_dir(
         )
     except ExtractorUnavailableError as exc:
         return json.dumps({"status": "error", "message": exc.hint})
-    except (OSError, RuntimeError) as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         return json.dumps({"status": "error", "message": str(exc)})
 
     return format_json(result)

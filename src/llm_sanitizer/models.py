@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from enum import IntEnum
 from typing import Any
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, PrivateAttr, model_validator
 
 
 def _package_version() -> str:
@@ -86,6 +86,12 @@ class Finding(BaseModel):
     matched_raw: str = ""
     context: FindingContext
     explanation: str
+    #: How redaction should replace this span in strip/placeholder mode, when
+    #: not the mode's default: " " for a hidden-space splitter the zero-width
+    #: rule found read AS A SPACE. Removing it instead glued the words into
+    #: text nothing detects, and published that (0.7.2 review, pass 4).
+    #: Private: never serialised, never part of the report.
+    _redact_as: str | None = PrivateAttr(default=None)
 
     @model_validator(mode="after")
     def _default_matched_raw(self) -> "Finding":
