@@ -13,7 +13,7 @@ optionally produces redacted output.
 
 ### Detection
 
-Twelve pluggable detection rules covering:
+Pluggable detection rules (`llm-sanitize list-rules` shows the current set) covering:
 - Instruction override phrases ("ignore previous instructions…")
 - Zero-width character encoding (hidden text via invisible Unicode)
 - HTML/markdown hidden content (white-on-white, display:none)
@@ -26,6 +26,10 @@ Twelve pluggable detection rules covering:
 - Agent-specific config patterns in unexpected locations
 - Character-splitting obfuscation (`i g n o r e`, `ignore___all`) —
   reconstructed and re-scanned
+- Glued words (`ignoreallpreviousinstructions`) — split back into words and
+  re-scanned
+- Markup inside words (`ig<b></b>nore`, `ig&shy;nore`) — read as rendered and
+  re-scanned
 - **Semantic-intent injection** — a local, no-egress n-gram classifier that
   catches *keyword-less* rephrasings (role reassignment, verbatim/echo
   exfiltration, supersede-prior-guidance) the pattern rules miss

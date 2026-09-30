@@ -242,7 +242,7 @@ llm-sanitizer/
 │   ├── cli.py                  # Human CLI (argparse subcommands)
 │   ├── scanner.py              # Core scan engine + rule registry
 │   ├── redactor.py             # Redaction engine (strip/comment/highlight)
-│   ├── rules/                  # Detection rule modules (12 registered rules)
+│   ├── rules/                  # Detection rule modules (list them with `llm-sanitize list-rules`)
 │   │   ├── __init__.py         # Rule registry + base class
 │   │   ├── _rescan.py          # Shared de-obfuscate-then-re-scan helper
 │   │   ├── instruction_override.py
@@ -255,6 +255,8 @@ llm-sanitizer/
 │   │   ├── base64_encoded.py
 │   │   ├── homoglyph.py
 │   │   ├── char_split.py
+│   │   ├── glued_words.py      # Phrases written without word breaks
+│   │   ├── inline_markup.py    # Tags / character references inside words
 │   │   ├── semantic_intent.py  # Classifier-backed rule (see semantic/)
 │   │   ├── agent_config.py
 │   │   ├── archive.py          # Archive-specific findings
@@ -698,7 +700,7 @@ Summary: 2 findings (1 critical, 1 high) in 1 file
 
 ## Detection Rules
 
-Twelve pluggable rules, each independently toggleable with configurable
+Pluggable rules, each independently toggleable with configurable
 sensitivity. The registry is the source of truth — `llm-sanitize list-rules`
 prints the live inventory as JSON, and CI asserts the count; if this section
 disagrees with that output, the output is right:
@@ -831,6 +833,31 @@ nothing rather than failing the scan.
 
 **Risk level:** medium — deliberately lower than the keyword rules. This is a
 fuzzy signal meant to prompt review, not to hard-block.
+
+### Rule 13: Glued Words
+
+A phrase written with its word breaks removed (`ignoreallpreviousinstructions`,
+`IgnoreAllPrevious...`) — directly, or reached by the zero-width rule's
+"splitters removed" reading. Each run of letters holding a trigger word is split
+into words by a dynamic-programming segmentation over a vocabulary derived at
+first use from the rules themselves (the words in their patterns and lexicons)
+and the semantic classifier's word features; the line is then re-scanned
+through `scan_deobfuscated`. Runs longer than 512 letters are split in windows
+around each trigger word. Flags only what the split line newly trips.
+
+**Risk level:** that of the rule the split text trips.
+
+### Rule 14: Inline Markup Inside Words
+
+A tag, comment or character reference between two word characters
+(`ig<b></b>nore`, `ig&shy;nore`, `ig<!---->nore`) disappears when rendered, in a
+browser and in Markdown. The line is read as it renders — tags removed,
+references decoded — and re-scanned through `scan_deobfuscated`, where a decoded
+soft hyphen or zero-width space is then handled by the zero-width rule. The raw
+markup is still scanned by every other rule. Flags only what the rendered line
+newly trips.
+
+**Risk level:** that of the rule the rendered text trips.
 
 ---
 
