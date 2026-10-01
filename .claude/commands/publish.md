@@ -1,1 +1,0 @@
-../../.github/prompts/publish.prompt.md

@@ -305,10 +305,11 @@ llm-sanitizer/
 ├── scripts/                    # Maintenance scripts (see `ls scripts/`)
 ├── .github/
 │   ├── workflows/              # CI, publish (Trusted Publishing), CodeQL, ...
-│   ├── instructions/
-│   │   └── release-workflow.instructions.md   # Release rules
-│   └── prompts/
-│       └── publish.prompt.md   # THE release procedure, step by step
+│   └── instructions/
+│       └── release-workflow.instructions.md   # THE release rules for this repo;
+│                                              # the step-by-step driver is the
+│                                              # shared global /publish prompt,
+│                                              # which reads this file
 ├── pyproject.toml
 ├── LICENSE                     # AGPL-3.0-or-later
 ├── README.md
