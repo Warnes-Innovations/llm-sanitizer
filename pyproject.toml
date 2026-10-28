@@ -116,7 +116,7 @@ dev = [
 	# The [pdf-redact] extra's backend. Declared here as well so CI actually
 	# RUNS tests/test_pdf_in_place_redaction.py instead of skipping it — an
 	# optional feature whose tests silently skip in CI is an untested feature.
-	"pymupdf>=1.24,<2",
+	"pymupdf>=1.24,<3",
 ]
 
 [project.optional-dependencies]
@@ -162,7 +162,7 @@ rar = ["libarchive-c>=5.0,<6"]
 # AGPL-3.0, which matches this project's own license; it is an OPTIONAL extra
 # so that a consumer who cannot take an AGPL dependency still gets the
 # security fix, just without the binary rewrite.
-pdf-redact = ["pymupdf>=1.24,<2"]
+pdf-redact = ["pymupdf>=1.24,<3"]
 
 [project.urls]
 Homepage = "https://github.com/Warnes-Innovations/llm-sanitizer"
